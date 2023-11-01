@@ -3,18 +3,29 @@ requires = ["pdm-pep517>=1.0"]
 build-backend = "pdm.pep517.api"
 
 [project]
-name = "python-template"
+name = "mit-ub"
 description = ""
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 authors = [
     {name = "Scott Chase Waggener", email = "tidalpaladin@protonmail.com"},
 ]
-dependencies = []
+dependencies = [
+    "torch-dicom @ git+https://github.com/medcognetics/torch-dicom.git",
+    "gpvit @ git+https://github.com/TidalPaladin/gpvit.git",
+    "torch>=2.1.0",
+    "torchvision>=0.16.0",
+    "einops>=0.7.0",
+    "pydicom>=2.4.3",
+    "deep-helpers @ git+https://github.com/TidalPaladin/deep-helpers.git",
+]
 readme = "README.md"
 license = {text = "Apache"}
 dynamic = ["version"]
 
 [project.optional-dependencies]
+train = [
+    "ssl-tasks @ git+https://github.com/TidalPaladin/ssl-tasks.git",
+]
 
 [tool.autoflake]
 remove-all-unused-imports = true
@@ -38,8 +49,6 @@ line_length = 119
 lines_after_imports = 2
 multi_line_output = 3
 use_parentheses = false
-
-[tool.pyright]
 
 [tool.pdm]
 version = { source = "scm" }
