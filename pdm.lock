@@ -6,7 +6,7 @@ groups = ["default", "quality", "test", "train"]
 cross_platform = true
 static_urls = false
 lock_version = "4.3"
-content_hash = "sha256:f589740ac45c444884acff1d81b1ec4d7e815b9c71b237c1485029c3e461f66a"
+content_hash = "sha256:40076cb824b61d3fec2f3cb43e11d42d735f8b539c4c18f1a8bb7135c1efccc2"
 
 [[package]]
 name = "aiohttp"
@@ -700,10 +700,10 @@ files = [
 
 [[package]]
 name = "gpvit"
-version = "0.1.dev11+gf1859e4"
+version = "0.1.dev13+g2fa3ce4"
 requires_python = ">=3.10"
 git = "https://github.com/TidalPaladin/gpvit.git"
-revision = "f1859e4c8e68b7302fbfdbd44e5964070c5d59f7"
+revision = "2fa3ce4dbbf66fe7125cbbe3584afbbf39fb9c3e"
 summary = ""
 dependencies = [
     "einops>=0.7.0",
@@ -2000,10 +2000,10 @@ files = [
 
 [[package]]
 name = "ssl-tasks"
-version = "0.1.dev5+gccb0076"
+version = "0.1.dev6+g7205f51"
 requires_python = ">=3.8"
 git = "https://github.com/TidalPaladin/ssl-tasks.git"
-revision = "ccb00765c15bc25c5c544b5e482734fb0d396603"
+revision = "7205f517f66c21382af3ad7d5a72d45c08429cc3"
 summary = ""
 dependencies = [
     "deep-helpers @ git+https://github.com/TidalPaladin/deep-helpers.git",

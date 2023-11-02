@@ -17,6 +17,7 @@ dependencies = [
     "einops>=0.7.0",
     "pydicom>=2.4.3",
     "deep-helpers @ git+https://github.com/TidalPaladin/deep-helpers.git",
+    "registry @ git+https://github.com/TidalPaladin/callable-registry.git",
 ]
 readme = "README.md"
 license = {text = "Apache"}
@@ -73,7 +74,12 @@ quality = [
 markers = [
   "ci_skip",
 ]
-filterwarnings = []
+filterwarnings = [
+  "ignore:.*Trying to infer the `batch_size` from an ambiguous collection.*:",
+  "ignore:.*does not have many workers which may be a bottleneck.*:",
+  "ignore:.*torchvision.transforms.v2 namespaces are still.*:",
+  "ignore:.*GPU available but not used.*:",
+]
 
 # Sample script config
 #[project.scripts]
