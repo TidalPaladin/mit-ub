@@ -4,12 +4,11 @@ from typing import Final
 from gpvit import GPViT
 from registry import Registry
 
-from .head import MLPMixerPooling
 
 
 BACKBONES = Registry("backbones")
 
-_IMAGE_SIZES: Final = ((256, 256),)
+_IMAGE_SIZES: Final = ((512, 384),)
 _PATCH_SIZES: Final = ((16, 16),)
 _DEPTH_WIDTH: Final = {"base": (12, 768)}
 _MIXER: Final = (
@@ -39,4 +38,4 @@ for img_size, patch_size, mixer, (size_name, (depth, width)) in product(
         group_tokens_as_kv=False,
     )
 
-__all__ = ["BACKBONES", "MLPMixerPooling"]
+__all__ = ["BACKBONES"]
