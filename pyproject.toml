@@ -10,7 +10,7 @@ authors = [
     {name = "Scott Chase Waggener", email = "tidalpaladin@protonmail.com"},
 ]
 dependencies = [
-    "torch-dicom @ git+https://github.com/medcognetics/torch-dicom.git",
+    "torch-dicom @ git+https://github.com/medcognetics/torch-dicom.git@feat/png",
     "gpvit @ git+https://github.com/TidalPaladin/gpvit.git",
     "torch>=2.1.0",
     "torchvision>=0.16.0",
@@ -25,6 +25,7 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 train = [
+    "gpvit[train] @ git+https://github.com/TidalPaladin/gpvit.git",
     "ssl-tasks @ git+https://github.com/TidalPaladin/ssl-tasks.git",
 ]
 
@@ -82,5 +83,5 @@ filterwarnings = [
 ]
 
 # Sample script config
-#[project.scripts]
-#foo = "project.cli.__main__:main"
+[project.scripts]
+train = "deep_helpers.cli:main"
