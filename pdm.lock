@@ -5,7 +5,7 @@
 groups = ["default", "quality", "test", "train"]
 strategy = ["cross_platform"]
 lock_version = "4.4.1"
-content_hash = "sha256:345f123d20e41959dae6a884c6e57599fc6601cebf613ad01295ed6cb1de801c"
+content_hash = "sha256:ebfe58fc560e03f2389ae3aca008389d6bb8529ebc8e02cb88d1fd149af34f71"
 
 [[package]]
 name = "aiohttp"
@@ -2105,7 +2105,7 @@ summary = ""
 dependencies = [
     "deep-helpers @ git+https://github.com/TidalPaladin/deep-helpers.git",
     "pytorch-lightning>=2.1.2",
-    "torch-dicom @ git+https://github.com/medcognetics/torch-dicom.git",
+    "torch-dicom @ git+https://github.com/medcognetics/torch-dicom.git@6e1ffff779e8312013a2dfb10150ee04441d1c13",
 ]
 
 [[package]]

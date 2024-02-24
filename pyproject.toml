@@ -26,6 +26,7 @@ dependencies = [
     "dicom-utils @ git+https://github.com/medcognetics/dicom-utils.git",
     "torch-dicom[datamodule] @ git+https://github.com/medcognetics/torch-dicom.git",
     "jsonargparse[signatures]",
+    "triton>=2.0",
 ]
 readme = "README.md"
 license = {text = "Apache"}
@@ -81,6 +82,7 @@ quality = [
 [tool.pytest.ini_options]
 markers = [
   "ci_skip",
+  "slow",
 ]
 filterwarnings = []
 
