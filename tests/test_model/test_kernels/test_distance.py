@@ -11,12 +11,21 @@ def reference_forward(a: Tensor, b: Tensor) -> Tensor:
 
 
 @pytest.mark.slow
-def test_euclidean_distance_forward():
+@pytest.mark.parametrize(
+    "dtype,tol",
+    [
+        pytest.param(torch.float16, 1e-2, id="float16"),
+        pytest.param(torch.float32, 1e-4, id="float32"),
+        pytest.param(torch.bfloat16, 1e-1, id="bfloat16"),
+    ],
+)
+def test_euclidean_distance_forward(dtype: torch.dtype, tol: float):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
     torch.manual_seed(0)
-    a = torch.randn((512, 2), device="cuda", dtype=torch.float16)
-    b = torch.randn((512, 2), device="cuda", dtype=torch.float16)
+    a = torch.randn((512, 2), device="cuda", dtype=dtype)
+    b = torch.randn((512, 2), device="cuda", dtype=dtype)
     torch_output = reference_forward(a, b)
     triton_output = euclidean_distance(a, b)
-    assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0)
+    assert triton_output.dtype == dtype
+    assert torch.allclose(triton_output, torch_output, atol=tol, rtol=0)

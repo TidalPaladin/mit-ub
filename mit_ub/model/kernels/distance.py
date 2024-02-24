@@ -64,6 +64,7 @@ def _euclidean_distance_kernel_fwd(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    DTYPE: tl.constexpr,
 ):
     # Map program ids `pid` to the block of C it should compute.
     # This is done in a grouped ordering to promote L2 data reuse.
@@ -99,6 +100,7 @@ def _euclidean_distance_kernel_fwd(
 
     # Outer loop over the K dimension.
     # We will accumulate the sum of squared differences across K blocks and then take the square root.
+    # NOTE: We accumulate into float32 because sqrt is not supported for float16
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for _ in range(0, K, BLOCK_SIZE_K):
         # Load blocks of A and B into shared memory for this chunk of K
@@ -118,7 +120,7 @@ def _euclidean_distance_kernel_fwd(
         b_block_ptr = tl.advance(b_block_ptr, (0, BLOCK_SIZE_K))
 
     # Apply the square root and store the result
-    c = tl.sqrt(accumulator).to(tl.float16)
+    c = tl.sqrt(accumulator).to(DTYPE)
 
     c_block_ptr = tl.make_block_ptr(
         base=c_ptr,
@@ -233,6 +235,16 @@ class _EuclideanDistance(Function):
         def grid(META):
             return (triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),)
 
+        match a.dtype:
+            case torch.float16:
+                dtype = tl.float16
+            case torch.float32:
+                dtype = tl.float32
+            case torch.bfloat16:
+                dtype = tl.bfloat16
+            case _:
+                raise ValueError(f"Unsupported dtype: {a.dtype}")
+
         cast(Any, _euclidean_distance_kernel_fwd)[grid](
             a,
             b,
@@ -246,6 +258,7 @@ class _EuclideanDistance(Function):
             b.stride(1),
             c.stride(0),
             c.stride(1),
+            DTYPE=dtype,
         )
         ctx.save_for_backward(a, b, c)
 
