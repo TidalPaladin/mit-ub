@@ -138,3 +138,7 @@ coverage.xml
 *.orig.*
 **/version.py
 .pdm-python
+
+# Ignore benchmark outputs
+*.csv
+*.html
