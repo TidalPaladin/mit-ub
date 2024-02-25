@@ -6,6 +6,7 @@ from mit_ub.model.kernels.distance import _reference_forward, euclidean_distance
 
 @pytest.mark.slow
 @pytest.mark.parametrize("has_weight", [False, True])
+@pytest.mark.parametrize("k", [1, 2, 3])
 @pytest.mark.parametrize(
     "dtype,tol",
     [
@@ -14,15 +15,15 @@ from mit_ub.model.kernels.distance import _reference_forward, euclidean_distance
         pytest.param(torch.bfloat16, 1e-1, id="bfloat16"),
     ],
 )
-def test_euclidean_distance_forward(dtype: torch.dtype, tol: float, has_weight: bool):
+def test_euclidean_distance_forward(dtype: torch.dtype, tol: float, has_weight: bool, k: int):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
     torch.manual_seed(0)
 
-    L, K = 256, 2
-    a = torch.randn((L, K), device="cuda", dtype=dtype)
-    b = torch.randn((L, K), device="cuda", dtype=dtype)
-    w = torch.randn((K,), device="cuda", dtype=dtype).abs() if has_weight else None
+    L = 256
+    a = torch.randn((L, k), device="cuda", dtype=dtype)
+    b = torch.randn((L, k), device="cuda", dtype=dtype)
+    w = torch.randn((k,), device="cuda", dtype=dtype).abs() if has_weight else None
 
     torch_output = _reference_forward(a, b, w)
     triton_output = euclidean_distance(a, b, w)
