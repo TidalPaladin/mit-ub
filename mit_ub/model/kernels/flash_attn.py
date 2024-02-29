@@ -10,27 +10,27 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-from .helpers import TENSOR_CORE_K, BoundaryCheckHeuristic, PowerOfTwoHeuristic
+from .helpers import TENSOR_CORE_K, IsBlockMultiple, PowerOfTwoHeuristic
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_M": 16, "BLOCK_N": 16}),
-        triton.Config({"BLOCK_M": 32, "BLOCK_N": 32}),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}),
-    ],
-    key=["D", "M", "N"],
-)
+#@triton.autotune(
+#    configs=[
+#        triton.Config({"BLOCK_M": 16, "BLOCK_N": 16}),
+#        triton.Config({"BLOCK_M": 32, "BLOCK_N": 32}),
+#        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}),
+#        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}),
+#    ],
+#    key=["D", "M", "N"],
+#)
 @triton.heuristics(
     {
         # BLOCK_HEADDIM must go up to the size of D.
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
-        #"BLOCK_M": PowerOfTwoHeuristic("M", min_val=TENSOR_CORE_K, max_val=32),
-        #"BLOCK_N": PowerOfTwoHeuristic("N", min_val=TENSOR_CORE_K, max_val=32),
-        "EVEN_M": BoundaryCheckHeuristic("M", "BLOCK_M", disable=False),
-        "EVEN_N": BoundaryCheckHeuristic("N", "BLOCK_N", disable=False),
-        "EVEN_D": BoundaryCheckHeuristic("D", "BLOCK_HEADDIM", disable=False),
+        "BLOCK_M": PowerOfTwoHeuristic("M", min_val=TENSOR_CORE_K, max_val=32),
+        "BLOCK_N": PowerOfTwoHeuristic("N", min_val=TENSOR_CORE_K, max_val=32),
+        "EVEN_D": IsBlockMultiple("D", "BLOCK_HEADDIM"),
+        "BHM": lambda args: args["B"] * args["H"] * args["M"],
+        "BHN": lambda args: args["B"] * args["H"] * args["N"],
         "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
         #"num_warps": lambda args: 4,
     }
@@ -82,9 +82,9 @@ def _fwd_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
     # Heuristics for boundary checks
-    EVEN_M: tl.constexpr,
-    EVEN_N: tl.constexpr,
     EVEN_D: tl.constexpr,
+    BHM: tl.constexpr,
+    BHN: tl.constexpr,
 ):
     # Grid is (L, H * B)
     # Q of shape (B, Lq, H, D)
@@ -98,8 +98,6 @@ def _fwd_kernel(
     offset_bh = tl.program_id(1)
     offset_b = offset_bh // H
     offset_h = offset_bh % H
-    BHN = B * H * N
-    BHM = B * H * M
 
     #if EVEN_M: 
     #    tl.multiple_of(M, BLOCK_M)
@@ -164,7 +162,9 @@ def _fwd_kernel(
     q = tl.load(Q_ptrs, boundary_check=(1, 0))
     q = (q * softmax_scale).to(k_p.dtype.element_ty)
 
-    for _ in range(0, N, BLOCK_N):
+    for n in range(0, N, BLOCK_N):
+        tl.multiple_of(n, BLOCK_N)
+
         # Load K and V blocks into SRAM
         k = tl.load(K_block_ptr, boundary_check=(1, 0))
         v = tl.load(V_block_ptr, boundary_check=(1, 0))
@@ -184,8 +184,9 @@ def _fwd_kernel(
 
         # Apply the scaling constant to the accumulated values to rescale previous contributions
         # and accumulate the weighted values for this block of V
-        value_accumulator = (value_accumulator * alpha[:, None]) + tl.dot(
-            p.to(v_p.dtype.element_ty), v, allow_tf32=True
+        value_accumulator = (
+            (value_accumulator * alpha[:, None]) 
+            + tl.dot(p.to(v_p.dtype.element_ty), v, allow_tf32=True)
         )
 
         # Compute the softmax denominator for each query, applying the maximum logit offset to the existing denominator
@@ -221,6 +222,7 @@ def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None):
     assert k.shape == (batch, seqlen_k, nheads, d)
     assert v.shape == (batch, seqlen_k, nheads, d)
     assert d <= 128, "FlashAttention only support head dimensions up to 128"
+    assert d >= 16, "FlashAttention requires head dimensions of at least 16"
     assert q.dtype == k.dtype == v.dtype, "All tensors must have the same type"
     assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
     assert q.is_cuda and k.is_cuda and v.is_cuda
