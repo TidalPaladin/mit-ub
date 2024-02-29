@@ -8,7 +8,15 @@ from mit_ub.model.kernels.distance import _reference_forward, euclidean_distance
 @pytest.mark.parametrize("matmul", [False, True], ids=["pointwise", "matmul"])
 @pytest.mark.parametrize("has_weight", [False, True], ids=["no_weight", "with_weight"])
 @pytest.mark.parametrize("with_self", [True, False], ids=["self", "cross"])
-@pytest.mark.parametrize("k", [1, 2, 3], ids=["k=1", "k=2", "k=3"])
+@pytest.mark.parametrize(
+    "L, k",
+    [
+        (16, 1),
+        (24, 2),
+        (32, 3),
+    ],
+    ids=["L=16,k=1", "L=24,k=2", "L=32,k=3"],
+)
 @pytest.mark.parametrize(
     "dtype,tol",
     [
@@ -18,13 +26,12 @@ from mit_ub.model.kernels.distance import _reference_forward, euclidean_distance
     ],
 )
 def test_euclidean_distance_forward(
-    dtype: torch.dtype, tol: float, has_weight: bool, k: int, matmul: bool, with_self: bool
+    dtype: torch.dtype, tol: float, has_weight: bool, k: int, matmul: bool, with_self: bool, L: int
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
     torch.manual_seed(0)
 
-    L = 16
     a = torch.randn((L, k), device="cuda", dtype=dtype)
     b = a if with_self else torch.randn((L, k), device="cuda", dtype=dtype)
     w = torch.randn((k,), device="cuda", dtype=dtype).abs() if has_weight else None

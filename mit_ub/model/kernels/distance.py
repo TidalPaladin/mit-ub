@@ -10,7 +10,7 @@ from torch import Tensor
 from torch.autograd import Function
 from tqdm import tqdm
 
-from .helpers import TENSOR_CORE_K, BoundaryCheckHeuristic, PowerOfTwoHeuristic
+from .helpers import TENSOR_CORE_K, IsBlockMultiple, PowerOfTwoHeuristic
 
 
 # We expect K to be relatively small (probably length 1-3) for spacial coordinates
@@ -21,9 +21,9 @@ from .helpers import TENSOR_CORE_K, BoundaryCheckHeuristic, PowerOfTwoHeuristic
         "BLOCK_SIZE_M": PowerOfTwoHeuristic("M", min_val=TENSOR_CORE_K, max_val=64),
         "BLOCK_SIZE_N": PowerOfTwoHeuristic("N", min_val=TENSOR_CORE_K, max_val=64),
         "GROUP_SIZE_M": lambda args: 8,
-        "EVEN_M": BoundaryCheckHeuristic("M", "BLOCK_SIZE_M", disable=False),
-        "EVEN_N": BoundaryCheckHeuristic("N", "BLOCK_SIZE_N", disable=False),
-        "EVEN_K": BoundaryCheckHeuristic("K", "BLOCK_SIZE_K", disable=False),
+        "EVEN_M": IsBlockMultiple("M", "BLOCK_SIZE_M"),
+        "EVEN_N": IsBlockMultiple("N", "BLOCK_SIZE_N"),
+        "EVEN_K": IsBlockMultiple("K", "BLOCK_SIZE_K"),
     }
 )
 @triton.jit
@@ -173,9 +173,9 @@ def _euclidean_distance_kernel_fwd_pointwise(
         "BLOCK_SIZE_M": PowerOfTwoHeuristic("M", min_val=TENSOR_CORE_K, max_val=64),
         "BLOCK_SIZE_N": PowerOfTwoHeuristic("N", min_val=TENSOR_CORE_K, max_val=64),
         "GROUP_SIZE_M": lambda args: 8,
-        "EVEN_M": BoundaryCheckHeuristic("M", "BLOCK_SIZE_M"),
-        "EVEN_N": BoundaryCheckHeuristic("N", "BLOCK_SIZE_N"),
-        "EVEN_K": BoundaryCheckHeuristic("K", "BLOCK_SIZE_K"),
+        "EVEN_M": IsBlockMultiple("M", "BLOCK_SIZE_M"),
+        "EVEN_N": IsBlockMultiple("N", "BLOCK_SIZE_N"),
+        "EVEN_K": IsBlockMultiple("K", "BLOCK_SIZE_K"),
     }
 )
 @triton.jit
@@ -218,6 +218,7 @@ def _euclidean_distance_kernel_fwd_matmul(
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
     pid_m = first_pid_m + (pid % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
+    tl.device_print("m", EVEN_M)
 
     # Initialize block pointers for A B and C
     a_block_ptr = tl.make_block_ptr(
