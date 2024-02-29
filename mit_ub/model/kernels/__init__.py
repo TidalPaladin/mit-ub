@@ -1,10 +1,10 @@
 from .distance import euclidean_distance
-from .helpers import TENSOR_CORE_K, BoundaryCheckHeuristic, PowerOfTwoHeuristic
+from .helpers import TENSOR_CORE_K, IsBlockMultiple, PowerOfTwoHeuristic
 
 
 __all__ = [
     "euclidean_distance",
-    "BoundaryCheckHeuristic",
+    "IsBlockMultiple",
     "PowerOfTwoHeuristic",
     "TENSOR_CORE_K",
 ]

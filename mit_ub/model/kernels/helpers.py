@@ -12,24 +12,27 @@ TENSOR_CORE_K: Final = 16
 
 
 @dataclass
-class BoundaryCheckHeuristic:
-    r"""Heuristic to determine if block pointers need boundary checks based on the
-    input dimensions and block dimensions.
+class IsBlockMultiple:
+    r"""Heuristic to determine if a dimension is a multiple of a block dimension.
 
     Args:
-        dims: Input dimension name
-        block_dims: Block dimension name
+        dim: Input dimension name
+        block_dim: Block dimension name
+        override_val: If set the heuristic will always return this value
 
     Returns:
-        True if boundary checks are needed, False otherwise.
+        True if the dimension is a multiple of the block dimension, False otherwise.
+        If the `override_val` is set, it will be returned instead.
     """
 
     dim: str
     block_dim: str
-    disable: bool = False
+    override_val: bool | None = None
 
     def __call__(self, args: Dict[str, Any]) -> bool:
-        return self.disable or args[self.dim] % args[self.block_dim] != 0
+        if self.override_val is not None:
+            return self.override_val
+        return args[self.dim] % args[self.block_dim] == 0
 
 
 @dataclass
