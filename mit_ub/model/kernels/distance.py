@@ -10,42 +10,24 @@ from torch import Tensor
 from torch.autograd import Function
 from tqdm import tqdm
 
+from .helpers import TENSOR_CORE_K, BoundaryCheckHeuristic, PowerOfTwoHeuristic
+
 
 # We expect K to be relatively small (probably length 1-3) for spacial coordinates
-@triton.autotune(
-    configs=[
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 1, "GROUP_SIZE_M": 8}, num_stages=3, num_warps=8
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 2, "GROUP_SIZE_M": 8}, num_stages=3, num_warps=8
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 2, "GROUP_SIZE_M": 8}, num_stages=3, num_warps=8
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 2, "GROUP_SIZE_M": 16}, num_stages=3, num_warps=8
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 2, "GROUP_SIZE_M": 16}, num_stages=3, num_warps=8
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 4, "GROUP_SIZE_M": 8}, num_stages=3, num_warps=8
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 4, "GROUP_SIZE_M": 16}, num_stages=3, num_warps=8
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 4, "GROUP_SIZE_M": 8}, num_stages=3, num_warps=8
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 4, "GROUP_SIZE_M": 16}, num_stages=3, num_warps=8
-        ),
-    ],
-    key=["M", "N", "K"],
+@triton.heuristics(
+    {
+        "WITH_SELF": lambda args: (args["a_ptr"] is args["b_ptr"]) and (args["M"] == args["N"]),
+        "BLOCK_SIZE_K": PowerOfTwoHeuristic("K", min_val=1, max_val=16),
+        "BLOCK_SIZE_M": PowerOfTwoHeuristic("M", min_val=TENSOR_CORE_K, max_val=64),
+        "BLOCK_SIZE_N": PowerOfTwoHeuristic("N", min_val=TENSOR_CORE_K, max_val=64),
+        "GROUP_SIZE_M": lambda args: 8,
+        "EVEN_M": BoundaryCheckHeuristic("M", "BLOCK_SIZE_M", disable=False),
+        "EVEN_N": BoundaryCheckHeuristic("N", "BLOCK_SIZE_N", disable=False),
+        "EVEN_K": BoundaryCheckHeuristic("K", "BLOCK_SIZE_K", disable=False),
+    }
 )
 @triton.jit
-def _euclidean_distance_kernel_fwd(
+def _euclidean_distance_kernel_fwd_pointwise(
     # Pointers to matrices
     a_ptr: tl.tensor,
     b_ptr: tl.tensor,
@@ -68,6 +50,11 @@ def _euclidean_distance_kernel_fwd(
     GROUP_SIZE_M: tl.constexpr,
     DTYPE: tl.constexpr,
     HAS_WEIGHTS: tl.constexpr,
+    WITH_SELF: tl.constexpr,
+    EVEN_M: tl.constexpr,
+    EVEN_N: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    INIT_ACCUMULATOR: tl.constexpr,
 ):
     # Map program ids `pid` to the block of C it should compute.
     pid = tl.program_id(axis=0)
@@ -80,9 +67,7 @@ def _euclidean_distance_kernel_fwd(
     pid_m = first_pid_m + (pid % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    # Create block pointers for A and B
-    # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
-    # `b_ptrs` is a block of [BLOCK_SIZE_N, BLOCK_SIZE_K] pointers
+    # Create block pointers for A B and C
     a_block_ptr = tl.make_block_ptr(
         base=a_ptr,
         shape=(M, K),
@@ -99,6 +84,14 @@ def _euclidean_distance_kernel_fwd(
         block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_K),
         order=(1, 0),
     )
+    c_block_ptr = tl.make_block_ptr(
+        base=c_ptr,
+        shape=(M, N),
+        strides=(stride_cm, stride_cn),
+        offsets=(pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N),
+        block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N),
+        order=(1, 0),
+    )
 
     # Create block pointers for weights if it is provided
     if HAS_WEIGHTS:
@@ -113,14 +106,34 @@ def _euclidean_distance_kernel_fwd(
     else:
         w_block_ptr = w_ptr
 
+    # Set up the accumulator. If requested we will load the initial value from C.
+    if INIT_ACCUMULATOR:
+        accumulator = tl.load(
+            c_block_ptr,
+            boundary_check=(0, 1) if not (EVEN_M and EVEN_N) else (0,) if not EVEN_M else (1,) if not EVEN_N else None,
+        ).to(tl.float32)
+    else:
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
     # Outer loop over the K dimension.
     # We will accumulate the sum of squared differences across K blocks and then take the square root.
     # NOTE: We accumulate into float32 because sqrt is not supported for float16
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for _ in range(0, K, BLOCK_SIZE_K):
         # Load blocks of A and B into shared memory for this chunk of K
-        a = tl.load(a_block_ptr, boundary_check=(0, 1))
-        b = tl.load(b_block_ptr, boundary_check=(0, 1))
+        a = tl.load(
+            a_block_ptr,
+            boundary_check=(0, 1) if not (EVEN_M and EVEN_K) else (0,) if not EVEN_M else (1,) if not EVEN_K else None,
+        )
+        b = (
+            tl.load(
+                b_block_ptr,
+                boundary_check=(
+                    (0, 1) if not (EVEN_M and EVEN_K) else (0,) if not EVEN_N else (1,) if not EVEN_K else None
+                ),
+            )
+            if not WITH_SELF
+            else a
+        )
 
         # Compute the squared differences
         diff = a[:, None] - b[None, :]
@@ -128,7 +141,7 @@ def _euclidean_distance_kernel_fwd(
 
         # Load the weight matrix if it is provided and apply it to the squared differences
         if HAS_WEIGHTS:
-            w = tl.load(w_block_ptr)
+            w = tl.load(w_block_ptr, boundary_check=(0,) if not EVEN_K else None).to(tl.float32)
             diff = diff * w
             w_block_ptr = tl.advance(w_block_ptr, (BLOCK_SIZE_K,))
 
@@ -140,12 +153,89 @@ def _euclidean_distance_kernel_fwd(
 
         # Advance block pointers
         a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
-        b_block_ptr = tl.advance(b_block_ptr, (0, BLOCK_SIZE_K))
+        b_block_ptr = tl.advance(b_block_ptr, (0, BLOCK_SIZE_K)) if not WITH_SELF else a_block_ptr
 
     # Apply the square root and store the result
     c = tl.sqrt(accumulator).to(DTYPE)
 
     # Write out accumulated result to block of C
+    tl.store(
+        c_block_ptr,
+        c,
+        boundary_check=(0, 1) if not (EVEN_M and EVEN_N) else (0,) if not EVEN_M else (1,) if not EVEN_N else None,
+    )
+
+
+@triton.heuristics(
+    {
+        "WITH_SELF": lambda args: (args["a_ptr"] is args["b_ptr"]) and (args["M"] == args["N"]),
+        "BLOCK_SIZE_K": PowerOfTwoHeuristic("K", min_val=TENSOR_CORE_K, max_val=16),
+        "BLOCK_SIZE_M": PowerOfTwoHeuristic("M", min_val=TENSOR_CORE_K, max_val=64),
+        "BLOCK_SIZE_N": PowerOfTwoHeuristic("N", min_val=TENSOR_CORE_K, max_val=64),
+        "GROUP_SIZE_M": lambda args: 8,
+        "EVEN_M": BoundaryCheckHeuristic("M", "BLOCK_SIZE_M"),
+        "EVEN_N": BoundaryCheckHeuristic("N", "BLOCK_SIZE_N"),
+        "EVEN_K": BoundaryCheckHeuristic("K", "BLOCK_SIZE_K"),
+    }
+)
+@triton.jit
+def _euclidean_distance_kernel_fwd_matmul(
+    # Pointers to matrices
+    a_ptr: tl.tensor,
+    b_ptr: tl.tensor,
+    c_ptr: tl.tensor,
+    w_ptr: tl.tensor,
+    # Matrix dimensions
+    M: int,
+    N: int,
+    K: int,
+    stride_am: int,
+    stride_ak: int,
+    stride_bn: int,
+    stride_bk: int,
+    stride_cm: int,
+    stride_cn: int,
+    stride_w: int,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    DTYPE: tl.constexpr,
+    HAS_WEIGHTS: tl.constexpr,
+    WITH_SELF: tl.constexpr,
+    EVEN_M: tl.constexpr,
+    EVEN_N: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    INIT_ACCUMULATOR: tl.constexpr,
+):
+    # Map program ids `pid` to the block of C it should compute.
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + (pid % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    # Initialize block pointers for A B and C
+    a_block_ptr = tl.make_block_ptr(
+        base=a_ptr,
+        shape=(M, K),
+        strides=(stride_am, stride_ak),
+        offsets=(pid_m * BLOCK_SIZE_M, 0),
+        block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_K),
+        order=(1, 0),
+    )
+    b_block_ptr = tl.make_block_ptr(
+        base=b_ptr,
+        shape=(K, N),
+        strides=(stride_bk, stride_bn),
+        offsets=(0, pid_n * BLOCK_SIZE_N),
+        block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_N),
+        order=(0, 1),
+    )
     c_block_ptr = tl.make_block_ptr(
         base=c_ptr,
         shape=(M, N),
@@ -154,20 +244,129 @@ def _euclidean_distance_kernel_fwd(
         block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N),
         order=(1, 0),
     )
-    tl.store(c_block_ptr, c, boundary_check=(0, 1))
+
+    # Create block pointers for weights and load if it is provided
+    if HAS_WEIGHTS:
+        w_block_ptr = tl.make_block_ptr(
+            base=w_ptr,
+            shape=(K,),
+            strides=(stride_w,),
+            offsets=(0,),
+            block_shape=(BLOCK_SIZE_K,),
+            order=(0,),
+        )
+    else:
+        w_block_ptr = w_ptr
+
+    # Set up the accumulator. If requested we will load the initial value from C.
+    if INIT_ACCUMULATOR:
+        accumulator = tl.load(
+            c_block_ptr,
+            boundary_check=(0, 1) if not (EVEN_M and EVEN_N) else (0,) if not EVEN_M else (1,) if not EVEN_N else None,
+        ).to(tl.float32)
+    else:
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+    # Outer loop over the K dimension.
+    # We will accumulate the sum of squared differences across K blocks and then take the square root.
+    # NOTE: We accumulate into float32 because sqrt is not supported for float16
+    for _ in range(0, K, BLOCK_SIZE_K):
+        # Load A and B blocks
+        a = tl.load(
+            a_block_ptr,
+            boundary_check=(0, 1) if not (EVEN_M and EVEN_K) else (0,) if not EVEN_M else (1,) if not EVEN_K else None,
+        )
+        b = tl.load(
+            b_block_ptr,
+            boundary_check=(0, 1) if not (EVEN_K and EVEN_N) else (1,) if not EVEN_K else (0,) if not EVEN_N else None,
+        )
+
+        # Load the weight matrix if it is provided and apply it to a
+        if HAS_WEIGHTS:
+            w = tl.load(w_block_ptr, boundary_check=(0,) if not EVEN_K else None).to(tl.float32)
+            w = tl.math.sqrt(w)
+            a = a * w[None, :]
+            b = b * w[:, None]
+            w_block_ptr = tl.advance(w_block_ptr, (BLOCK_SIZE_K,))
+
+        # Compute a @ b.T
+        ab = tl.dot(a, b)
+
+        # In the WITH_SELF case we can speed things up by reusing the result of a @ a.T and
+        # computing diag(a @ a.T) == diag(b @ b.T) in one step
+        if WITH_SELF:
+            # Compute diag(a @ a.T) == diag(b @ b.T)
+            block_idx = tl.arange(0, BLOCK_SIZE_M)
+            diag = tl.where(
+                block_idx[:, None] == block_idx,
+                ab,
+                tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_M), dtype=tl.float32),
+            )
+            diag = tl.sum(diag, 1)
+            diag_a = diag
+            diag_b = diag
+
+        else:
+            # Compute diag(a @ a.T)
+            block_idx = tl.arange(0, BLOCK_SIZE_M)
+            diag_a = tl.where(
+                block_idx[:, None] == block_idx,
+                tl.dot(a, tl.trans(a)),
+                tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_M), dtype=tl.float32),
+            )
+            diag_a = tl.sum(diag_a, 1)
+
+            # Compute diag(b @ b.T)
+            block_idx = tl.arange(0, BLOCK_SIZE_N)
+            diag_b = tl.where(
+                block_idx[:, None] == block_idx,
+                tl.dot(tl.trans(b), b),
+                tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_N), dtype=tl.float32),
+            )
+            diag_b = tl.sum(diag_b, 1)
+
+        # Update accumulator - diag(a @ a.T) - 2 * a @ b + diag(b @ b.T)
+        accumulator += diag_a[:, None] - 2 * ab + diag_b[None, :]
+
+        # Advance block pointers
+        a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
+        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_SIZE_K, 0))
+
+    # Apply the square root and store the result
+    c = tl.sqrt(accumulator).to(DTYPE)
+
+    # Write out accumulated result to block of C
+    tl.store(
+        c_block_ptr,
+        c,
+        boundary_check=(0, 1) if not (EVEN_M and EVEN_N) else (0,) if not EVEN_M else (1,) if not EVEN_N else None,
+    )
 
 
 class _EuclideanDistance(Function):
 
     @staticmethod
-    def forward(ctx, a: Tensor, b: Tensor, w: Tensor | None = None) -> Tensor:
+    def forward(
+        ctx,
+        a: Tensor,
+        b: Tensor,
+        w: Tensor | None = None,
+        c: Tensor | None = None,
+        matmul: bool | None = None,
+    ) -> Tensor:
         assert a.shape[-1] == b.shape[-1], "Incompatible dimensions"
         assert a.is_contiguous(), "Matrix A must be contiguous"
         assert b.is_contiguous(), "Matrix B must be contiguous"
 
         M, K = a.shape
         N, K = b.shape
-        c = torch.empty((M, N), device=a.device, dtype=a.dtype)
+        has_accumulator = c is not None
+        c = c if c is not None else torch.empty((M, N), device=a.device, dtype=a.dtype)
+        assert c.shape == (M, N), "Invalid output matrix shape"
+
+        # The matmul implementation is faster for K >= 2
+        # Otherwise pointwise is slightly faster
+        matmul = matmul if matmul is not None else K >= 2
 
         if w is None:
             w = torch.empty((K,), device=a.device, dtype=a.dtype)
@@ -190,7 +389,8 @@ class _EuclideanDistance(Function):
             case _:
                 raise ValueError(f"Unsupported dtype: {a.dtype}")
 
-        cast(Any, _euclidean_distance_kernel_fwd)[grid](
+        fn = _euclidean_distance_kernel_fwd_matmul if matmul else _euclidean_distance_kernel_fwd_pointwise
+        cast(Any, fn)[grid](
             a,
             b,
             c,
@@ -207,13 +407,20 @@ class _EuclideanDistance(Function):
             w.stride(0),
             DTYPE=dtype,
             HAS_WEIGHTS=has_weights,
+            INIT_ACCUMULATOR=has_accumulator,
         )
         # ctx.save_for_backward(a, b, c)
 
         return c
 
 
-def euclidean_distance(a: Tensor, b: Tensor, w: Tensor | None = None) -> Tensor:
+def euclidean_distance(
+    a: Tensor,
+    b: Tensor,
+    w: Tensor | None = None,
+    c: Tensor | None = None,
+    matmul: bool = True,
+) -> Tensor:
     r"""Compute the Euclidean distance between two matrices of shape (M, K) and (N, K).
 
     The result is a matrix of shape (M, N) where each element (i, j) is the Euclidean distance between
@@ -226,24 +433,31 @@ def euclidean_distance(a: Tensor, b: Tensor, w: Tensor | None = None) -> Tensor:
         a: First input tensor
         b: Second input tensor
         w: Optional weight tensor of shape. If not provided, the kernel will compute the unweighted Euclidean distance.
+        c: Optional initial value for the output tensor. If not provided, the kernel will allocate a new tensor.
 
     Shapes:
         * ``a`` - :math:`(M, K)`
         * ``b`` - :math:`(N, K)`
         * ``w`` - :math:`(K,)`
+        * ``c`` - :math:`(M, N)`
         * Output - :math:`(M, N)`
     """
-    return cast(Tensor, _EuclideanDistance.apply(a, b, w))
+    return cast(Tensor, _EuclideanDistance.apply(a, b, w, c, matmul))
 
 
-def _reference_forward(a: Tensor, b: Tensor, w: Tensor | None = None) -> Tensor:
+def _reference_forward(a: Tensor, b: Tensor, w: Tensor | None = None, c: Tensor | None = None) -> Tensor:
     assert a.shape[-1] == b.shape[-1]
-    K = a.shape[-1]
+    M, K = a.shape
+    N, K = b.shape
+    has_c = c is not None
+    c = c if has_c else torch.empty((M, N), device=a.device, dtype=a.dtype)
     if w is not None:
         assert w.shape == (K,)
-        result = (a.view(-1, 1, K) - b.view(1, -1, K)).pow(2).mul(w.view(1, 1, K)).sum(-1).sqrt()
+        result = (a.view(-1, 1, K) - b.view(1, -1, K)).pow(2).mul(w.view(1, 1, K)).sum(-1).sqrt_()
     else:
-        result = (a.view(-1, 1, K) - b.view(1, -1, K)).pow(2).sum(-1).sqrt()
+        result = (a.view(-1, 1, K) - b.view(1, -1, K)).pow(2).sum(-1).sqrt_()
+    if has_c:
+        result.add_(c)
     return result
 
 
@@ -257,12 +471,13 @@ def _benchmark(
     bar: tqdm | None = None,
     verbose: bool = False,
     weighted: bool = False,
+    with_self: bool = False,
 ):
     if verbose:
         with tqdm.external_write_mode():
             print(f"Running benchmark for M={M}, N={N}, K={K}, provider={provider}")
     a = torch.randn((M, K), device="cuda", dtype=torch.float16)
-    b = torch.randn((N, K), device="cuda", dtype=torch.float16)
+    b = a if with_self else torch.randn((N, K), device="cuda", dtype=torch.float16)
     w = torch.randn((K,), device="cuda", dtype=torch.float16).abs() if weighted else None
     quantiles = [0.5, 0.2, 0.8]
 
@@ -274,9 +489,9 @@ def _benchmark(
                 warmup=warmup,
                 rep=rep,
             )
-        case "triton":
+        case "triton" | "triton-matmul":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: euclidean_distance(a, b, w),
+                lambda: euclidean_distance(a, b, w, matmul="matmul" in provider),
                 quantiles=quantiles,
                 warmup=warmup,
                 rep=rep,
@@ -308,12 +523,14 @@ def parse_args() -> Namespace:
     parser.add_argument(
         "-w", "--weighted", default=False, action="store_true", help="Compute weighted euclidean distance"
     )
+    parser.add_argument("--with-self", default=False, action="store_true", help="Use A and B as the same tensor")
     return parser.parse_args()
 
 
 def main(args: Namespace):
     test_configs = list(range(args.step, args.MN + 1, args.step))
-    total_tests = 2 * len(test_configs) * len(args.K)
+    providers = ["cublas", "triton", "triton-matmul"]
+    total_tests = len(providers) * len(test_configs) * len(args.K)
     bar = tqdm(total=total_tests, desc="Benchmarking")
 
     for k in args.K:
@@ -324,15 +541,25 @@ def main(args: Namespace):
                 x_names=["M", "N"],
                 x_vals=test_configs,
                 line_arg="provider",
-                line_vals=["cublas", "triton"],
-                line_names=["cuBLAS", "Triton"],
-                styles=[("green", "-"), ("blue", "-")],
+                line_vals=providers,
+                line_names=["cuBLAS", "Triton", "Triton (Matmul)"],
+                styles=[("green", "-"), ("blue", "-"), ("orange", "-")],
                 xlabel=xlabel,
                 ylabel="TFLOPS",
                 plot_name=plot_name,
                 args={},
             )
-        )(partial(_benchmark, warmup=args.warmup, rep=args.rep, bar=bar, verbose=args.verbose, weighted=args.weighted))
+        )(
+            partial(
+                _benchmark,
+                warmup=args.warmup,
+                rep=args.rep,
+                bar=bar,
+                verbose=args.verbose,
+                weighted=args.weighted,
+                with_self=args.with_self,
+            )
+        )
         df: Any = benchmark.run(
             show_plots=False,
             print_data=False,
