@@ -60,3 +60,46 @@ class PowerOfTwoHeuristic:
         if self.previous and pow_2 > dim:
             pow_2 //= 2
         return max(self.min_val, min(self.max_val, pow_2))
+
+
+@dataclass
+class DivisorHeuristic:
+    r"""Heuristic to select the largest power of two that is a divisor of a given dimension.
+
+    Args:
+        dim: Input dimension name
+        min_val: Minimum value for the output
+        max_val: Maximum value for the output
+        error_on_non_divisor: If True, an error is raised if the dimension is not a power of two.
+
+    Returns:
+        The next power of two for the given dimension.
+
+    Example:
+        >>> DivisorHeuristic("dim", 16, 64)({"dim": 128})
+        64
+        >>> DivisorHeuristic("dim", 16, 64)({"dim": 100})
+        16
+        >>> DivisorHeuristic("dim", 16, 64)({"dim": 32})
+        32
+    """
+
+    dim: str
+    min_val: int = 1
+    max_val: int = sys.maxsize
+    error_on_non_divisor: bool = False
+
+    def __call__(self, args: Dict[str, Any]) -> int:
+        dim = args[self.dim]
+        largest_divisor_pow_2 = self.min_val
+        while dim % (largest_divisor_pow_2 * 2) == 0:
+            largest_divisor_pow_2 *= 2
+
+        result = min(self.max_val, largest_divisor_pow_2)
+        if self.error_on_non_divisor and dim % result != 0:
+            raise ValueError(
+                f"Cannot find a divisor for {self.dim} of size {dim} within the range "
+                f"[{self.min_val}, {self.max_val}] that is a power of two. "
+            )
+
+        return result
