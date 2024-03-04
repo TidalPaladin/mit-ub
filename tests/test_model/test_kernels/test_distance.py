@@ -20,8 +20,8 @@ from mit_ub.model.kernels.distance import _reference_forward, euclidean_distance
 @pytest.mark.parametrize(
     "dtype,tol",
     [
-        pytest.param(torch.float16, 1e-2, id="float16"),
         pytest.param(torch.float32, 1e-2, id="float32"),
+        pytest.param(torch.float16, 1e-2, id="float16"),
         pytest.param(torch.bfloat16, 1e-1, id="bfloat16"),
     ],
 )
@@ -39,7 +39,7 @@ def test_euclidean_distance_forward(
     torch_output = _reference_forward(a, b, w)
     triton_output = euclidean_distance(a, b, w, matmul=matmul)
     assert triton_output.dtype == dtype
-    assert torch.allclose(triton_output, torch_output, atol=tol, rtol=0)
+    torch.testing.assert_close(triton_output, torch_output, rtol=0, atol=tol)
 
 
 # @pytest.mark.slow

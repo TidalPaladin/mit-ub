@@ -29,10 +29,10 @@ from .helpers import TENSOR_CORE_K, IsBlockMultiple, PowerOfTwoHeuristic
 @triton.jit
 def _euclidean_distance_kernel_fwd_pointwise(
     # Pointers to matrices
-    a_ptr: tl.tensor,
-    b_ptr: tl.tensor,
-    c_ptr: tl.tensor,
-    w_ptr: tl.tensor,
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    w_ptr,
     # Matrix dimensions
     M: int,
     N: int,
@@ -48,7 +48,6 @@ def _euclidean_distance_kernel_fwd_pointwise(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
-    DTYPE: tl.constexpr,
     HAS_WEIGHTS: tl.constexpr,
     WITH_SELF: tl.constexpr,
     EVEN_M: tl.constexpr,
@@ -156,7 +155,7 @@ def _euclidean_distance_kernel_fwd_pointwise(
         b_block_ptr = tl.advance(b_block_ptr, (0, BLOCK_SIZE_K)) if not WITH_SELF else a_block_ptr
 
     # Apply the square root and store the result
-    c = tl.sqrt(accumulator).to(DTYPE)
+    c = tl.sqrt(accumulator).to(c_ptr.dtype.element_ty)
 
     # Write out accumulated result to block of C
     tl.store(
@@ -164,6 +163,43 @@ def _euclidean_distance_kernel_fwd_pointwise(
         c,
         boundary_check=(0, 1) if not (EVEN_M and EVEN_N) else (0,) if not EVEN_M else (1,) if not EVEN_N else None,
     )
+
+
+@triton.jit
+def _euclidean_distance_matmul_inner(
+    a: tl.tensor,
+    b: tl.tensor,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    WITH_SELF: tl.constexpr,
+):
+    # Compute a @ b.T
+    ab = tl.dot(a, b)
+
+    # In the WITH_SELF case we can speed things up by reusing the result of a @ a.T and
+    # computing diag(a @ a.T) == diag(b @ b.T) in one step
+    if WITH_SELF:
+        # Compute diag(a @ a.T) == diag(b @ b.T)
+        block_idx = tl.arange(0, BLOCK_SIZE_M)
+        diag_a = tl.where(block_idx[:, None] == block_idx, ab, float(0.0))
+        diag_a = tl.sum(diag_a, 1)
+        diag_b = diag_a
+
+    # NOTE: It is faster to do (a * a).sum(1) but that seems to increase the output
+    # error by more than the expected tolerance, even when casting a to float32.
+    else:
+        # Compute diag(a @ a.T)
+        block_idx = tl.arange(0, BLOCK_SIZE_M)
+        diag_a = tl.where(block_idx[:, None] == block_idx, tl.dot(a, tl.trans(a)), float(0.0))
+        diag_a = tl.sum(diag_a, 1)
+
+        # Compute diag(b @ b.T)
+        block_idx = tl.arange(0, BLOCK_SIZE_N)
+        diag_b = tl.where(block_idx[:, None] == block_idx, tl.dot(tl.trans(b), b), float(0.0))
+        diag_b = tl.sum(diag_b, 1)
+
+    # Update accumulator -> diag(a @ a.T) - 2 * a @ b + diag(b @ b.T)
+    return diag_a[:, None] - 2 * ab + diag_b[None, :]
 
 
 @triton.heuristics(
@@ -181,10 +217,10 @@ def _euclidean_distance_kernel_fwd_pointwise(
 @triton.jit
 def _euclidean_distance_kernel_fwd_matmul(
     # Pointers to matrices
-    a_ptr: tl.tensor,
-    b_ptr: tl.tensor,
-    c_ptr: tl.tensor,
-    w_ptr: tl.tensor,
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    w_ptr,
     # Matrix dimensions
     M: int,
     N: int,
@@ -200,7 +236,6 @@ def _euclidean_distance_kernel_fwd_matmul(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
-    DTYPE: tl.constexpr,
     HAS_WEIGHTS: tl.constexpr,
     WITH_SELF: tl.constexpr,
     EVEN_M: tl.constexpr,
@@ -218,7 +253,6 @@ def _euclidean_distance_kernel_fwd_matmul(
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
     pid_m = first_pid_m + (pid % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
-    tl.device_print("m", EVEN_M)
 
     # Initialize block pointers for A B and C
     a_block_ptr = tl.make_block_ptr(
@@ -290,51 +324,14 @@ def _euclidean_distance_kernel_fwd_matmul(
             b = b * w[:, None]
             w_block_ptr = tl.advance(w_block_ptr, (BLOCK_SIZE_K,))
 
-        # Compute a @ b.T
-        ab = tl.dot(a, b)
-
-        # In the WITH_SELF case we can speed things up by reusing the result of a @ a.T and
-        # computing diag(a @ a.T) == diag(b @ b.T) in one step
-        if WITH_SELF:
-            # Compute diag(a @ a.T) == diag(b @ b.T)
-            block_idx = tl.arange(0, BLOCK_SIZE_M)
-            diag = tl.where(
-                block_idx[:, None] == block_idx,
-                ab,
-                tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_M), dtype=tl.float32),
-            )
-            diag = tl.sum(diag, 1)
-            diag_a = diag
-            diag_b = diag
-
-        else:
-            # Compute diag(a @ a.T)
-            block_idx = tl.arange(0, BLOCK_SIZE_M)
-            diag_a = tl.where(
-                block_idx[:, None] == block_idx,
-                tl.dot(a, tl.trans(a)),
-                tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_M), dtype=tl.float32),
-            )
-            diag_a = tl.sum(diag_a, 1)
-
-            # Compute diag(b @ b.T)
-            block_idx = tl.arange(0, BLOCK_SIZE_N)
-            diag_b = tl.where(
-                block_idx[:, None] == block_idx,
-                tl.dot(tl.trans(b), b),
-                tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_N), dtype=tl.float32),
-            )
-            diag_b = tl.sum(diag_b, 1)
-
-        # Update accumulator - diag(a @ a.T) - 2 * a @ b + diag(b @ b.T)
-        accumulator += diag_a[:, None] - 2 * ab + diag_b[None, :]
+        accumulator += _euclidean_distance_matmul_inner(a, b, BLOCK_SIZE_M, BLOCK_SIZE_N, WITH_SELF)
 
         # Advance block pointers
         a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
         b_block_ptr = tl.advance(b_block_ptr, (BLOCK_SIZE_K, 0))
 
     # Apply the square root and store the result
-    c = tl.sqrt(accumulator).to(DTYPE)
+    c = tl.sqrt(accumulator).to(c_ptr.dtype.element_ty)
 
     # Write out accumulated result to block of C
     tl.store(
@@ -406,7 +403,6 @@ class _EuclideanDistance(Function):
             c.stride(0),
             c.stride(1),
             w.stride(0),
-            DTYPE=dtype,
             HAS_WEIGHTS=has_weights,
             INIT_ACCUMULATOR=has_accumulator,
         )
