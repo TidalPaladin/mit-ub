@@ -1,19 +1,19 @@
 import math
-from typing import Final, Tuple
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from functools import partial
 from pathlib import Path
-from typing import Any, cast
-from tqdm import tqdm
+from typing import Any
 
 import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-from .helpers import TENSOR_CORE_K, IsBlockMultiple, PowerOfTwoHeuristic
+from tqdm import tqdm
+
+from .helpers import TENSOR_CORE_K, DivisorHeuristic, IsBlockMultiple, PowerOfTwoHeuristic
 
 
-#@triton.autotune(
+# @triton.autotune(
 #    configs=[
 #        triton.Config({"BLOCK_M": 16, "BLOCK_N": 16}),
 #        triton.Config({"BLOCK_M": 32, "BLOCK_N": 32}),
@@ -21,21 +21,20 @@ from .helpers import TENSOR_CORE_K, IsBlockMultiple, PowerOfTwoHeuristic
 #        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}),
 #    ],
 #    key=["D", "M", "N"],
-#)
+# )
 @triton.heuristics(
     {
         # BLOCK_HEADDIM must go up to the size of D.
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
-        "BLOCK_M": PowerOfTwoHeuristic("M", min_val=TENSOR_CORE_K, max_val=32),
-        "BLOCK_N": PowerOfTwoHeuristic("N", min_val=TENSOR_CORE_K, max_val=32),
+        "BLOCK_M": DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=128),
+        "BLOCK_N": DivisorHeuristic("N", min_val=TENSOR_CORE_K, max_val=64),
         "EVEN_D": IsBlockMultiple("D", "BLOCK_HEADDIM"),
         "BHM": lambda args: args["B"] * args["H"] * args["M"],
         "BHN": lambda args: args["B"] * args["H"] * args["N"],
         "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
-        #"num_warps": lambda args: 4,
     }
 )
-@triton.jit
+@triton.jit(debug=True)
 def _fwd_kernel(
     # Inputs
     q_p,
@@ -99,15 +98,10 @@ def _fwd_kernel(
     offset_b = offset_bh // H
     offset_h = offset_bh % H
 
-    #if EVEN_M: 
-    #    tl.multiple_of(M, BLOCK_M)
-    #if EVEN_N:
-    #    tl.multiple_of(N, BLOCK_N)
-    #if EVEN_D:
-    #    tl.multiple_of(D, BLOCK_HEADDIM)
-
     # Initialize pointers
     # This program's block of queries will be loaded by this program for processing and kept there.
+    # NOTE: Block pointers may contribute to register spilling due to int64 indexing. Checking the
+    # compiled kernel.n_spills indiciates no spilling - is this an issue or not?
     Q_ptrs = tl.make_block_ptr(
         base=q_p + offset_b * stride_q_b + offset_h * stride_q_h,
         shape=(BHM, D),
@@ -159,15 +153,13 @@ def _fwd_kernel(
     value_accumulator = tl.zeros([BLOCK_M, BLOCK_HEADDIM], dtype=tl.float32)
 
     # Q gets loaded into SRAM and stays there. Pre-apply the softmax scale
-    q = tl.load(Q_ptrs, boundary_check=(1, 0))
+    q = tl.load(Q_ptrs, boundary_check=(1,) if not EVEN_D else None)
     q = (q * softmax_scale).to(k_p.dtype.element_ty)
 
-    for n in range(0, N, BLOCK_N):
-        tl.multiple_of(n, BLOCK_N)
-
+    for _ in range(0, N, BLOCK_N):
         # Load K and V blocks into SRAM
-        k = tl.load(K_block_ptr, boundary_check=(1, 0))
-        v = tl.load(V_block_ptr, boundary_check=(1, 0))
+        k = tl.load(K_block_ptr, boundary_check=(0,) if not EVEN_D else None)
+        v = tl.load(V_block_ptr, boundary_check=(1,) if not EVEN_D else None)
 
         # Compute QK
         qk = tl.dot(q, k, allow_tf32=True)
@@ -184,9 +176,8 @@ def _fwd_kernel(
 
         # Apply the scaling constant to the accumulated values to rescale previous contributions
         # and accumulate the weighted values for this block of V
-        value_accumulator = (
-            (value_accumulator * alpha[:, None]) 
-            + tl.dot(p.to(v_p.dtype.element_ty), v, allow_tf32=True)
+        value_accumulator = (value_accumulator * alpha[:, None]) + tl.dot(
+            p.to(v_p.dtype.element_ty), v, allow_tf32=True
         )
 
         # Compute the softmax denominator for each query, applying the maximum logit offset to the existing denominator
@@ -212,49 +203,35 @@ def _fwd_kernel(
         block_shape=(BLOCK_M, BLOCK_HEADDIM),
         order=(1, 0),
     )
-    tl.store(O_block_ptr, value_accumulator.to(out_p.dtype.element_ty), boundary_check=(1, 0))
+    tl.store(O_block_ptr, value_accumulator.to(out_p.dtype.element_ty), boundary_check=(1,) if not EVEN_D else None)
 
 
 def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None):
     # shape constraints
-    batch, seqlen_q, nheads, d = q.shape
-    _, seqlen_k, _, _ = k.shape
-    assert k.shape == (batch, seqlen_k, nheads, d)
-    assert v.shape == (batch, seqlen_k, nheads, d)
+    batch, Lq, nheads, d = q.shape
+    _, Lk, _, _ = k.shape
+    assert k.shape == (batch, Lk, nheads, d)
+    assert v.shape == (batch, Lk, nheads, d)
     assert d <= 128, "FlashAttention only support head dimensions up to 128"
     assert d >= 16, "FlashAttention requires head dimensions of at least 16"
+    assert Lq % TENSOR_CORE_K == 0, f"Lq must be a multiple of {TENSOR_CORE_K}"
+    assert Lk % TENSOR_CORE_K == 0, f"Lk must be a multiple of {TENSOR_CORE_K}"
+
     assert q.dtype == k.dtype == v.dtype, "All tensors must have the same type"
     assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
     assert q.is_cuda and k.is_cuda and v.is_cuda
     softmax_scale = softmax_scale or 1.0 / math.sqrt(d)
 
-    has_bias = bias is not None
-    if has_bias:
-        assert bias.dtype in [q.dtype, torch.float]
-        assert bias.is_cuda
-        assert bias.dim() == 4
-        if bias.stride(-1) != 1:
-            bias = bias.contiguous()
-        if bias.shape[2:] == (1, seqlen_k):
-            pass
-        elif bias.shape[2:] == (seqlen_q, seqlen_k):
-            pass
-        else:
-            raise RuntimeError("Last 2 dimensions of bias must be (1, seqlen_k)" " or (seqlen_q, seqlen_k)")
-        bias = bias.expand(batch, nheads, seqlen_q, seqlen_k)
-    (bias.stride(0), bias.stride(1), bias.stride(2)) if has_bias else (0, 0, 0)
-
-    seqlen_q_rounded = math.ceil(seqlen_q / 128) * 128
-    #lse = torch.empty((batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32)
+    # lse = torch.empty((batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32)
     lse = None
-    #tmp = torch.empty((batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32)
+    # tmp = torch.empty((batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32)
     o = torch.empty_like(q)
     B = q.shape[0]
     H = q.shape[2]
     D = q.shape[3]
 
     def grid(META):
-        return (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch * nheads)
+        return (triton.cdiv(Lq, META["BLOCK_M"]), batch * nheads)
 
     _fwd_kernel[grid](
         q,
@@ -264,8 +241,8 @@ def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None):
         softmax_scale,
         B,
         H,
-        seqlen_q,
-        seqlen_k,
+        Lq,
+        Lk,
         D,
         q.stride(0),
         q.stride(1),
@@ -310,7 +287,7 @@ def _benchmark(
             k = k.movedim(1, 2)
             v = v.movedim(1, 2)
             with torch.backends.cuda.sdp_kernel(
-                enable_flash=provider == "flash", 
+                enable_flash=provider == "flash",
                 enable_math=provider == "torch",
                 enable_mem_efficient=provider == "mem-eff",
             ):
@@ -322,7 +299,7 @@ def _benchmark(
                 )
         case "triton":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: _flash_attn_forward(q, k, v, causal=False, softmax_scale=D ** -0.5),
+                lambda: _flash_attn_forward(q, k, v, causal=False, softmax_scale=D**-0.5),
                 quantiles=quantiles,
                 warmup=warmup,
                 rep=rep,
@@ -362,7 +339,7 @@ def main(args: Namespace):
 
     for d in args.D:
         plot_name = f"flash-attn-d={d}"
-        xlabel = f"Input size (Lx{d}, Lx{d})" 
+        xlabel = f"Input size (Lx{d}, Lx{d})"
         benchmark = triton.testing.perf_report(
             triton.testing.Benchmark(
                 x_names=["Q", "K"],
