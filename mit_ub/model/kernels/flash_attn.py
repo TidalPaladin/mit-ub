@@ -2,7 +2,8 @@ import math
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Tuple, cast
+from torch import Tensor
 
 import torch
 import torch.nn.functional as F
@@ -10,6 +11,7 @@ import triton
 import triton.language as tl
 from tqdm import tqdm
 
+from .distance import _euclidean_distance_matmul_inner
 from .helpers import TENSOR_CORE_K, DivisorHeuristic, IsBlockMultiple, PowerOfTwoHeuristic
 
 
@@ -26,64 +28,79 @@ from .helpers import TENSOR_CORE_K, DivisorHeuristic, IsBlockMultiple, PowerOfTw
     {
         # BLOCK_HEADDIM must go up to the size of D.
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
+        "BLOCK_POSDIM": PowerOfTwoHeuristic("D_pos", min_val=TENSOR_CORE_K),
         "BLOCK_M": DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=128),
         "BLOCK_N": DivisorHeuristic("N", min_val=TENSOR_CORE_K, max_val=64),
         "EVEN_D": IsBlockMultiple("D", "BLOCK_HEADDIM"),
+        "EVEN_POSDIM": IsBlockMultiple("D_pos", "BLOCK_POSDIM"),
         "BHM": lambda args: args["B"] * args["H"] * args["M"],
         "BHN": lambda args: args["B"] * args["H"] * args["N"],
+        "BH": lambda args: args["B"] * args["H"],
         "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
     }
 )
-@triton.jit(debug=True)
+@triton.jit
 def _fwd_kernel(
     # Inputs
     q_p,
     k_p,
     v_p,
-    # pos_q_p,
-    # pos_k_p,
-    # pos_slopes_p,
+    logit_scale_p,
+    pos_q_p,
+    pos_k_p,
+    pos_slopes_p,
     out_p,
-    softmax_scale,
-    B,
-    H,
-    M,
-    N,
-    D,
+    softmax_scale: tl.constexpr,
     # Sizes
-    # D_pos,
+    B: tl.constexpr,
+    H: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    D: tl.constexpr,
+    D_pos: tl.constexpr,
     # Q strides
-    stride_q_b,
-    stride_q_m,
-    stride_q_h,
+    stride_q_b: tl.constexpr,
+    stride_q_m: tl.constexpr,
+    stride_q_h: tl.constexpr,
     # K strides
-    stride_k_b,
-    stride_k_n,
-    stride_k_h,
+    stride_k_b: tl.constexpr,
+    stride_k_n: tl.constexpr,
+    stride_k_h: tl.constexpr,
     # V strides
-    stride_v_b,
-    stride_v_n,
-    stride_v_h,
+    stride_v_b: tl.constexpr,
+    stride_v_n: tl.constexpr,
+    stride_v_h: tl.constexpr,
+    # V strides
+    stride_logit_b: tl.constexpr,
+    stride_logit_h: tl.constexpr,
+    stride_logit_m: tl.constexpr,
     # Position Q strides
-    # stride_posq_b,
-    # stride_posq_h,
-    # stride_posq_m,
+    stride_posq_b: tl.constexpr,
+    stride_posq_m: tl.constexpr,
+    stride_posq_h: tl.constexpr,
     # Position K strides
-    # stride_posk_b,
-    # stride_posk_h,
-    # stride_posk_n,
+    stride_posk_b: tl.constexpr,
+    stride_posk_n: tl.constexpr,
+    stride_posk_h: tl.constexpr,
+    # Slopes strides
+    stride_slopes_b: tl.constexpr,
     # Ouptut strides
-    stride_o_b,
-    stride_o_m,
-    stride_o_h,
+    stride_o_b: tl.constexpr,
+    stride_o_m: tl.constexpr,
+    stride_o_h: tl.constexpr,
     # Block sizes
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
+    BLOCK_POSDIM: tl.constexpr,
     # Heuristics for boundary checks
     EVEN_D: tl.constexpr,
+    EVEN_POSDIM: tl.constexpr,
     BHM: tl.constexpr,
     BHN: tl.constexpr,
+    BH: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    NEEDS_SCALE: tl.constexpr,
 ):
     # Grid is (L, H * B)
     # Q of shape (B, Lq, H, D)
@@ -127,10 +144,29 @@ def _fwd_kernel(
         block_shape=(BLOCK_N, BLOCK_HEADDIM),
         order=(1, 0),
     )
+    # Q and K positions will be handled the same as Q and K respectively
+    if HAS_BIAS:
+        Qpos_block_ptr = tl.make_block_ptr(
+            base=pos_q_p + offset_b * stride_posq_b + offset_h * stride_posq_h,
+            shape=(BHM, D_pos),
+            strides=(stride_posq_m, 1),
+            offsets=(start_m * BLOCK_M, 0),
+            block_shape=(BLOCK_M, BLOCK_POSDIM),
+            order=(1, 0),
+        )
+        Kpos_block_ptr = tl.make_block_ptr(
+            base=pos_k_p + offset_b * stride_posk_b + offset_h * stride_posk_h,
+            shape=(D_pos, BHN),
+            strides=(1, stride_posk_n),
+            offsets=(0, 0),
+            block_shape=(BLOCK_POSDIM, BLOCK_N),
+            order=(0, 1),
+        )
 
     # For each query we will track the maximum unscaled logit that we saw for that query's softmax.
     # We will use this to offset all logits for that query such that numerical overflow is avoided
-    # when computing potentially large exponentials.
+    # when computing potentially large exponentials. This behavior is togglable with the `NEEDS_SCALE` flag,
+    # which is relevant in situations like cosine attention where Q and K are normalized.
     #
     # Recall that softmax(x) = softmax(x - c) for any constant c.
     # Recall that softmax(x_i) = exp(x_i) / sum_j exp(x_j)
@@ -148,51 +184,94 @@ def _fwd_kernel(
     #   * `p` - exp(x_i - c) for each query
     #   * `softmax_denominator` - sum_j exp(x_j - c) for each query
     #   * `alpha` - exp(c - d) for each query
-    query_i_maxdot = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
-    softmax_denominator = tl.zeros([BLOCK_M], dtype=tl.float32)
     value_accumulator = tl.zeros([BLOCK_M, BLOCK_HEADDIM], dtype=tl.float32)
+    softmax_denominator = tl.zeros([BLOCK_M], dtype=tl.float32)
+    if NEEDS_SCALE:
+        query_i_maxdot = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
 
     # Q gets loaded into SRAM and stays there. Pre-apply the softmax scale
     q = tl.load(Q_ptrs, boundary_check=(1,) if not EVEN_D else None)
     q = (q * softmax_scale).to(k_p.dtype.element_ty)
+    # If we have bias, we will also load the Q positions and ALiBi slopes
+    if HAS_BIAS:
+        Qpos_block_ptr = tl.make_block_ptr(
+            base=pos_q_p + offset_b * stride_posq_b + offset_h * stride_posq_h,
+            shape=(BHM, D_pos),
+            strides=(stride_posq_m, 1),
+            offsets=(start_m * BLOCK_M, 0),
+            block_shape=(BLOCK_M, BLOCK_POSDIM),
+            order=(1, 0),
+        )
+        pos_q = tl.load(Qpos_block_ptr, boundary_check=(1,) if not EVEN_POSDIM else None) 
+        slopes_ptr = pos_slopes_p + offset_b * stride_slopes_b
+        pos_slope = tl.load(slopes_ptr)
 
+    # Iterate over KV blocks
     for _ in range(0, N, BLOCK_N):
-        # Load K and V blocks into SRAM
+        # Load KV block
         k = tl.load(K_block_ptr, boundary_check=(0,) if not EVEN_D else None)
         v = tl.load(V_block_ptr, boundary_check=(1,) if not EVEN_D else None)
 
         # Compute QK
         qk = tl.dot(q, k, allow_tf32=True)
 
-        # Determine the maximum logit seen for each query
-        query_i_maxdot_new = tl.maximum(query_i_maxdot, tl.max(qk, 1))
+        # Compute the bias
+        if HAS_BIAS:
+            pos_k = tl.load(Kpos_block_ptr, boundary_check=(0,) if not EVEN_POSDIM else None)
+            bias = _euclidean_distance_matmul_inner(pos_q, pos_k, BLOCK_M, BLOCK_N)
+            bias = tl.sqrt(bias.to(tl.float32)).to(bias.dtype)
+            qk += pos_slope * bias
+            Kpos_block_ptr = tl.advance(Kpos_block_ptr, (0, BLOCK_N))
 
-        # Compute scaling constant alpha.
-        # Multiplying by this constant unscales the previous contributions and rescales according to the new maximum logit
-        alpha = tl.exp(query_i_maxdot - query_i_maxdot_new)
+        if NEEDS_SCALE:
+            # Determine the maximum logit seen for each query
+            query_i_maxdot_new = tl.maximum(query_i_maxdot, tl.max(qk, 1))
 
-        # Compute the softmax numerator for each key, applying the maximum logit offset to avoid numerical overflow
-        p = tl.exp(qk - query_i_maxdot_new[:, None])
+            # Compute scaling constant alpha.
+            # Multiplying by this constant unscales the previous contributions and rescales according to the new maximum logit
+            alpha = tl.exp(query_i_maxdot - query_i_maxdot_new)
 
-        # Apply the scaling constant to the accumulated values to rescale previous contributions
-        # and accumulate the weighted values for this block of V
-        value_accumulator = (value_accumulator * alpha[:, None]) + tl.dot(
-            p.to(v_p.dtype.element_ty), v, allow_tf32=True
-        )
+            # Compute the softmax numerator for each key, applying the maximum logit offset to avoid numerical overflow
+            p = tl.exp(qk - query_i_maxdot_new[:, None])
 
-        # Compute the softmax denominator for each query, applying the maximum logit offset to the existing denominator
-        softmax_denominator = softmax_denominator * alpha + tl.sum(p, 1)
+            # Apply the scaling constant to the accumulated values to rescale previous contributions
+            # and accumulate the weighted values for this block of V
+            value_accumulator = (
+                (value_accumulator * alpha[:, None]) 
+                + tl.dot(p.to(v.dtype), v, allow_tf32=True)
+            )
 
-        # Update and advance pointers
-        query_i_maxdot = query_i_maxdot_new
+            # Compute the softmax denominator for each query, applying the maximum logit offset to the existing denominator
+            softmax_denominator = softmax_denominator * alpha + tl.sum(p, 1)
+
+            # Update and advance pointers
+            query_i_maxdot = query_i_maxdot_new
+
+        else:
+            # Compute the softmax numerator for each key
+            p = tl.exp(qk)
+            # Accumulate weighted values
+            value_accumulator += tl.dot(p.to(v.dtype), v, allow_tf32=True)
+            # Update softmax denominator
+            softmax_denominator = softmax_denominator + tl.sum(p, 1)
+
         K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
 
     # Compute the final softmax values
     value_accumulator = value_accumulator / softmax_denominator[:, None]
 
-    # l_ptrs = L + off_hz * N_CTX + offs_m
-    # tl.store(l_ptrs, m_i + tl.math.log2(l_i))
+    # Per Flash Attention 2, we store only logsumexp for the backward pass
+    if NEEDS_SCALE:
+        logit_scale_ptr = tl.make_block_ptr(
+            base=logit_scale_p + offset_b * stride_logit_b + offset_h * stride_logit_h,
+            shape=(BH, M),
+            strides=(stride_logit_h, 1),
+            offsets=(0, start_m * BLOCK_M),
+            block_shape=(1, BLOCK_M),
+            order=(1, 0),
+        )
+        tl.store(logit_scale_ptr, (query_i_maxdot + tl.math.log(softmax_denominator))[None, :])
 
     # Write output
     O_block_ptr = tl.make_block_ptr(
@@ -206,58 +285,411 @@ def _fwd_kernel(
     tl.store(O_block_ptr, value_accumulator.to(out_p.dtype.element_ty), boundary_check=(1,) if not EVEN_D else None)
 
 
-def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None):
-    # shape constraints
-    batch, Lq, nheads, d = q.shape
-    _, Lk, _, _ = k.shape
-    assert k.shape == (batch, Lk, nheads, d)
-    assert v.shape == (batch, Lk, nheads, d)
-    assert d <= 128, "FlashAttention only support head dimensions up to 128"
-    assert d >= 16, "FlashAttention requires head dimensions of at least 16"
-    assert Lq % TENSOR_CORE_K == 0, f"Lq must be a multiple of {TENSOR_CORE_K}"
-    assert Lk % TENSOR_CORE_K == 0, f"Lk must be a multiple of {TENSOR_CORE_K}"
+@triton.heuristics(
+    {
+        "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
+        "EVEN_D": IsBlockMultiple("D", "BLOCK_HEADDIM"),
+        "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
+    }
+)
+@triton.jit
+def _bwd_preprocess_do_o_dot(
+    Out,
+    DO,
+    Delta,
+    stride_o_b: tl.constexpr,
+    stride_o_m: tl.constexpr,
+    stride_o_h: tl.constexpr,
+    stride_do_b: tl.constexpr,
+    stride_do_m: tl.constexpr,
+    stride_do_h: tl.constexpr,
+    stride_delta_b: tl.constexpr,
+    stride_delta_h: tl.constexpr,
+    stride_delta_m: tl.constexpr,
+    H: tl.constexpr,
+    D: tl.constexpr,
+    M: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_HEADDIM: tl.constexpr,
+    BHM: tl.constexpr,
+    BH: tl.constexpr,
+    EVEN_D: tl.constexpr,
+):
+    # Initialize offsets
+    start_m = tl.program_id(0)
+    offset_bh = tl.program_id(1)
+    offset_b = offset_bh // H
+    offset_h = offset_bh % H
 
-    assert q.dtype == k.dtype == v.dtype, "All tensors must have the same type"
-    assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
-    assert q.is_cuda and k.is_cuda and v.is_cuda
-    softmax_scale = softmax_scale or 1.0 / math.sqrt(d)
-
-    # lse = torch.empty((batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32)
-    lse = None
-    # tmp = torch.empty((batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32)
-    o = torch.empty_like(q)
-    B = q.shape[0]
-    H = q.shape[2]
-    D = q.shape[3]
-
-    def grid(META):
-        return (triton.cdiv(Lq, META["BLOCK_M"]), batch * nheads)
-
-    _fwd_kernel[grid](
-        q,
-        k,
-        v,
-        o,
-        softmax_scale,
-        B,
-        H,
-        Lq,
-        Lk,
-        D,
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        k.stride(0),
-        k.stride(1),
-        k.stride(2),
-        v.stride(0),
-        v.stride(1),
-        v.stride(2),
-        o.stride(0),
-        o.stride(1),
-        o.stride(2),
+    # Load O
+    o_block_ptr = tl.make_block_ptr(
+        Out + offset_b * stride_o_b + offset_h * stride_o_h,
+        (BHM, D),
+        (stride_o_m, 1),
+        (start_m * BLOCK_M, 0),
+        (BLOCK_M, BLOCK_HEADDIM),
+        (1, 0),
     )
-    return o, lse, softmax_scale  # softmax_scale could have been updated
+    o = tl.load(o_block_ptr, boundary_check=(1,) if not EVEN_D else None).to(tl.float32)
+
+    # Load DO
+    do_block_ptr = tl.make_block_ptr(
+        DO + offset_b * stride_do_b + offset_h * stride_do_h,
+        (BHM, D),
+        (stride_do_m, 1),
+        (start_m * BLOCK_M, 0),
+        (BLOCK_M, BLOCK_HEADDIM),
+        (1, 0),
+    )
+    do = tl.load(do_block_ptr, boundary_check=(1,) if not EVEN_D else None).to(tl.float32)
+
+    # ???
+    delta = tl.sum(o * do, axis=1)
+
+    # Write output
+    delta_offset = Delta + offset_b * stride_delta_b + offset_h * stride_delta_h + start_m * BLOCK_M
+    delta_ptrs = delta_offset + tl.arange(0, BLOCK_M)
+    tl.store(delta_ptrs, delta)
+
+
+@triton.heuristics(
+    {
+        "BHM": lambda args: args["B"] * args["H"] * args["M"],
+        "BHN": lambda args: args["B"] * args["H"] * args["N"],
+        "BHMN": lambda args: args["B"] * args["H"] * args["M"] * args["N"],
+        "BH": lambda args: args["B"] * args["H"],
+        "BLOCK_M": DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=64),
+        "BLOCK_N": DivisorHeuristic("N", min_val=TENSOR_CORE_K, max_val=128),
+        "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
+        "EVEN_D": IsBlockMultiple("D", "BLOCK_HEADDIM"),
+        "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
+    }
+)
+@triton.jit
+def _bwd_kernel(
+    q_p, 
+    k_p, 
+    v_p, 
+    softmax_scale: tl.constexpr,  
+    Out, 
+    do_p,  #
+    dq_p, 
+    dk_p, 
+    dv_p,  #
+    logit_scale_p,  #
+    delta_p,  #
+    stride_dq_a, 
+    stride_q_b, stride_q_m, stride_q_h,
+    stride_k_b, stride_k_n, stride_k_h, 
+    stride_v_b, stride_v_n, stride_v_h, 
+    B: tl.constexpr, H: tl.constexpr, M: tl.constexpr, N: tl.constexpr, D: tl.constexpr,
+    BHM: tl.constexpr,
+    BHN: tl.constexpr,
+    BHMN: tl.constexpr,
+    BH: tl.constexpr,
+    BLOCK_M: tl.constexpr, 
+    BLOCK_N: tl.constexpr,
+    BLOCK_HEADDIM: tl.constexpr,
+    EVEN_D: tl.constexpr,
+):
+    # Initialize offsets.
+    # Grid will be over (B*H, Lk)
+    offset_bh = tl.program_id(0)
+    offset_b = offset_bh // H
+    offset_h = offset_bh % H
+    start_n = tl.program_id(1)
+
+    # Initialize pointers
+    Q_block_ptr = tl.make_block_ptr(
+        base=q_p + offset_b * stride_q_b + offset_h * stride_q_h,
+        shape=(BHM, D),
+        strides=(stride_q_m, 1),
+        offsets=(0, 0),
+        block_shape=(BLOCK_M, BLOCK_HEADDIM),
+        order=(1, 0),
+    )
+    K_block_ptr = tl.make_block_ptr(
+        base=k_p + offset_b * stride_k_b + offset_h * stride_k_h,
+        shape=(D, BHN),
+        strides=(1, stride_k_n),
+        offsets=(0, start_n * BLOCK_N),
+        block_shape=(BLOCK_HEADDIM, BLOCK_N),
+        order=(0, 1),
+    )
+    V_block_ptr = tl.make_block_ptr(
+        base=v_p + offset_b * stride_v_b + offset_h * stride_v_h,
+        shape=(D, BHN),
+        strides=(1, stride_v_n),
+        offsets=(0, start_n * BLOCK_N),
+        block_shape=(BLOCK_HEADDIM, BLOCK_N),
+        order=(0, 1),
+    )
+    DO_block_ptr = tl.make_block_ptr(
+        base=do_p + offset_b * stride_q_b + offset_h * stride_q_h,
+        shape=(BHM, D),
+        strides=(stride_q_m, 1),
+        offsets=(0, 0),
+        block_shape=(BLOCK_M, BLOCK_HEADDIM),
+        order=(1, 0),
+    )
+    DQ_block_ptr = tl.make_block_ptr(
+        base=dq_p + start_n * stride_dq_a + offset_b * stride_q_b + offset_h * stride_q_h,
+        shape=(BHMN, D),
+        strides=(stride_q_m, 1),
+        offsets=(0, 0),
+        block_shape=(BLOCK_M, BLOCK_HEADDIM),
+        order=(1, 0),
+    )
+    DK_block_ptr = tl.make_block_ptr(
+        base=dk_p + offset_b * stride_k_b + offset_h * stride_k_h,
+        shape=(D, BHN),
+        strides=(1, stride_k_n),
+        offsets=(0, start_n * BLOCK_N),
+        block_shape=(BLOCK_HEADDIM, BLOCK_N),
+        order=(0, 1),
+    )
+    DV_block_ptr = tl.make_block_ptr(
+        base=dv_p + offset_b * stride_v_b + offset_h * stride_v_h,
+        shape=(D, BHN),
+        strides=(1, stride_v_n),
+        offsets=(0, start_n * BLOCK_N),
+        block_shape=(BLOCK_HEADDIM, BLOCK_N),
+        order=(0, 1),
+    )
+    # We won't use block pointers for these since they're trivial
+    delta_ptrs = delta_p + offset_bh * M
+    logit_scale_ptrs = logit_scale_p + offset_bh * M
+
+    # Init dv and dk
+    dv = tl.zeros([BLOCK_HEADDIM, BLOCK_N], dtype=tl.float32)
+    dk = tl.zeros([BLOCK_HEADDIM, BLOCK_N], dtype=tl.float32)
+
+    # k and v stay in SRAM throughout
+    k = tl.load(K_block_ptr, boundary_check=(0,) if not EVEN_D else None)
+    v = tl.load(V_block_ptr, boundary_check=(0,) if not EVEN_D else None)
+
+    # Recall that for matrix multiplication C = A * B,
+    # * dC/dA = B.T
+    # * dC/dB = A.T
+    for start_m in range(0, M, BLOCK_M):
+        tl.device_print("m", start_m)
+        tl.multiple_of(start_m, BLOCK_M)
+        offs_m_curr = start_m + tl.arange(0, BLOCK_M)
+
+        # Recompute p = softmax(qk), p is (MxN)
+        q = tl.load(Q_block_ptr, boundary_check=(1,) if not EVEN_D else None)
+        qk = tl.dot(q, k) * softmax_scale
+        logit_scale = tl.load(logit_scale_ptrs + offs_m_curr)
+        p = tl.math.exp(qk - logit_scale[:, None])
+
+        # compute dL/dv = dL/do * do/dv = dL/do * p
+        # Shape do = (MxD)
+        # NOTE: `do` is pre-divided by `l`; no normalization here
+        do = tl.load(DO_block_ptr, boundary_check=(1,) if not EVEN_D else None) # (MxD)
+        dv += tl.dot(tl.trans(do), p.to(q_p.dtype.element_ty), allow_tf32=True)
+
+        # compute dL/dp = dL/do * do/dp = dL/do * v
+        # Shape dp = (MxN)
+        dp = tl.dot(do, v, allow_tf32=True)
+
+        # compute dL/ds = dL/dp * dp/ds = p * (dp - delta[:, None])
+        # Shape ds = (MxN)
+        delta = tl.load(delta_ptrs + offs_m_curr)
+        ds = (p * (dp - delta[:, None]) * softmax_scale).to(q_p.dtype.element_ty)
+
+        # compute dL/dk = dL/ds * ds/dk = dot(ds.T, q)
+        dk += tl.dot(tl.trans(q), ds, allow_tf32=True)
+
+        # compute dL/dq = dL/ds * ds/dq = dot(ds, k)
+        dq = tl.dot(ds, tl.trans(k), allow_tf32=True)
+        tl.store(DQ_block_ptr, dq.to(q_p.dtype.element_ty), boundary_check=(1,) if not EVEN_D else None)
+
+        # increment pointers
+        DQ_block_ptr = tl.advance(DQ_block_ptr, (BLOCK_M, 0))
+        Q_block_ptr = tl.advance(Q_block_ptr, (BLOCK_M, 0))
+        DO_block_ptr = tl.advance(DO_block_ptr, (BLOCK_M, 0))
+
+    # write-back
+    tl.store(DV_block_ptr, dv.to(v_p.dtype.element_ty), boundary_check=(0,) if not EVEN_D else None)
+    tl.store(DK_block_ptr, dk.to(k_p.dtype.element_ty), boundary_check=(0,) if not EVEN_D else None)
+
+    
+
+class _attention(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, q, k, v, pos_q=None, pos_k=None, slopes=None, softmax_scale=None) -> Tensor:
+        # shape constraints
+        B, Lq, H, D = q.shape
+        _, Lk, _, _ = k.shape
+        assert k.shape == (B, Lk, H, D)
+        assert v.shape == (B, Lk, H, D)
+        assert D <= 128, "FlashAttention only support head dimensions up to 128"
+        assert D >= 16, "FlashAttention requires head dimensions of at least 16"
+        assert Lq % TENSOR_CORE_K == 0, f"Lq must be a multiple of {TENSOR_CORE_K}"
+        assert Lk % TENSOR_CORE_K == 0, f"Lk must be a multiple of {TENSOR_CORE_K}"
+
+        assert q.dtype == k.dtype == v.dtype, "All tensors must have the same type"
+        assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
+        assert q.is_cuda and k.is_cuda and v.is_cuda
+        softmax_scale = softmax_scale or 1.0 / math.sqrt(D)
+
+        # Check bias
+        if pos_q is not None:
+            _, _, _, D_pos = pos_q.shape
+            assert pos_q.shape == (B, Lq, H, D_pos), "Query position shape must be (B, Lq, H, D_pos)"
+            pos_k = pos_k if pos_k is not None else pos_q
+            assert pos_k.shape == (B, Lk, H, D_pos), "Key position must be (B, Lk, H, D_pos)"
+            slopes = slopes if slopes is not None else torch.full((B, H), -1, device=q.device, dtype=q.dtype)
+            assert slopes.shape == (B, H)
+            assert pos_q.dtype == pos_k.dtype == slopes.dtype == q.dtype
+            has_bias = True
+        else:
+            pos_q = torch.empty((0, 0, 0, 0), device=q.device, dtype=q.dtype)
+            pos_k = torch.empty((0, 0, 0, 0), device=k.device, dtype=k.dtype)
+            slopes = torch.empty((0, 0), device=q.device, dtype=q.dtype)
+            D_pos = D
+            has_bias = False
+
+        logit_scale = torch.empty((B, H, Lq), device=q.device, dtype=torch.float32)
+        o = torch.empty_like(q)
+        # NOTE: It seems important that we seed to at most 2**30. Otherwise we randomly get huge latency spikes.
+        seed = torch.randint(0, 2 ** 30, (1,), dtype=torch.int64).item()
+
+        def grid(META):
+            return (triton.cdiv(Lq, META["BLOCK_M"]), B * H)
+
+        compiled = _fwd_kernel[grid](
+            q,
+            k,
+            v,
+            logit_scale,
+            pos_q,
+            pos_k,
+            slopes,
+            o,
+            softmax_scale,
+            B,
+            H,
+            Lq,
+            Lk,
+            D,
+            D_pos,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            logit_scale.stride(0),
+            logit_scale.stride(1),
+            logit_scale.stride(2),
+            pos_q.stride(0),
+            pos_q.stride(1),
+            pos_q.stride(2),
+            pos_k.stride(0),
+            pos_k.stride(1),
+            pos_k.stride(2),
+            slopes.stride(0),
+            o.stride(0),
+            o.stride(1),
+            o.stride(2),
+            HAS_BIAS=has_bias,
+            NEEDS_SCALE=True,
+        )
+        if compiled.n_spills:
+            print("WARNING: Spills detected in the kernel")
+
+        ctx.save_for_backward(q, k, v, o, logit_scale)
+        ctx.softmax_scale = softmax_scale
+        return o
+
+    @staticmethod
+    def backward(ctx, do):
+        q, k, v, o, logit_scale = ctx.saved_tensors
+        B, Lk, H, D = k.shape
+        _, Lq, _, _ = q.shape
+
+        BLOCK_M = DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=128)({"M": Lq})
+        BLOCK_N = DivisorHeuristic("N", min_val=TENSOR_CORE_K, max_val=128)({"N": Lk})
+
+        do = do.contiguous()
+        dq = torch.zeros((triton.cdiv(Lk, BLOCK_N), B, Lq, H, D), device=q.device, dtype=q.dtype)
+        dk = torch.empty_like(k)
+        dv = torch.empty_like(v)
+        delta = torch.empty_like(logit_scale)
+
+        def pre_grid(META):
+            return (triton.cdiv(Lq, BLOCK_M), B * H)
+
+        _bwd_preprocess_do_o_dot[pre_grid](
+            o,
+            do,
+            delta,
+            o.stride(0),
+            o.stride(1),
+            o.stride(2),
+            do.stride(0),
+            do.stride(1),
+            do.stride(2),
+            delta.stride(0),
+            delta.stride(1),
+            delta.stride(2),
+            BLOCK_M=BLOCK_M,
+            D=D,
+            H=H,
+            M=Lq,
+            BLOCK_HEADDIM=D,
+            BHM=B*H*Lq,
+            BH=B*H,
+        )
+
+        def grid(META):
+            return (B*H, triton.cdiv(Lk, BLOCK_N))
+
+        _bwd_kernel[grid](
+            q, 
+            k, 
+            v, 
+            ctx.softmax_scale,
+            o, 
+            do,
+            dq, 
+            dk, 
+            dv,
+            logit_scale,
+            delta,
+            dq.stride(0), 
+            q.stride(0), q.stride(1), q.stride(2), #
+            k.stride(0), k.stride(1), k.stride(2), #
+            v.stride(0), v.stride(1), v.stride(2), #
+            B, H, Lq, Lk, D, #
+            num_warps=8,
+            num_stages=1,
+        )
+
+        if len(dq.shape) == 5:
+            dq = dq.sum(dim=0)
+        return dq, dk, dv, None, None, None, None
+
+
+attention_fn = _attention.apply
+
+
+def attention(
+    q: Tensor, 
+    k: Tensor, 
+    v: Tensor, 
+    pos_q: Tensor | None = None, 
+    pos_k: Tensor | None = None, 
+    slopes: Tensor | None = None, 
+    softmax_scale: float | None = None,
+) -> Tensor:
+    return cast(Tensor, attention_fn(q, k, v, pos_q, pos_k, slopes, softmax_scale))
+
 
 
 def _benchmark(
@@ -269,17 +701,31 @@ def _benchmark(
     rep: int = 100,
     bar: tqdm | None = None,
     verbose: bool = False,
+    bias: bool = False,
 ):
     if verbose:
         with tqdm.external_write_mode():
             print(f"Running benchmark for Lq={Q}, Lk={K}, D={D}, provider={provider}")
     B = 4
     N_head = 8
+    D_pos = 2
 
     q = torch.randn((B, Q, N_head, D), device="cuda", dtype=torch.float16)
     k = torch.randn((B, K, N_head, D), device="cuda", dtype=torch.float16)
     v = torch.randn((B, K, N_head, D), device="cuda", dtype=torch.float16)
     quantiles = [0.5, 0.2, 0.8]
+
+    if bias and provider not in ["flash", "mem-eff"]:
+        pos_q = torch.randn((B, Q, N_head, D_pos), device="cuda", dtype=torch.float16)
+        pos_k = torch.randn((B, K, N_head, D_pos), device="cuda", dtype=torch.float16)
+        attn_mask = -1 * (
+            (pos_q[:, :, None, ...] - pos_k[:, None, ...])
+            .pow(2).sum(-1).sqrt_()
+            .movedim(-1, 1).view(B, N_head, Q, K)
+        )
+    else:
+        pos_q = pos_k = attn_mask = None
+
 
     match provider:
         case "torch" | "flash" | "mem-eff":
@@ -292,14 +738,14 @@ def _benchmark(
                 enable_mem_efficient=provider == "mem-eff",
             ):
                 ms, min_ms, max_ms = triton.testing.do_bench(
-                    lambda: F.scaled_dot_product_attention(q, k, v),
+                    lambda: F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask),
                     quantiles=quantiles,
                     warmup=warmup,
                     rep=rep,
                 )
         case "triton":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: _flash_attn_forward(q, k, v, causal=False, softmax_scale=D**-0.5),
+                lambda: _flash_attn_forward(q, k, v, pos_q, pos_k),
                 quantiles=quantiles,
                 warmup=warmup,
                 rep=rep,
@@ -328,12 +774,20 @@ def parse_args() -> Namespace:
     parser.add_argument("--warmup", type=int, default=25, help="`warmup` arg for `triton.testing.do_bench`")
     parser.add_argument("--rep", type=int, default=100, help="`rep` arg for `triton.testing.do_bench`")
     parser.add_argument("-v", "--verbose", default=False, action="store_true", help="Print each benchmark result")
+    parser.add_argument("-b", "--bias", default=False, action="store_true", help="Benchmark with ALiBi style bias")
     return parser.parse_args()
 
 
 def main(args: Namespace):
     test_configs = list(range(args.step, args.QK + 1, args.step))
-    providers = ["torch", "flash", "mem-eff", "triton"]
+
+    # Only torch and triton support bias.
+    providers = ["torch", "triton", "flash", "mem-eff"]
+    if args.bias:
+        line_names = ["Torch", "Triton", "Flash (no bias)", "Mem-Eff (no bias)"]
+    else:
+        line_names = ["Torch", "Triton", "Flash", "Mem-Eff"]
+
     total_tests = len(providers) * len(test_configs) * len(args.D)
     bar = tqdm(total=total_tests, desc="Benchmarking")
 
@@ -346,8 +800,8 @@ def main(args: Namespace):
                 x_vals=test_configs,
                 line_arg="provider",
                 line_vals=providers,
-                line_names=["Torch", "Flash Attn", "ME Attn", "Triton"],
-                styles=[("green", "-"), ("orange", "-"), ("blue", "-"), ("red", "-")],
+                line_names=line_names,
+                styles=[("green", "-"), ("blue", "-"), ("orange", "-"), ("red", "-")],
                 xlabel=xlabel,
                 ylabel="Latency (ms)",
                 plot_name=plot_name,
@@ -360,6 +814,7 @@ def main(args: Namespace):
                 rep=args.rep,
                 bar=bar,
                 verbose=args.verbose,
+                bias=args.bias,
             )
         )
         df: Any = benchmark.run(

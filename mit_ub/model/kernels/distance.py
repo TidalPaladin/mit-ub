@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import torch
+import math
 import triton
 import triton.language as tl
 from torch import Tensor
@@ -13,10 +14,11 @@ from tqdm import tqdm
 from .helpers import TENSOR_CORE_K, IsBlockMultiple, PowerOfTwoHeuristic
 
 
+ROOT_2 = math.sqrt(2)
+
 # We expect K to be relatively small (probably length 1-3) for spacial coordinates
 @triton.heuristics(
     {
-        "WITH_SELF": lambda args: (args["a_ptr"] is args["b_ptr"]) and (args["M"] == args["N"]),
         "BLOCK_SIZE_K": PowerOfTwoHeuristic("K", min_val=1, max_val=16),
         "BLOCK_SIZE_M": PowerOfTwoHeuristic("M", min_val=TENSOR_CORE_K, max_val=64),
         "BLOCK_SIZE_N": PowerOfTwoHeuristic("N", min_val=TENSOR_CORE_K, max_val=64),
@@ -49,7 +51,6 @@ def _euclidean_distance_kernel_fwd_pointwise(
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     HAS_WEIGHTS: tl.constexpr,
-    WITH_SELF: tl.constexpr,
     EVEN_M: tl.constexpr,
     EVEN_N: tl.constexpr,
     EVEN_K: tl.constexpr,
@@ -65,6 +66,7 @@ def _euclidean_distance_kernel_fwd_pointwise(
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
     pid_m = first_pid_m + (pid % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
+    #tl.device_print("m", N)
 
     # Create block pointers for A B and C
     a_block_ptr = tl.make_block_ptr(
@@ -130,8 +132,6 @@ def _euclidean_distance_kernel_fwd_pointwise(
                     (0, 1) if not (EVEN_M and EVEN_K) else (0,) if not EVEN_N else (1,) if not EVEN_K else None
                 ),
             )
-            if not WITH_SELF
-            else a
         )
 
         # Compute the squared differences
@@ -152,7 +152,7 @@ def _euclidean_distance_kernel_fwd_pointwise(
 
         # Advance block pointers
         a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
-        b_block_ptr = tl.advance(b_block_ptr, (0, BLOCK_SIZE_K)) if not WITH_SELF else a_block_ptr
+        b_block_ptr = tl.advance(b_block_ptr, (0, BLOCK_SIZE_K)) 
 
     # Apply the square root and store the result
     c = tl.sqrt(accumulator).to(c_ptr.dtype.element_ty)
@@ -171,40 +171,26 @@ def _euclidean_distance_matmul_inner(
     b: tl.tensor,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
-    WITH_SELF: tl.constexpr,
 ):
     # Compute a @ b.T
     ab = tl.dot(a, b)
 
-    # In the WITH_SELF case we can speed things up by reusing the result of a @ a.T and
-    # computing diag(a @ a.T) == diag(b @ b.T) in one step
-    if WITH_SELF:
-        # Compute diag(a @ a.T) == diag(b @ b.T)
-        block_idx = tl.arange(0, BLOCK_SIZE_M)
-        diag_a = tl.where(block_idx[:, None] == block_idx, ab, float(0.0))
-        diag_a = tl.sum(diag_a, 1)
-        diag_b = diag_a
+    # Compute diag(a @ a.T)
+    block_idx = tl.arange(0, BLOCK_SIZE_M)
+    diag_a = tl.where(block_idx[:, None] == block_idx, tl.dot(a, tl.trans(a)), float(0.0))
+    diag_a = tl.sum(diag_a, 1)
 
-    # NOTE: It is faster to do (a * a).sum(1) but that seems to increase the output
-    # error by more than the expected tolerance, even when casting a to float32.
-    else:
-        # Compute diag(a @ a.T)
-        block_idx = tl.arange(0, BLOCK_SIZE_M)
-        diag_a = tl.where(block_idx[:, None] == block_idx, tl.dot(a, tl.trans(a)), float(0.0))
-        diag_a = tl.sum(diag_a, 1)
-
-        # Compute diag(b @ b.T)
-        block_idx = tl.arange(0, BLOCK_SIZE_N)
-        diag_b = tl.where(block_idx[:, None] == block_idx, tl.dot(tl.trans(b), b), float(0.0))
-        diag_b = tl.sum(diag_b, 1)
+    # Compute diag(b @ b.T)
+    block_idx = tl.arange(0, BLOCK_SIZE_N)
+    diag_b = tl.where(block_idx[:, None] == block_idx, tl.dot(tl.trans(b), b), float(0.0))
+    diag_b = tl.sum(diag_b, 1)
 
     # Update accumulator -> diag(a @ a.T) - 2 * a @ b + diag(b @ b.T)
-    return diag_a[:, None] - 2 * ab + diag_b[None, :]
+    return diag_a[:, None] - 2*ab + diag_b[None, :]
 
 
 @triton.heuristics(
     {
-        "WITH_SELF": lambda args: (args["a_ptr"] is args["b_ptr"]) and (args["M"] == args["N"]),
         "BLOCK_SIZE_K": PowerOfTwoHeuristic("K", min_val=TENSOR_CORE_K, max_val=16),
         "BLOCK_SIZE_M": PowerOfTwoHeuristic("M", min_val=TENSOR_CORE_K, max_val=64),
         "BLOCK_SIZE_N": PowerOfTwoHeuristic("N", min_val=TENSOR_CORE_K, max_val=64),
@@ -237,7 +223,6 @@ def _euclidean_distance_kernel_fwd_matmul(
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     HAS_WEIGHTS: tl.constexpr,
-    WITH_SELF: tl.constexpr,
     EVEN_M: tl.constexpr,
     EVEN_N: tl.constexpr,
     EVEN_K: tl.constexpr,
@@ -324,7 +309,7 @@ def _euclidean_distance_kernel_fwd_matmul(
             b = b * w[:, None]
             w_block_ptr = tl.advance(w_block_ptr, (BLOCK_SIZE_K,))
 
-        accumulator += _euclidean_distance_matmul_inner(a, b, BLOCK_SIZE_M, BLOCK_SIZE_N, WITH_SELF)
+        accumulator += _euclidean_distance_matmul_inner(a, b, BLOCK_SIZE_M, BLOCK_SIZE_N)
 
         # Advance block pointers
         a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
@@ -468,13 +453,12 @@ def _benchmark(
     bar: tqdm | None = None,
     verbose: bool = False,
     weighted: bool = False,
-    with_self: bool = False,
 ):
     if verbose:
         with tqdm.external_write_mode():
             print(f"Running benchmark for M={M}, N={N}, K={K}, provider={provider}")
     a = torch.randn((M, K), device="cuda", dtype=torch.float16)
-    b = a if with_self else torch.randn((N, K), device="cuda", dtype=torch.float16)
+    b = torch.randn((N, K), device="cuda", dtype=torch.float16)
     w = torch.randn((K,), device="cuda", dtype=torch.float16).abs() if weighted else None
     quantiles = [0.5, 0.2, 0.8]
 
@@ -520,7 +504,6 @@ def parse_args() -> Namespace:
     parser.add_argument(
         "-w", "--weighted", default=False, action="store_true", help="Compute weighted euclidean distance"
     )
-    parser.add_argument("--with-self", default=False, action="store_true", help="Use A and B as the same tensor")
     return parser.parse_args()
 
 
@@ -554,7 +537,6 @@ def main(args: Namespace):
                 bar=bar,
                 verbose=args.verbose,
                 weighted=args.weighted,
-                with_self=args.with_self,
             )
         )
         df: Any = benchmark.run(
