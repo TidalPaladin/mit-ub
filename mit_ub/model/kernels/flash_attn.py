@@ -31,7 +31,6 @@ from .helpers import TENSOR_CORE_K, DivisorHeuristic, IsBlockMultiple, PowerOfTw
         "BLOCK_POSDIM": PowerOfTwoHeuristic("D_pos", min_val=TENSOR_CORE_K),
         "BLOCK_M": DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=128),
         "BLOCK_N": DivisorHeuristic("N", min_val=TENSOR_CORE_K, max_val=64),
-        "EVEN_D": IsBlockMultiple("D", "BLOCK_HEADDIM"),
         "EVEN_POSDIM": IsBlockMultiple("D_pos", "BLOCK_POSDIM"),
         "BHM": lambda args: args["B"] * args["H"] * args["M"],
         "BHN": lambda args: args["B"] * args["H"] * args["N"],
@@ -48,33 +47,33 @@ def _fwd_kernel(
     # Sizes 
     B: tl.constexpr, H: tl.constexpr, M: tl.constexpr, N: tl.constexpr, D: tl.constexpr, D_pos: tl.constexpr,
     # Q strides
-    stride_q_b: tl.constexpr, stride_q_m: tl.constexpr, stride_q_h: tl.constexpr,
+    stride_q_b: tl.constexpr, stride_q_h: tl.constexpr, stride_q_m: tl.constexpr,
     # K strides
-    stride_k_b: tl.constexpr, stride_k_n: tl.constexpr, stride_k_h: tl.constexpr,
+    stride_k_b: tl.constexpr, stride_k_h: tl.constexpr, stride_k_n: tl.constexpr,
     # V strides
-    stride_v_b: tl.constexpr, stride_v_n: tl.constexpr, stride_v_h: tl.constexpr,
+    stride_v_b: tl.constexpr, stride_v_h: tl.constexpr, stride_v_n: tl.constexpr,
     # Logit scale strides
     stride_logit_b: tl.constexpr, stride_logit_h: tl.constexpr, stride_logit_m: tl.constexpr,
     # Position Q strides
-    stride_posq_b: tl.constexpr, stride_posq_m: tl.constexpr, stride_posq_h: tl.constexpr,
+    stride_posq_b: tl.constexpr, stride_posq_h: tl.constexpr, stride_posq_m: tl.constexpr,
     # Position K strides
-    stride_posk_b: tl.constexpr, stride_posk_n: tl.constexpr, stride_posk_h: tl.constexpr,
+    stride_posk_b: tl.constexpr, stride_posk_h: tl.constexpr, stride_posk_n: tl.constexpr,
     # Slopes strides
     stride_slopes_b: tl.constexpr,
     # Output strides
-    stride_o_b: tl.constexpr, stride_o_m: tl.constexpr, stride_o_h: tl.constexpr,
+    stride_o_b: tl.constexpr, stride_o_h: tl.constexpr, stride_o_m: tl.constexpr,
     # Block sizes
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_HEADDIM: tl.constexpr, BLOCK_POSDIM: tl.constexpr,
     # Heuristics for boundary checks
-    EVEN_D: tl.constexpr, EVEN_POSDIM: tl.constexpr, BHM: tl.constexpr,
-    BHN: tl.constexpr, BH: tl.constexpr,
+    EVEN_POSDIM: tl.constexpr, 
+    BHM: tl.constexpr, BHN: tl.constexpr, BH: tl.constexpr,
     HAS_BIAS: tl.constexpr, NEEDS_SCALE: tl.constexpr,
     # fmt: on
 ):
     # Grid is (L, H * B)
-    # Q of shape (B, Lq, H, D)
-    # K of shape (B, Lk, H, D)
-    # V of shape (B, Lk, H, D)
+    # Q of shape (B, H, Lq, D)
+    # K of shape (B, H, Lk, D)
+    # V of shape (B, H, Lk, D)
 
     # Initialize offsets
     # Each query block gets its own program
@@ -88,6 +87,7 @@ def _fwd_kernel(
     # This program's block of queries will be loaded by this program for processing and kept there.
     # NOTE: Block pointers may contribute to register spilling due to int64 indexing. Checking the
     # compiled kernel.n_spills indiciates no spilling - is this an issue or not?
+    #Q_ptrs = q_p + offset_b * stride_q_b + offset_h * stride_q_h + start_m * BLOCK_M
     Q_ptrs = tl.make_block_ptr(
         base=q_p + offset_b * stride_q_b + offset_h * stride_q_h,
         shape=(BHM, D),
@@ -159,7 +159,7 @@ def _fwd_kernel(
         query_i_maxdot = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
 
     # Q gets loaded into SRAM and stays there. Pre-apply the softmax scale
-    q = tl.load(Q_ptrs, boundary_check=(1,) if not EVEN_D else None)
+    q = tl.load(Q_ptrs)
     q = (q * softmax_scale).to(k_p.dtype.element_ty)
     # If we have bias, we will also load the Q positions and ALiBi slopes
     if HAS_BIAS:
@@ -178,8 +178,8 @@ def _fwd_kernel(
     # Iterate over KV blocks
     for _ in range(0, N, BLOCK_N):
         # Load KV block
-        k = tl.load(K_block_ptr, boundary_check=(0,) if not EVEN_D else None)
-        v = tl.load(V_block_ptr, boundary_check=(1,) if not EVEN_D else None)
+        k = tl.load(K_block_ptr)
+        v = tl.load(V_block_ptr)
 
         # Compute QK
         qk = tl.dot(q, k, allow_tf32=True)
@@ -223,6 +223,7 @@ def _fwd_kernel(
 
         K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
+    
 
     # Compute the final softmax values
     value_accumulator = value_accumulator / softmax_denominator[:, None]
@@ -248,7 +249,7 @@ def _fwd_kernel(
         block_shape=(BLOCK_M, BLOCK_HEADDIM),
         order=(1, 0),
     )
-    tl.store(O_block_ptr, value_accumulator.to(out_p.dtype.element_ty), boundary_check=(1,) if not EVEN_D else None)
+    tl.store(O_block_ptr, value_accumulator.to(out_p.dtype.element_ty))
 
 
 @triton.heuristics(
@@ -264,8 +265,8 @@ def _bwd_preprocess_do_o_dot(
     # Inputs
     Out, DO, Delta,
     # Strides
-    stride_o_b: tl.constexpr, stride_o_m: tl.constexpr, stride_o_h: tl.constexpr,
-    stride_do_b: tl.constexpr, stride_do_m: tl.constexpr, stride_do_h: tl.constexpr,
+    stride_o_b: tl.constexpr, stride_o_h: tl.constexpr, stride_o_m: tl.constexpr,
+    stride_do_b: tl.constexpr, stride_do_h: tl.constexpr, stride_do_m: tl.constexpr,
     stride_delta_b: tl.constexpr, stride_delta_h: tl.constexpr,
     # Sizes
     H: tl.constexpr, D: tl.constexpr, M: tl.constexpr,
@@ -290,7 +291,7 @@ def _bwd_preprocess_do_o_dot(
         (BLOCK_M, BLOCK_HEADDIM),
         (1, 0),
     )
-    o = tl.load(o_block_ptr, boundary_check=(1,) if not EVEN_D else None).to(tl.float32)
+    o = tl.load(o_block_ptr).to(tl.float32)
 
     # Load DO
     do_block_ptr = tl.make_block_ptr(
@@ -301,7 +302,7 @@ def _bwd_preprocess_do_o_dot(
         (BLOCK_M, BLOCK_HEADDIM),
         (1, 0),
     )
-    do = tl.load(do_block_ptr, boundary_check=(1,) if not EVEN_D else None).to(tl.float32)
+    do = tl.load(do_block_ptr).to(tl.float32)
 
     # ???
     delta = tl.sum(o * do, axis=1)
@@ -319,7 +320,6 @@ def _bwd_preprocess_do_o_dot(
         "BHMN": lambda args: args["B"] * args["H"] * args["M"] * args["N"],
         "BH": lambda args: args["B"] * args["H"],
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
-        "EVEN_D": IsBlockMultiple("D", "BLOCK_HEADDIM"),
         "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
     }
 )
@@ -333,17 +333,15 @@ def _bwd_kernel(
     softmax_scale: tl.constexpr,  
     # Strides
     stride_dq_a, 
-    stride_q_b, stride_q_m, stride_q_h,
-    stride_k_b, stride_k_n, stride_k_h, 
-    stride_v_b, stride_v_n, stride_v_h, 
+    stride_q_b, stride_q_h, stride_q_m,
+    stride_k_b, stride_k_h, stride_k_n, 
+    stride_v_b, stride_v_h, stride_v_n, 
     # Sizes
     B: tl.constexpr, H: tl.constexpr, M: tl.constexpr, N: tl.constexpr, D: tl.constexpr,
     # Derived sizes
     BHM: tl.constexpr, BHN: tl.constexpr, BHMN: tl.constexpr, BH: tl.constexpr,
     # Blocks
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_HEADDIM: tl.constexpr,
-    # Heuristics
-    EVEN_D: tl.constexpr,
     # fmt: on
 ):
     # Initialize offsets.
@@ -419,8 +417,8 @@ def _bwd_kernel(
     dk = tl.zeros([BLOCK_HEADDIM, BLOCK_N], dtype=tl.float32)
 
     # k and v stay in SRAM throughout
-    k = tl.load(K_block_ptr, boundary_check=(0,) if not EVEN_D else None)
-    v = tl.load(V_block_ptr, boundary_check=(0,) if not EVEN_D else None)
+    k = tl.load(K_block_ptr)
+    v = tl.load(V_block_ptr)
 
     # Recall that for matrix multiplication C = A * B,
     # * dC/dA = B.T
@@ -429,7 +427,7 @@ def _bwd_kernel(
         offs_m_curr = start_m + tl.arange(0, BLOCK_M)
 
         # Recompute p = softmax(qk), p is (MxN)
-        q = tl.load(Q_block_ptr, boundary_check=(1,) if not EVEN_D else None)
+        q = tl.load(Q_block_ptr)
         qk = tl.dot(q, k) * softmax_scale
         logit_scale = tl.load(logit_scale_ptrs + offs_m_curr)
         p = tl.math.exp(qk - logit_scale[:, None])
@@ -437,7 +435,7 @@ def _bwd_kernel(
         # compute dL/dv = dL/do * do/dv = dL/do * p
         # Shape do = (MxD)
         # NOTE: `do` is pre-divided by `l`; no normalization here
-        do = tl.load(DO_block_ptr, boundary_check=(1,) if not EVEN_D else None)  # (MxD)
+        do = tl.load(DO_block_ptr)  # (MxD)
         dv += tl.dot(tl.trans(do), p.to(q_p.dtype.element_ty), allow_tf32=True)
 
         # compute dL/dp = dL/do * do/dp = dL/do * v
@@ -454,7 +452,7 @@ def _bwd_kernel(
 
         # compute dL/dq = dL/ds * ds/dq = dot(ds, k)
         dq = tl.dot(ds, tl.trans(k), allow_tf32=True)
-        tl.store(DQ_block_ptr, dq.to(q_p.dtype.element_ty), boundary_check=(1,) if not EVEN_D else None)
+        tl.store(DQ_block_ptr, dq.to(q_p.dtype.element_ty))
 
         # increment pointers
         DQ_block_ptr = tl.advance(DQ_block_ptr, (BLOCK_M, 0))
@@ -462,8 +460,8 @@ def _bwd_kernel(
         DO_block_ptr = tl.advance(DO_block_ptr, (BLOCK_M, 0))
 
     # write-back
-    tl.store(DV_block_ptr, dv.to(v_p.dtype.element_ty), boundary_check=(0,) if not EVEN_D else None)
-    tl.store(DK_block_ptr, dk.to(k_p.dtype.element_ty), boundary_check=(0,) if not EVEN_D else None)
+    tl.store(DV_block_ptr, dv.to(v_p.dtype.element_ty))
+    tl.store(DK_block_ptr, dk.to(k_p.dtype.element_ty))
 
 
 class _attention(torch.autograd.Function):
@@ -471,12 +469,13 @@ class _attention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, pos_q=None, pos_k=None, slopes=None, softmax_scale=None) -> Tensor:
         # shape constraints
-        B, Lq, H, D = q.shape
-        _, Lk, _, _ = k.shape
-        assert k.shape == (B, Lk, H, D)
-        assert v.shape == (B, Lk, H, D)
+        B, H, Lq, D = q.shape
+        _, _, Lk, _ = k.shape
+        assert k.shape == (B, H, Lk, D)
+        assert v.shape == (B, H, Lk, D)
         assert D <= 128, "FlashAttention only support head dimensions up to 128"
         assert D >= 16, "FlashAttention requires head dimensions of at least 16"
+        assert triton.next_power_of_2(D) == D, "FlashAttention requires head dimensions to be a power of 2"
         assert Lq % TENSOR_CORE_K == 0, f"Lq must be a multiple of {TENSOR_CORE_K}"
         assert Lk % TENSOR_CORE_K == 0, f"Lk must be a multiple of {TENSOR_CORE_K}"
 
@@ -488,9 +487,9 @@ class _attention(torch.autograd.Function):
         # Check bias
         if pos_q is not None:
             _, _, _, D_pos = pos_q.shape
-            assert pos_q.shape == (B, Lq, H, D_pos), "Query position shape must be (B, Lq, H, D_pos)"
+            assert pos_q.shape == (B, H, Lq, D_pos), "Query position shape must be (B, H, Lq, D_pos)"
             pos_k = pos_k if pos_k is not None else pos_q
-            assert pos_k.shape == (B, Lk, H, D_pos), "Key position must be (B, Lk, H, D_pos)"
+            assert pos_k.shape == (B, H, Lk, D_pos), "Key position must be (B, H, Lk, D_pos)"
             slopes = slopes if slopes is not None else torch.full((B, H), -1, device=q.device, dtype=q.dtype)
             assert slopes.shape == (B, H)
             assert pos_q.dtype == pos_k.dtype == slopes.dtype == q.dtype
@@ -505,7 +504,7 @@ class _attention(torch.autograd.Function):
         logit_scale = torch.empty((B, H, Lq), device=q.device, dtype=torch.float32)
         o = torch.empty_like(q)
         # NOTE: It seems important that we seed to at most 2**30. Otherwise we randomly get huge latency spikes.
-        seed = torch.randint(0, 2**30, (1,), dtype=torch.int64).item()
+        #seed = torch.randint(0, 2**30, (1,), dtype=torch.int64).item()
 
         def grid(META):
             return (triton.cdiv(Lq, META["BLOCK_M"]), B * H)
@@ -535,15 +534,15 @@ class _attention(torch.autograd.Function):
     @staticmethod
     def backward(ctx, do):
         q, k, v, o, logit_scale = ctx.saved_tensors
-        B, Lk, H, D = k.shape
-        _, Lq, _, _ = q.shape
+        B, H, Lk, D = k.shape
+        _, _, Lq, _ = q.shape
         assert logit_scale.shape == (B, H, Lq)
 
         BLOCK_M = DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=64)({"M": Lq})
         BLOCK_N = DivisorHeuristic("N", min_val=TENSOR_CORE_K, max_val=128)({"N": Lk})
 
         do = do.contiguous()
-        dq = torch.zeros((triton.cdiv(Lk, BLOCK_N), B, Lq, H, D), device=q.device, dtype=q.dtype)
+        dq = torch.zeros((triton.cdiv(Lk, BLOCK_N), B, H, Lq, D), device=q.device, dtype=q.dtype)
         dk = torch.empty_like(k)
         dv = torch.empty_like(v)
         delta = torch.empty_like(logit_scale)
