@@ -1,8 +1,11 @@
 import sys
+import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, Final
+from functools import wraps
+from typing import Any, Callable, Dict, Final, TypeVar, cast
 
 import triton
+from triton.compiler import CompiledKernel
 
 
 # In the case of K=16 we will perform the following operation in each tensor core
@@ -103,3 +106,35 @@ class DivisorHeuristic:
             )
 
         return result
+
+
+T = TypeVar("T")
+
+
+def spill_warning(func: triton.JITFunction[T], limit: int = 0) -> Callable[..., T]:
+    r"""Wrapper to emit a warning if the compiled kernel spills registers.
+
+    This should not be used as a decorator. See the example below.
+
+    Args:
+        func: JIT function to wrap
+        limit: Maximum number of spills before emitting a warning
+
+    Returns:
+        Wrapped JIT function
+
+    Example:
+        >>> @triton.jit
+        >>> def _my_kernel(x_ptr, y_ptr):
+        >>>     ...
+        >>> # Wrap the JIT function with grid specialization
+        >>> _my_kernel = spill_warning(_my_kernel[(1,)], limit=10)(x, y)
+    """
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        compiled: CompiledKernel = func(*args, **kwargs)
+        if compiled.n_spills > limit:
+            warnings.warn(f"{compiled.fn} spilled {compiled.n_spills} times using {compiled.n_regs} registers")
+
+    return cast(Callable[..., T], wrapper)

@@ -67,7 +67,7 @@ test: ## run unit tests
 		./tests/
 
 test-%: ## run unit tests matching a pattern
-	$(PYTHON) -m pytest -rs -k $* -v ./tests/ 
+	$(PYTHON) -m pytest -s -r fE -k $* ./tests/ --tb=no
 
 test-pdb-%: ## run unit tests matching a pattern with PDB fallback
 	$(PYTHON) -m pytest -rs --pdb -k $* -v ./tests/ 

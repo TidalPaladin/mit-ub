@@ -2,17 +2,17 @@ import math
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from functools import partial
 from pathlib import Path
-from typing import Any, Tuple, cast
-from torch import Tensor
+from typing import Any, cast
 
 import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
+from torch import Tensor
 from tqdm import tqdm
 
 from .distance import _euclidean_distance_matmul_inner
-from .helpers import TENSOR_CORE_K, DivisorHeuristic, IsBlockMultiple, PowerOfTwoHeuristic
+from .helpers import TENSOR_CORE_K, DivisorHeuristic, IsBlockMultiple, PowerOfTwoHeuristic, spill_warning
 
 
 # @triton.autotune(
@@ -41,66 +41,35 @@ from .helpers import TENSOR_CORE_K, DivisorHeuristic, IsBlockMultiple, PowerOfTw
 )
 @triton.jit
 def _fwd_kernel(
+    # fmt: off
     # Inputs
-    q_p,
-    k_p,
-    v_p,
-    logit_scale_p,
-    pos_q_p,
-    pos_k_p,
-    pos_slopes_p,
-    out_p,
+    q_p, k_p, v_p, logit_scale_p, pos_q_p, pos_k_p, pos_slopes_p, out_p, 
     softmax_scale: tl.constexpr,
-    # Sizes
-    B: tl.constexpr,
-    H: tl.constexpr,
-    M: tl.constexpr,
-    N: tl.constexpr,
-    D: tl.constexpr,
-    D_pos: tl.constexpr,
+    # Sizes 
+    B: tl.constexpr, H: tl.constexpr, M: tl.constexpr, N: tl.constexpr, D: tl.constexpr, D_pos: tl.constexpr,
     # Q strides
-    stride_q_b: tl.constexpr,
-    stride_q_m: tl.constexpr,
-    stride_q_h: tl.constexpr,
+    stride_q_b: tl.constexpr, stride_q_m: tl.constexpr, stride_q_h: tl.constexpr,
     # K strides
-    stride_k_b: tl.constexpr,
-    stride_k_n: tl.constexpr,
-    stride_k_h: tl.constexpr,
+    stride_k_b: tl.constexpr, stride_k_n: tl.constexpr, stride_k_h: tl.constexpr,
     # V strides
-    stride_v_b: tl.constexpr,
-    stride_v_n: tl.constexpr,
-    stride_v_h: tl.constexpr,
-    # V strides
-    stride_logit_b: tl.constexpr,
-    stride_logit_h: tl.constexpr,
-    stride_logit_m: tl.constexpr,
+    stride_v_b: tl.constexpr, stride_v_n: tl.constexpr, stride_v_h: tl.constexpr,
+    # Logit scale strides
+    stride_logit_b: tl.constexpr, stride_logit_h: tl.constexpr, stride_logit_m: tl.constexpr,
     # Position Q strides
-    stride_posq_b: tl.constexpr,
-    stride_posq_m: tl.constexpr,
-    stride_posq_h: tl.constexpr,
+    stride_posq_b: tl.constexpr, stride_posq_m: tl.constexpr, stride_posq_h: tl.constexpr,
     # Position K strides
-    stride_posk_b: tl.constexpr,
-    stride_posk_n: tl.constexpr,
-    stride_posk_h: tl.constexpr,
+    stride_posk_b: tl.constexpr, stride_posk_n: tl.constexpr, stride_posk_h: tl.constexpr,
     # Slopes strides
     stride_slopes_b: tl.constexpr,
-    # Ouptut strides
-    stride_o_b: tl.constexpr,
-    stride_o_m: tl.constexpr,
-    stride_o_h: tl.constexpr,
+    # Output strides
+    stride_o_b: tl.constexpr, stride_o_m: tl.constexpr, stride_o_h: tl.constexpr,
     # Block sizes
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_HEADDIM: tl.constexpr,
-    BLOCK_POSDIM: tl.constexpr,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_HEADDIM: tl.constexpr, BLOCK_POSDIM: tl.constexpr,
     # Heuristics for boundary checks
-    EVEN_D: tl.constexpr,
-    EVEN_POSDIM: tl.constexpr,
-    BHM: tl.constexpr,
-    BHN: tl.constexpr,
-    BH: tl.constexpr,
-    HAS_BIAS: tl.constexpr,
-    NEEDS_SCALE: tl.constexpr,
+    EVEN_D: tl.constexpr, EVEN_POSDIM: tl.constexpr, BHM: tl.constexpr,
+    BHN: tl.constexpr, BH: tl.constexpr,
+    HAS_BIAS: tl.constexpr, NEEDS_SCALE: tl.constexpr,
+    # fmt: on
 ):
     # Grid is (L, H * B)
     # Q of shape (B, Lq, H, D)
@@ -202,7 +171,7 @@ def _fwd_kernel(
             block_shape=(BLOCK_M, BLOCK_POSDIM),
             order=(1, 0),
         )
-        pos_q = tl.load(Qpos_block_ptr, boundary_check=(1,) if not EVEN_POSDIM else None) 
+        pos_q = tl.load(Qpos_block_ptr, boundary_check=(1,) if not EVEN_POSDIM else None)
         slopes_ptr = pos_slopes_p + offset_b * stride_slopes_b
         pos_slope = tl.load(slopes_ptr)
 
@@ -236,10 +205,7 @@ def _fwd_kernel(
 
             # Apply the scaling constant to the accumulated values to rescale previous contributions
             # and accumulate the weighted values for this block of V
-            value_accumulator = (
-                (value_accumulator * alpha[:, None]) 
-                + tl.dot(p.to(v.dtype), v, allow_tf32=True)
-            )
+            value_accumulator = (value_accumulator * alpha[:, None]) + tl.dot(p.to(v.dtype), v, allow_tf32=True)
 
             # Compute the softmax denominator for each query, applying the maximum logit offset to the existing denominator
             softmax_denominator = softmax_denominator * alpha + tl.sum(p, 1)
@@ -294,26 +260,20 @@ def _fwd_kernel(
 )
 @triton.jit
 def _bwd_preprocess_do_o_dot(
-    Out,
-    DO,
-    Delta,
-    stride_o_b: tl.constexpr,
-    stride_o_m: tl.constexpr,
-    stride_o_h: tl.constexpr,
-    stride_do_b: tl.constexpr,
-    stride_do_m: tl.constexpr,
-    stride_do_h: tl.constexpr,
-    stride_delta_b: tl.constexpr,
-    stride_delta_h: tl.constexpr,
-    stride_delta_m: tl.constexpr,
-    H: tl.constexpr,
-    D: tl.constexpr,
-    M: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_HEADDIM: tl.constexpr,
-    BHM: tl.constexpr,
-    BH: tl.constexpr,
-    EVEN_D: tl.constexpr,
+    # fmt: off
+    # Inputs
+    Out, DO, Delta,
+    # Strides
+    stride_o_b: tl.constexpr, stride_o_m: tl.constexpr, stride_o_h: tl.constexpr,
+    stride_do_b: tl.constexpr, stride_do_m: tl.constexpr, stride_do_h: tl.constexpr,
+    stride_delta_b: tl.constexpr, stride_delta_h: tl.constexpr,
+    # Sizes
+    H: tl.constexpr, D: tl.constexpr, M: tl.constexpr,
+    # Blocks
+    BLOCK_M: tl.constexpr, BLOCK_HEADDIM: tl.constexpr,
+    # Derived values
+    BHM: tl.constexpr, EVEN_D: tl.constexpr,
+    # fmt: on
 ):
     # Initialize offsets
     start_m = tl.program_id(0)
@@ -358,8 +318,6 @@ def _bwd_preprocess_do_o_dot(
         "BHN": lambda args: args["B"] * args["H"] * args["N"],
         "BHMN": lambda args: args["B"] * args["H"] * args["M"] * args["N"],
         "BH": lambda args: args["B"] * args["H"],
-        "BLOCK_M": DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=64),
-        "BLOCK_N": DivisorHeuristic("N", min_val=TENSOR_CORE_K, max_val=128),
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
         "EVEN_D": IsBlockMultiple("D", "BLOCK_HEADDIM"),
         "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
@@ -367,30 +325,26 @@ def _bwd_preprocess_do_o_dot(
 )
 @triton.jit
 def _bwd_kernel(
-    q_p, 
-    k_p, 
-    v_p, 
+    # fmt: off
+    # Inputs
+    q_p, k_p, v_p, logit_scale_p,
+    # Derivatives
+    do_p, dq_p, dk_p, dv_p, delta_p,
     softmax_scale: tl.constexpr,  
-    Out, 
-    do_p,  #
-    dq_p, 
-    dk_p, 
-    dv_p,  #
-    logit_scale_p,  #
-    delta_p,  #
+    # Strides
     stride_dq_a, 
     stride_q_b, stride_q_m, stride_q_h,
     stride_k_b, stride_k_n, stride_k_h, 
     stride_v_b, stride_v_n, stride_v_h, 
+    # Sizes
     B: tl.constexpr, H: tl.constexpr, M: tl.constexpr, N: tl.constexpr, D: tl.constexpr,
-    BHM: tl.constexpr,
-    BHN: tl.constexpr,
-    BHMN: tl.constexpr,
-    BH: tl.constexpr,
-    BLOCK_M: tl.constexpr, 
-    BLOCK_N: tl.constexpr,
-    BLOCK_HEADDIM: tl.constexpr,
+    # Derived sizes
+    BHM: tl.constexpr, BHN: tl.constexpr, BHMN: tl.constexpr, BH: tl.constexpr,
+    # Blocks
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_HEADDIM: tl.constexpr,
+    # Heuristics
     EVEN_D: tl.constexpr,
+    # fmt: on
 ):
     # Initialize offsets.
     # Grid will be over (B*H, Lk)
@@ -472,8 +426,6 @@ def _bwd_kernel(
     # * dC/dA = B.T
     # * dC/dB = A.T
     for start_m in range(0, M, BLOCK_M):
-        tl.device_print("m", start_m)
-        tl.multiple_of(start_m, BLOCK_M)
         offs_m_curr = start_m + tl.arange(0, BLOCK_M)
 
         # Recompute p = softmax(qk), p is (MxN)
@@ -485,7 +437,7 @@ def _bwd_kernel(
         # compute dL/dv = dL/do * do/dv = dL/do * p
         # Shape do = (MxD)
         # NOTE: `do` is pre-divided by `l`; no normalization here
-        do = tl.load(DO_block_ptr, boundary_check=(1,) if not EVEN_D else None) # (MxD)
+        do = tl.load(DO_block_ptr, boundary_check=(1,) if not EVEN_D else None)  # (MxD)
         dv += tl.dot(tl.trans(do), p.to(q_p.dtype.element_ty), allow_tf32=True)
 
         # compute dL/dp = dL/do * do/dp = dL/do * v
@@ -513,7 +465,6 @@ def _bwd_kernel(
     tl.store(DV_block_ptr, dv.to(v_p.dtype.element_ty), boundary_check=(0,) if not EVEN_D else None)
     tl.store(DK_block_ptr, dk.to(k_p.dtype.element_ty), boundary_check=(0,) if not EVEN_D else None)
 
-    
 
 class _attention(torch.autograd.Function):
 
@@ -554,54 +505,28 @@ class _attention(torch.autograd.Function):
         logit_scale = torch.empty((B, H, Lq), device=q.device, dtype=torch.float32)
         o = torch.empty_like(q)
         # NOTE: It seems important that we seed to at most 2**30. Otherwise we randomly get huge latency spikes.
-        seed = torch.randint(0, 2 ** 30, (1,), dtype=torch.int64).item()
+        seed = torch.randint(0, 2**30, (1,), dtype=torch.int64).item()
 
         def grid(META):
             return (triton.cdiv(Lq, META["BLOCK_M"]), B * H)
 
-        compiled = _fwd_kernel[grid](
-            q,
-            k,
-            v,
-            logit_scale,
-            pos_q,
-            pos_k,
-            slopes,
-            o,
+        # fmt: off
+        spill_warning(_fwd_kernel[grid])(
+            q, k, v, logit_scale, pos_q, pos_k, slopes, o,
             softmax_scale,
-            B,
-            H,
-            Lq,
-            Lk,
-            D,
-            D_pos,
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            k.stride(0),
-            k.stride(1),
-            k.stride(2),
-            v.stride(0),
-            v.stride(1),
-            v.stride(2),
-            logit_scale.stride(0),
-            logit_scale.stride(1),
-            logit_scale.stride(2),
-            pos_q.stride(0),
-            pos_q.stride(1),
-            pos_q.stride(2),
-            pos_k.stride(0),
-            pos_k.stride(1),
-            pos_k.stride(2),
+            B, H, Lq, Lk, D, D_pos,
+            q.stride(0), q.stride(1), q.stride(2),
+            k.stride(0), k.stride(1), k.stride(2),
+            v.stride(0), v.stride(1), v.stride(2),
+            logit_scale.stride(0), logit_scale.stride(1), logit_scale.stride(2),
+            pos_q.stride(0), pos_q.stride(1), pos_q.stride(2),
+            pos_k.stride(0), pos_k.stride(1), pos_k.stride(2),
             slopes.stride(0),
-            o.stride(0),
-            o.stride(1),
-            o.stride(2),
+            o.stride(0), o.stride(1), o.stride(2),
             HAS_BIAS=has_bias,
             NEEDS_SCALE=True,
         )
-        if compiled.n_spills:
-            print("WARNING: Spills detected in the kernel")
+        # fmt: on
 
         ctx.save_for_backward(q, k, v, o, logit_scale)
         ctx.softmax_scale = softmax_scale
@@ -612,8 +537,9 @@ class _attention(torch.autograd.Function):
         q, k, v, o, logit_scale = ctx.saved_tensors
         B, Lk, H, D = k.shape
         _, Lq, _, _ = q.shape
+        assert logit_scale.shape == (B, H, Lq)
 
-        BLOCK_M = DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=128)({"M": Lq})
+        BLOCK_M = DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=64)({"M": Lq})
         BLOCK_N = DivisorHeuristic("N", min_val=TENSOR_CORE_K, max_val=128)({"N": Lk})
 
         do = do.contiguous()
@@ -625,51 +551,54 @@ class _attention(torch.autograd.Function):
         def pre_grid(META):
             return (triton.cdiv(Lq, BLOCK_M), B * H)
 
-        _bwd_preprocess_do_o_dot[pre_grid](
-            o,
-            do,
-            delta,
-            o.stride(0),
-            o.stride(1),
-            o.stride(2),
-            do.stride(0),
-            do.stride(1),
-            do.stride(2),
-            delta.stride(0),
-            delta.stride(1),
-            delta.stride(2),
+        # fmt: off
+        spill_warning(_bwd_preprocess_do_o_dot[pre_grid])(
+            o, do, delta,
+            o.stride(0), o.stride(1), o.stride(2),
+            do.stride(0), do.stride(1), do.stride(2),
+            delta.stride(0), delta.stride(1),
+            H=H, D=D, M=Lq,
             BLOCK_M=BLOCK_M,
-            D=D,
-            H=H,
-            M=Lq,
-            BLOCK_HEADDIM=D,
             BHM=B*H*Lq,
-            BH=B*H,
         )
+        # fmt: on
 
         def grid(META):
-            return (B*H, triton.cdiv(Lk, BLOCK_N))
+            return (B * H, triton.cdiv(Lk, BLOCK_N))
 
-        _bwd_kernel[grid](
-            q, 
-            k, 
-            v, 
-            ctx.softmax_scale,
-            o, 
-            do,
-            dq, 
-            dk, 
-            dv,
+        # fmt: on
+        spill_warning(_bwd_kernel[grid])(
+            q,
+            k,
+            v,
             logit_scale,
+            do,
+            dq,
+            dk,
+            dv,
             delta,
-            dq.stride(0), 
-            q.stride(0), q.stride(1), q.stride(2), #
-            k.stride(0), k.stride(1), k.stride(2), #
-            v.stride(0), v.stride(1), v.stride(2), #
-            B, H, Lq, Lk, D, #
+            ctx.softmax_scale,
+            dq.stride(0),
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            B=B,
+            H=H,
+            M=Lq,
+            N=Lk,
+            D=D,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
             num_warps=8,
             num_stages=1,
         )
+        # fmt: on
 
         if len(dq.shape) == 5:
             dq = dq.sum(dim=0)
@@ -680,16 +609,15 @@ attention_fn = _attention.apply
 
 
 def attention(
-    q: Tensor, 
-    k: Tensor, 
-    v: Tensor, 
-    pos_q: Tensor | None = None, 
-    pos_k: Tensor | None = None, 
-    slopes: Tensor | None = None, 
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    pos_q: Tensor | None = None,
+    pos_k: Tensor | None = None,
+    slopes: Tensor | None = None,
     softmax_scale: float | None = None,
 ) -> Tensor:
     return cast(Tensor, attention_fn(q, k, v, pos_q, pos_k, slopes, softmax_scale))
-
 
 
 def _benchmark(
@@ -702,6 +630,7 @@ def _benchmark(
     bar: tqdm | None = None,
     verbose: bool = False,
     bias: bool = False,
+    mode: str = "fwd",
 ):
     if verbose:
         with tqdm.external_write_mode():
@@ -710,22 +639,19 @@ def _benchmark(
     N_head = 8
     D_pos = 2
 
-    q = torch.randn((B, Q, N_head, D), device="cuda", dtype=torch.float16)
-    k = torch.randn((B, K, N_head, D), device="cuda", dtype=torch.float16)
-    v = torch.randn((B, K, N_head, D), device="cuda", dtype=torch.float16)
+    q = torch.randn((B, Q, N_head, D), device="cuda", dtype=torch.float16, requires_grad=mode != "fwd")
+    k = torch.randn((B, K, N_head, D), device="cuda", dtype=torch.float16, requires_grad=mode != "fwd")
+    v = torch.randn((B, K, N_head, D), device="cuda", dtype=torch.float16, requires_grad=mode != "fwd")
     quantiles = [0.5, 0.2, 0.8]
 
     if bias and provider not in ["flash", "mem-eff"]:
         pos_q = torch.randn((B, Q, N_head, D_pos), device="cuda", dtype=torch.float16)
         pos_k = torch.randn((B, K, N_head, D_pos), device="cuda", dtype=torch.float16)
         attn_mask = -1 * (
-            (pos_q[:, :, None, ...] - pos_k[:, None, ...])
-            .pow(2).sum(-1).sqrt_()
-            .movedim(-1, 1).view(B, N_head, Q, K)
+            (pos_q[:, :, None, ...] - pos_k[:, None, ...]).pow(2).sum(-1).sqrt_().movedim(-1, 1).view(B, N_head, Q, K)
         )
     else:
         pos_q = pos_k = attn_mask = None
-
 
     match provider:
         case "torch" | "flash" | "mem-eff":
@@ -738,14 +664,22 @@ def _benchmark(
                 enable_mem_efficient=provider == "mem-eff",
             ):
                 ms, min_ms, max_ms = triton.testing.do_bench(
-                    lambda: F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask),
+                    lambda: (
+                        F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+                        if mode == "fwd"
+                        else F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask).sum().backward()
+                    ),
                     quantiles=quantiles,
                     warmup=warmup,
                     rep=rep,
                 )
         case "triton":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: _flash_attn_forward(q, k, v, pos_q, pos_k),
+                lambda: (
+                    attention(q, k, v, pos_q, pos_k)
+                    if mode == "fwd"
+                    else attention(q, k, v, pos_q, pos_k).sum().backward()
+                ),
                 quantiles=quantiles,
                 warmup=warmup,
                 rep=rep,
@@ -775,6 +709,7 @@ def parse_args() -> Namespace:
     parser.add_argument("--rep", type=int, default=100, help="`rep` arg for `triton.testing.do_bench`")
     parser.add_argument("-v", "--verbose", default=False, action="store_true", help="Print each benchmark result")
     parser.add_argument("-b", "--bias", default=False, action="store_true", help="Benchmark with ALiBi style bias")
+    parser.add_argument("--mode", default="fwd", choices=["fwd", "bwd"], help="Mode to benchmark")
     return parser.parse_args()
 
 
@@ -815,6 +750,7 @@ def main(args: Namespace):
                 bar=bar,
                 verbose=args.verbose,
                 bias=args.bias,
+                mode=args.mode,
             )
         )
         df: Any = benchmark.run(

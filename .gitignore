@@ -142,3 +142,4 @@ coverage.xml
 # Ignore benchmark outputs
 *.csv
 *.html
+*.png

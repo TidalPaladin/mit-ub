@@ -1,10 +1,10 @@
+import math
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
 import torch
-import math
 import triton
 import triton.language as tl
 from torch import Tensor
@@ -17,6 +17,8 @@ from .helpers import TENSOR_CORE_K, IsBlockMultiple, PowerOfTwoHeuristic
 ROOT_2 = math.sqrt(2)
 
 # We expect K to be relatively small (probably length 1-3) for spacial coordinates
+
+
 @triton.heuristics(
     {
         "BLOCK_SIZE_K": PowerOfTwoHeuristic("K", min_val=1, max_val=16),
@@ -66,7 +68,7 @@ def _euclidean_distance_kernel_fwd_pointwise(
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
     pid_m = first_pid_m + (pid % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
-    #tl.device_print("m", N)
+    # tl.device_print("m", N)
 
     # Create block pointers for A B and C
     a_block_ptr = tl.make_block_ptr(
@@ -125,13 +127,11 @@ def _euclidean_distance_kernel_fwd_pointwise(
             a_block_ptr,
             boundary_check=(0, 1) if not (EVEN_M and EVEN_K) else (0,) if not EVEN_M else (1,) if not EVEN_K else None,
         )
-        b = (
-            tl.load(
-                b_block_ptr,
-                boundary_check=(
-                    (0, 1) if not (EVEN_M and EVEN_K) else (0,) if not EVEN_N else (1,) if not EVEN_K else None
-                ),
-            )
+        b = tl.load(
+            b_block_ptr,
+            boundary_check=(
+                (0, 1) if not (EVEN_M and EVEN_K) else (0,) if not EVEN_N else (1,) if not EVEN_K else None
+            ),
         )
 
         # Compute the squared differences
@@ -152,7 +152,7 @@ def _euclidean_distance_kernel_fwd_pointwise(
 
         # Advance block pointers
         a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
-        b_block_ptr = tl.advance(b_block_ptr, (0, BLOCK_SIZE_K)) 
+        b_block_ptr = tl.advance(b_block_ptr, (0, BLOCK_SIZE_K))
 
     # Apply the square root and store the result
     c = tl.sqrt(accumulator).to(c_ptr.dtype.element_ty)
@@ -186,7 +186,7 @@ def _euclidean_distance_matmul_inner(
     diag_b = tl.sum(diag_b, 1)
 
     # Update accumulator -> diag(a @ a.T) - 2 * a @ b + diag(b @ b.T)
-    return diag_a[:, None] - 2*ab + diag_b[None, :]
+    return diag_a[:, None] - 2 * ab + diag_b[None, :]
 
 
 @triton.heuristics(
@@ -364,11 +364,11 @@ class _EuclideanDistance(Function):
 
         match a.dtype:
             case torch.float16:
-                dtype = tl.float16
+                tl.float16
             case torch.float32:
-                dtype = tl.float32
+                tl.float32
             case torch.bfloat16:
-                dtype = tl.bfloat16
+                tl.bfloat16
             case _:
                 raise ValueError(f"Unsupported dtype: {a.dtype}")
 
