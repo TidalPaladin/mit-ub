@@ -138,3 +138,24 @@ def spill_warning(func: triton.JITFunction[T], limit: int = 0) -> Callable[..., 
             warnings.warn(f"{compiled.fn} spilled {compiled.n_spills} times using {compiled.n_regs} registers")
 
     return cast(Callable[..., T], wrapper)
+
+
+@dataclass
+class SelectHeuristic:
+    r"""Selects between two heuristics based on a condition.
+
+    Args:
+        func: Condition to select the heuristic. Should accept `args` dict as input.
+        when_true: Minimum value for the output
+        when_false: Maximum value for the output
+
+    Returns:
+        Selected heuristic based on the condition.
+    """
+
+    func: Callable[[Dict[str, Any]], bool]
+    when_true: Callable[[Dict[str, Any]], Any]
+    when_false: Callable[[Dict[str, Any]], Any]
+
+    def __call__(self, args: Dict[str, Any]) -> Any:
+        return self.when_true(args) if self.func(args) else self.when_false(args)

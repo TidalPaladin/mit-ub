@@ -171,19 +171,21 @@ def _euclidean_distance_matmul_inner(
     b: tl.tensor,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
+    DOT_DTYPE: tl.constexpr = tl.float32,
 ):
-    # Compute a @ b.T
-    ab = tl.dot(a, b)
-
     # Compute diag(a @ a.T)
     block_idx = tl.arange(0, BLOCK_SIZE_M)
-    diag_a = tl.where(block_idx[:, None] == block_idx, tl.dot(a, tl.trans(a)), float(0.0))
+    diag_a = tl.where(block_idx[:, None] == block_idx, tl.dot(a, tl.trans(a), out_dtype=DOT_DTYPE), float(0.0))
     diag_a = tl.sum(diag_a, 1)
 
     # Compute diag(b @ b.T)
     block_idx = tl.arange(0, BLOCK_SIZE_N)
-    diag_b = tl.where(block_idx[:, None] == block_idx, tl.dot(tl.trans(b), b), float(0.0))
+    diag_b = tl.where(block_idx[:, None] == block_idx, tl.dot(tl.trans(b), b, out_dtype=DOT_DTYPE), float(0.0))
     diag_b = tl.sum(diag_b, 1)
+
+    # Compute a @ b.T
+    # Compute this last to minimize register pressure
+    ab = tl.dot(a, b, out_dtype=DOT_DTYPE)
 
     # Update accumulator -> diag(a @ a.T) - 2 * a @ b + diag(b @ b.T)
     return diag_a[:, None] - 2 * ab + diag_b[None, :]

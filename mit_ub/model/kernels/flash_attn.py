@@ -2,7 +2,7 @@ import math
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from functools import partial
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, Tuple, Dict
 
 import torch
 import torch.nn.functional as F
@@ -12,24 +12,29 @@ from torch import Tensor
 from tqdm import tqdm
 
 from .distance import _euclidean_distance_matmul_inner
-from .helpers import TENSOR_CORE_K, DivisorHeuristic, IsBlockMultiple, PowerOfTwoHeuristic, spill_warning
+from .helpers import TENSOR_CORE_K, DivisorHeuristic, IsBlockMultiple, PowerOfTwoHeuristic, spill_warning, SelectHeuristic
 
 
-# @triton.autotune(
-#    configs=[
-#        triton.Config({"BLOCK_M": 16, "BLOCK_N": 16}),
-#        triton.Config({"BLOCK_M": 32, "BLOCK_N": 32}),
-#        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}),
-#        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}),
-#    ],
-#    key=["D", "M", "N"],
-# )
+#@triton.autotune(
+#   configs=[
+#       triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}),
+#       triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}),
+#       triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}),
+#       triton.Config({"BLOCK_M": 64, "BLOCK_N": 32}),
+#   ],
+#   key=["D", "M", "N", "D_pos"],
+#)
 @triton.heuristics(
     {
         # BLOCK_HEADDIM must go up to the size of D.
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
         "BLOCK_POSDIM": PowerOfTwoHeuristic("D_pos", min_val=TENSOR_CORE_K),
-        "BLOCK_M": DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=128),
+        "BLOCK_M": SelectHeuristic(
+            lambda args: args["HAS_BIAS"],
+            # Spilling seems to happen with bias for M=128
+            DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=64),
+            DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=128),
+        ),
         "BLOCK_N": DivisorHeuristic("N", min_val=TENSOR_CORE_K, max_val=64),
         "EVEN_POSDIM": IsBlockMultiple("D_pos", "BLOCK_POSDIM"),
         "BHM": lambda args: args["B"] * args["H"] * args["M"],
@@ -67,7 +72,10 @@ def _fwd_kernel(
     # Heuristics for boundary checks
     EVEN_POSDIM: tl.constexpr, 
     BHM: tl.constexpr, BHN: tl.constexpr, BH: tl.constexpr,
-    HAS_BIAS: tl.constexpr, NEEDS_SCALE: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    # Dtypes
+    ACCUMULATOR_DTYPE: tl.constexpr = tl.float32, 
+    PROB_DTYPE: tl.constexpr = tl.float32, DOT_DTYPE: tl.constexpr = tl.float32,
     # fmt: on
 ):
     # Grid is (L, H * B)
@@ -87,50 +95,14 @@ def _fwd_kernel(
     # This program's block of queries will be loaded by this program for processing and kept there.
     # NOTE: Block pointers may contribute to register spilling due to int64 indexing. Checking the
     # compiled kernel.n_spills indiciates no spilling - is this an issue or not?
-    #Q_ptrs = q_p + offset_b * stride_q_b + offset_h * stride_q_h + start_m * BLOCK_M
-    Q_ptrs = tl.make_block_ptr(
-        base=q_p + offset_b * stride_q_b + offset_h * stride_q_h,
-        shape=(BHM, D),
-        strides=(stride_q_m, 1),
-        offsets=(start_m * BLOCK_M, 0),
-        block_shape=(BLOCK_M, BLOCK_HEADDIM),
-        order=(1, 0),
-    )
-    # We will iteratively load blocks of K and V
-    K_block_ptr = tl.make_block_ptr(
-        base=k_p + offset_b * stride_k_b + offset_h * stride_k_h,
-        shape=(D, BHN),
-        strides=(1, stride_k_n),
-        offsets=(0, 0),
-        block_shape=(BLOCK_HEADDIM, BLOCK_N),
-        order=(0, 1),
-    )
-    V_block_ptr = tl.make_block_ptr(
-        base=v_p + offset_b * stride_v_b + offset_h * stride_v_h,
-        shape=(BHN, D),
-        strides=(stride_v_n, 1),
-        offsets=(0, 0),
-        block_shape=(BLOCK_N, BLOCK_HEADDIM),
-        order=(1, 0),
-    )
-    # Q and K positions will be handled the same as Q and K respectively
-    if HAS_BIAS:
-        Qpos_block_ptr = tl.make_block_ptr(
-            base=pos_q_p + offset_b * stride_posq_b + offset_h * stride_posq_h,
-            shape=(BHM, D_pos),
-            strides=(stride_posq_m, 1),
-            offsets=(start_m * BLOCK_M, 0),
-            block_shape=(BLOCK_M, BLOCK_POSDIM),
-            order=(1, 0),
-        )
-        Kpos_block_ptr = tl.make_block_ptr(
-            base=pos_k_p + offset_b * stride_posk_b + offset_h * stride_posk_h,
-            shape=(D_pos, BHN),
-            strides=(1, stride_posk_n),
-            offsets=(0, 0),
-            block_shape=(BLOCK_POSDIM, BLOCK_N),
-            order=(0, 1),
-        )
+    q_p += offset_b * stride_q_b + offset_h * stride_q_h + start_m * BLOCK_M * stride_q_m
+    k_p += offset_b * stride_k_b + offset_h * stride_k_h
+    v_p += offset_b * stride_v_b + offset_h * stride_v_h
+    pos_q_p += offset_b * stride_posq_b + offset_h * stride_posq_h + start_m * BLOCK_M * stride_posq_m
+    pos_k_p += offset_b * stride_posk_b + offset_h * stride_posk_h
+    pos_slopes_p += offset_b * stride_slopes_b
+    out_p += offset_b * stride_o_b + offset_h * stride_o_h + start_m * BLOCK_M * stride_o_m
+    logit_scale_p += offset_b * stride_logit_b + offset_h * stride_logit_h + start_m * BLOCK_M
 
     # For each query we will track the maximum unscaled logit that we saw for that query's softmax.
     # We will use this to offset all logits for that query such that numerical overflow is avoided
@@ -153,108 +125,90 @@ def _fwd_kernel(
     #   * `p` - exp(x_i - c) for each query
     #   * `softmax_denominator` - sum_j exp(x_j - c) for each query
     #   * `alpha` - exp(c - d) for each query
-    value_accumulator = tl.zeros([BLOCK_M, BLOCK_HEADDIM], dtype=tl.float32)
+    value_accumulator = tl.zeros([BLOCK_M, BLOCK_HEADDIM], dtype=ACCUMULATOR_DTYPE)
     softmax_denominator = tl.zeros([BLOCK_M], dtype=tl.float32)
-    if NEEDS_SCALE:
-        query_i_maxdot = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    query_i_maxdot = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
 
     # Q gets loaded into SRAM and stays there. Pre-apply the softmax scale
-    q = tl.load(Q_ptrs)
-    q = (q * softmax_scale).to(k_p.dtype.element_ty)
+    m_offsets = tl.arange(0, BLOCK_M)
+    d_offsets = tl.arange(0, BLOCK_HEADDIM) 
+    q = tl.load(q_p + (m_offsets[:, None] * stride_q_m + d_offsets[None, :]))
+    q *= tl.full((1,), softmax_scale, dtype=q.dtype)
+
     # If we have bias, we will also load the Q positions and ALiBi slopes
+    # NOTE: Since distances are likely < D_pos we must apply masking along D_pos
     if HAS_BIAS:
-        Qpos_block_ptr = tl.make_block_ptr(
-            base=pos_q_p + offset_b * stride_posq_b + offset_h * stride_posq_h,
-            shape=(BHM, D_pos),
-            strides=(stride_posq_m, 1),
-            offsets=(start_m * BLOCK_M, 0),
-            block_shape=(BLOCK_M, BLOCK_POSDIM),
-            order=(1, 0),
-        )
-        pos_q = tl.load(Qpos_block_ptr, boundary_check=(1,) if not EVEN_POSDIM else None)
-        slopes_ptr = pos_slopes_p + offset_b * stride_slopes_b
-        pos_slope = tl.load(slopes_ptr)
+        # Load the slopes squared
+        if EVEN_POSDIM:
+            pos_q = tl.load(pos_q_p + (m_offsets[:, None] * stride_posq_m + d_offsets[None, :]))
+        else:
+            pos_q_mask = (d_offsets < D_pos)[None, :]
+            pos_q = tl.load(pos_q_p + (m_offsets[:, None] * stride_posq_m + d_offsets[None, :]), mask=pos_q_mask)
+        pos_slope = tl.load(pos_slopes_p).to(pos_q.dtype)
 
     # Iterate over KV blocks
     for _ in range(0, N, BLOCK_N):
-        # Load KV block
-        k = tl.load(K_block_ptr)
-        v = tl.load(V_block_ptr)
-
-        # Compute QK
+        # Load K block and compute QK (must be FP32 for exponential)
+        k = tl.load(k_p + (tl.arange(0, BLOCK_N)[None, :] * stride_k_n + tl.arange(0, BLOCK_HEADDIM)[:, None]))
         qk = tl.dot(q, k, allow_tf32=True)
 
         # Compute the bias
         if HAS_BIAS:
-            pos_k = tl.load(Kpos_block_ptr, boundary_check=(0,) if not EVEN_POSDIM else None)
-            bias = _euclidean_distance_matmul_inner(pos_q, pos_k, BLOCK_M, BLOCK_N)
-            bias = tl.sqrt(bias.to(tl.float32)).to(bias.dtype)
-            qk += pos_slope * bias
-            Kpos_block_ptr = tl.advance(Kpos_block_ptr, (0, BLOCK_N))
+            d_offsets = tl.arange(0, BLOCK_HEADDIM)
+            if EVEN_POSDIM:
+                pos_k = tl.load(pos_k_p + (m_offsets[None, :] * stride_posk_n + d_offsets[:, None]))
+            else:
+                pos_k_mask = (d_offsets < D_pos)[:, None]
+                pos_k = tl.load(pos_k_p + (m_offsets[None, :] * stride_posk_n + d_offsets[:, None]), mask=pos_k_mask)
+            bias = _euclidean_distance_matmul_inner(pos_q, pos_k, BLOCK_M, BLOCK_N, DOT_DTYPE)
+            bias = pos_slope * tl.sqrt(bias.to(tl.float32)).to(bias.dtype)
+            qk += bias
 
-        if NEEDS_SCALE:
-            # Determine the maximum logit seen for each query
-            query_i_maxdot_new = tl.maximum(query_i_maxdot, tl.max(qk, 1))
+        # Determine the maximum logit seen for each query
+        query_i_maxdot_new = tl.maximum(query_i_maxdot, tl.max(qk, 1))
 
-            # Compute scaling constant alpha.
-            # Multiplying by this constant unscales the previous contributions and rescales according to the new maximum logit
-            alpha = tl.exp(query_i_maxdot - query_i_maxdot_new)
+        # Compute scaling constant alpha and rescale the previous contributions, updating the maximum logit
+        alpha = tl.exp(query_i_maxdot - query_i_maxdot_new)
+        query_i_maxdot = query_i_maxdot_new
+        value_accumulator *= alpha.to(ACCUMULATOR_DTYPE)[:, None]
+        softmax_denominator *= alpha
 
-            # Compute the softmax numerator for each key, applying the maximum logit offset to avoid numerical overflow
-            p = tl.exp(qk - query_i_maxdot_new[:, None])
+        # Compute the softmax numerator for each key, applying the maximum logit offset to avoid numerical overflow
+        p = tl.exp(qk - query_i_maxdot_new[:, None]).to(PROB_DTYPE)
 
-            # Apply the scaling constant to the accumulated values to rescale previous contributions
-            # and accumulate the weighted values for this block of V
-            value_accumulator = (value_accumulator * alpha[:, None]) + tl.dot(p.to(v.dtype), v, allow_tf32=True)
+        # Compute the softmax denominator for each query, applying the maximum logit offset to the existing denominator
+        softmax_denominator += tl.sum(p, 1)
 
-            # Compute the softmax denominator for each query, applying the maximum logit offset to the existing denominator
-            softmax_denominator = softmax_denominator * alpha + tl.sum(p, 1)
+        # Accumulate the weighted values for this block of V
+        v = tl.load(v_p + (tl.arange(0, BLOCK_N)[:, None] * stride_v_n + tl.arange(0, BLOCK_HEADDIM)[None, :]))
+        value_accumulator += tl.dot(p.to(v.dtype), v, allow_tf32=True, out_dtype=DOT_DTYPE).to(ACCUMULATOR_DTYPE)
 
-            # Update and advance pointers
-            query_i_maxdot = query_i_maxdot_new
-
-        else:
-            # Compute the softmax numerator for each key
-            p = tl.exp(qk)
-            # Accumulate weighted values
-            value_accumulator += tl.dot(p.to(v.dtype), v, allow_tf32=True)
-            # Update softmax denominator
-            softmax_denominator = softmax_denominator + tl.sum(p, 1)
-
-        K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
-        V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
-    
+        # Advance pointers
+        k_p += BLOCK_N * stride_k_n
+        v_p += BLOCK_N * stride_v_n
+        if HAS_BIAS:
+            pos_k_p += BLOCK_N * stride_posk_n
 
     # Compute the final softmax values
-    value_accumulator = value_accumulator / softmax_denominator[:, None]
+    value_accumulator = value_accumulator / softmax_denominator.to(ACCUMULATOR_DTYPE)[:, None]
 
     # Per Flash Attention 2, we store only logsumexp for the backward pass
-    if NEEDS_SCALE:
-        logit_scale_ptr = tl.make_block_ptr(
-            base=logit_scale_p + offset_b * stride_logit_b + offset_h * stride_logit_h,
-            shape=(BH, M),
-            strides=(stride_logit_h, 1),
-            offsets=(0, start_m * BLOCK_M),
-            block_shape=(1, BLOCK_M),
-            order=(1, 0),
-        )
-        tl.store(logit_scale_ptr, (query_i_maxdot + tl.math.log(softmax_denominator))[None, :])
+    tl.store(
+        logit_scale_p + tl.arange(0, BLOCK_M),
+        (query_i_maxdot + tl.math.log(softmax_denominator)),
+    )
 
     # Write output
-    O_block_ptr = tl.make_block_ptr(
-        base=out_p + offset_b * stride_o_b + offset_h * stride_o_h,
-        shape=(BHM, D),
-        strides=(stride_o_m, 1),
-        offsets=(start_m * BLOCK_M, 0),
-        block_shape=(BLOCK_M, BLOCK_HEADDIM),
-        order=(1, 0),
+    tl.store(
+        out_p + (tl.arange(0, BLOCK_M)[:, None] * stride_o_m + tl.arange(0, BLOCK_HEADDIM)[None, :]), 
+        value_accumulator.to(out_p.dtype.element_ty),
     )
-    tl.store(O_block_ptr, value_accumulator.to(out_p.dtype.element_ty))
 
 
 @triton.heuristics(
     {
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
+        "BLOCK_M": DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=128),
         "EVEN_D": IsBlockMultiple("D", "BLOCK_HEADDIM"),
         "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
     }
@@ -291,7 +245,7 @@ def _bwd_preprocess_do_o_dot(
         (BLOCK_M, BLOCK_HEADDIM),
         (1, 0),
     )
-    o = tl.load(o_block_ptr).to(tl.float32)
+    o = tl.load(o_block_ptr).to(Delta.dtype.element_ty)
 
     # Load DO
     do_block_ptr = tl.make_block_ptr(
@@ -302,9 +256,9 @@ def _bwd_preprocess_do_o_dot(
         (BLOCK_M, BLOCK_HEADDIM),
         (1, 0),
     )
-    do = tl.load(do_block_ptr).to(tl.float32)
+    do = tl.load(do_block_ptr).to(Delta.dtype.element_ty)
 
-    # ???
+    # Compute
     delta = tl.sum(o * do, axis=1)
 
     # Write output
@@ -320,6 +274,8 @@ def _bwd_preprocess_do_o_dot(
         "BHMN": lambda args: args["B"] * args["H"] * args["M"] * args["N"],
         "BH": lambda args: args["B"] * args["H"],
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
+        "BLOCK_M": DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=64),
+        "BLOCK_N": DivisorHeuristic("N", min_val=TENSOR_CORE_K, max_val=128),
         "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
     }
 )
@@ -331,143 +287,122 @@ def _bwd_kernel(
     # Derivatives
     do_p, dq_p, dk_p, dv_p, delta_p,
     softmax_scale: tl.constexpr,  
+    lock_p,
     # Strides
-    stride_dq_a, 
-    stride_q_b, stride_q_h, stride_q_m,
-    stride_k_b, stride_k_h, stride_k_n, 
-    stride_v_b, stride_v_h, stride_v_n, 
+    stride_q_b: tl.constexpr, stride_q_h: tl.constexpr , stride_q_m: tl.constexpr,
+    stride_k_b: tl.constexpr, stride_k_h: tl.constexpr , stride_k_n: tl.constexpr, 
+    stride_v_b: tl.constexpr, stride_v_h: tl.constexpr , stride_v_n: tl.constexpr, 
     # Sizes
     B: tl.constexpr, H: tl.constexpr, M: tl.constexpr, N: tl.constexpr, D: tl.constexpr,
     # Derived sizes
     BHM: tl.constexpr, BHN: tl.constexpr, BHMN: tl.constexpr, BH: tl.constexpr,
     # Blocks
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_HEADDIM: tl.constexpr,
+    # Dtypes
+    ACCUMULATOR_DTYPE: tl.constexpr = tl.float32, 
+    PROB_DTYPE: tl.constexpr = tl.float32, DOT_DTYPE: tl.constexpr = tl.float32,
     # fmt: on
 ):
     # Initialize offsets.
-    # Grid will be over (B*H, Lk)
-    offset_bh = tl.program_id(0)
+    # Grid will be over (Lk, B*H)
+    start_n = tl.program_id(0)
+    offset_bh = tl.program_id(1)
     offset_b = offset_bh // H
     offset_h = offset_bh % H
-    start_n = tl.program_id(1)
 
-    # Initialize pointers
-    Q_block_ptr = tl.make_block_ptr(
-        base=q_p + offset_b * stride_q_b + offset_h * stride_q_h,
-        shape=(BHM, D),
-        strides=(stride_q_m, 1),
-        offsets=(0, 0),
-        block_shape=(BLOCK_M, BLOCK_HEADDIM),
-        order=(1, 0),
-    )
-    K_block_ptr = tl.make_block_ptr(
-        base=k_p + offset_b * stride_k_b + offset_h * stride_k_h,
-        shape=(D, BHN),
-        strides=(1, stride_k_n),
-        offsets=(0, start_n * BLOCK_N),
-        block_shape=(BLOCK_HEADDIM, BLOCK_N),
-        order=(0, 1),
-    )
-    V_block_ptr = tl.make_block_ptr(
-        base=v_p + offset_b * stride_v_b + offset_h * stride_v_h,
-        shape=(D, BHN),
-        strides=(1, stride_v_n),
-        offsets=(0, start_n * BLOCK_N),
-        block_shape=(BLOCK_HEADDIM, BLOCK_N),
-        order=(0, 1),
-    )
-    DO_block_ptr = tl.make_block_ptr(
-        base=do_p + offset_b * stride_q_b + offset_h * stride_q_h,
-        shape=(BHM, D),
-        strides=(stride_q_m, 1),
-        offsets=(0, 0),
-        block_shape=(BLOCK_M, BLOCK_HEADDIM),
-        order=(1, 0),
-    )
-    DQ_block_ptr = tl.make_block_ptr(
-        base=dq_p + start_n * stride_dq_a + offset_b * stride_q_b + offset_h * stride_q_h,
-        shape=(BHMN, D),
-        strides=(stride_q_m, 1),
-        offsets=(0, 0),
-        block_shape=(BLOCK_M, BLOCK_HEADDIM),
-        order=(1, 0),
-    )
-    DK_block_ptr = tl.make_block_ptr(
-        base=dk_p + offset_b * stride_k_b + offset_h * stride_k_h,
-        shape=(D, BHN),
-        strides=(1, stride_k_n),
-        offsets=(0, start_n * BLOCK_N),
-        block_shape=(BLOCK_HEADDIM, BLOCK_N),
-        order=(0, 1),
-    )
-    DV_block_ptr = tl.make_block_ptr(
-        base=dv_p + offset_b * stride_v_b + offset_h * stride_v_h,
-        shape=(D, BHN),
-        strides=(1, stride_v_n),
-        offsets=(0, start_n * BLOCK_N),
-        block_shape=(BLOCK_HEADDIM, BLOCK_N),
-        order=(0, 1),
-    )
-    # We won't use block pointers for these since they're trivial
-    delta_ptrs = delta_p + offset_bh * M
-    logit_scale_ptrs = logit_scale_p + offset_bh * M
+    # Seek pointers
+    # NOTE: This kernel has significant register pressure. To avoid spilling we favor manual pointers
+    # over block pointers (for int32 indexing) and rematerialization over storing intermediate results.
+    q_p += offset_b * stride_q_b + offset_h * stride_q_h
+    k_p += offset_b * stride_k_b + offset_h * stride_k_h
+    v_p += offset_b * stride_v_b + offset_h * stride_v_h
+    do_p += offset_b * stride_q_b + offset_h * stride_q_h
+    dq_p += offset_b * stride_q_b + offset_h * stride_q_h 
+    dk_p += offset_b * stride_k_b + offset_h * stride_k_h 
+    dv_p += offset_b * stride_v_b + offset_h * stride_v_h
+    delta_p += offset_bh * M
+    logit_scale_p += offset_bh * M
+    lock_p += offset_bh * tl.cdiv(M, BLOCK_M)
+
+    # Load K and V - stay in SRAM for the entire kernel
+    n_offsets = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    d_offsets = tl.arange(0, BLOCK_HEADDIM)
+    k_ptrs = k_p + (n_offsets[None, :] * stride_k_n + d_offsets[:, None])
+    k = tl.load(k_ptrs)
+    v_ptrs = v_p + (n_offsets[None, :] * stride_v_n + d_offsets[:, None])
+    v = tl.load(v_ptrs)
 
     # Init dv and dk
-    dv = tl.zeros([BLOCK_HEADDIM, BLOCK_N], dtype=tl.float32)
-    dk = tl.zeros([BLOCK_HEADDIM, BLOCK_N], dtype=tl.float32)
-
-    # k and v stay in SRAM throughout
-    k = tl.load(K_block_ptr)
-    v = tl.load(V_block_ptr)
+    # These will be accumulated at the same precision as their destination.
+    # Likewise, since dQ is accumulated to HBM every loop iteration, we will accumulate it at the same precision.
+    dv = tl.zeros([BLOCK_HEADDIM, BLOCK_N], dtype=ACCUMULATOR_DTYPE)
+    dk = tl.zeros([BLOCK_HEADDIM, BLOCK_N], dtype=ACCUMULATOR_DTYPE)
 
     # Recall that for matrix multiplication C = A * B,
     # * dC/dA = B.T
     # * dC/dB = A.T
-    for start_m in range(0, M, BLOCK_M):
-        offs_m_curr = start_m + tl.arange(0, BLOCK_M)
+    for _ in range(0, M, BLOCK_M):
+        m_offsets = tl.arange(0, BLOCK_M) * stride_q_m
+        d_offsets = tl.arange(0, BLOCK_HEADDIM)
 
         # Recompute p = softmax(qk), p is (MxN)
-        q = tl.load(Q_block_ptr)
-        qk = tl.dot(q, k) * softmax_scale
-        logit_scale = tl.load(logit_scale_ptrs + offs_m_curr)
-        p = tl.math.exp(qk - logit_scale[:, None])
+        # NOTE: Keep qk in fp32 to avoid overflow and because exponentiation requires FP32
+        q = tl.load(q_p + (m_offsets[:, None] + d_offsets[None, :]))
+        qk = tl.dot(q, k)
+        logit_scale = tl.load(logit_scale_p + tl.arange(0, BLOCK_M))
+        p = tl.math.exp(qk * softmax_scale - logit_scale[:, None]).to(do_p.dtype.element_ty)
 
         # compute dL/dv = dL/do * do/dv = dL/do * p
         # Shape do = (MxD)
         # NOTE: `do` is pre-divided by `l`; no normalization here
-        do = tl.load(DO_block_ptr)  # (MxD)
-        dv += tl.dot(tl.trans(do), p.to(q_p.dtype.element_ty), allow_tf32=True)
+        do = tl.load(do_p + (m_offsets[:, None] + d_offsets[None, :]))  # (MxD)
+        dv += tl.dot(tl.trans(do), p, allow_tf32=True, out_dtype=DOT_DTYPE).to(ACCUMULATOR_DTYPE)
 
         # compute dL/dp = dL/do * do/dp = dL/do * v
         # Shape dp = (MxN)
-        dp = tl.dot(do, v, allow_tf32=True)
+        dp = tl.dot(do, v, allow_tf32=True, out_dtype=DOT_DTYPE)
 
         # compute dL/ds = dL/dp * dp/ds = p * (dp - delta[:, None])
         # Shape ds = (MxN)
-        delta = tl.load(delta_ptrs + offs_m_curr)
-        ds = (p * (dp - delta[:, None]) * softmax_scale).to(q_p.dtype.element_ty)
+        delta = tl.load(delta_p + tl.arange(0, BLOCK_M))
+        ds = ((p * (dp - delta[:, None])) * softmax_scale).to(q_p.dtype.element_ty)
 
         # compute dL/dk = dL/ds * ds/dk = dot(ds.T, q)
-        dk += tl.dot(tl.trans(q), ds, allow_tf32=True)
+        q = tl.load(q_p + (m_offsets[None, :] + d_offsets[:, None]))
+        dk += tl.dot(q, ds, allow_tf32=True, out_dtype=DOT_DTYPE).to(ACCUMULATOR_DTYPE)
 
         # compute dL/dq = dL/ds * ds/dq = dot(ds, k)
-        dq = tl.dot(ds, tl.trans(k), allow_tf32=True)
-        tl.store(DQ_block_ptr, dq.to(q_p.dtype.element_ty))
+        # NOTE: We do an atomic add here since multiple threads may be writing to the dq location.
+        # For some reason tl.atomic_add is much slower than what we have here.
+        # Using a counter to avoid initializing dq to 0 results in register spilling, so we just start with
+        # zero initialization and add at each step
+        dq = tl.dot(ds, tl.trans(k), allow_tf32=True, out_dtype=DOT_DTYPE).to(dq_p.dtype.element_ty)
+        while tl.atomic_cas(lock_p, 0, 1) == 1:
+            pass
+        dq += tl.load(dq_p + (m_offsets[:, None] + d_offsets[None, :]))
+        tl.store(dq_p + (m_offsets[:, None] + d_offsets[None, :]), dq)
+        tl.atomic_xchg(lock_p, 0)
 
-        # increment pointers
-        DQ_block_ptr = tl.advance(DQ_block_ptr, (BLOCK_M, 0))
-        Q_block_ptr = tl.advance(Q_block_ptr, (BLOCK_M, 0))
-        DO_block_ptr = tl.advance(DO_block_ptr, (BLOCK_M, 0))
+        # advance pointers
+        q_p += BLOCK_M * stride_q_m
+        dq_p += BLOCK_M * stride_q_m
+        do_p += BLOCK_M * stride_q_m
+        delta_p += BLOCK_M
+        logit_scale_p += BLOCK_M
+        lock_p += 1
 
     # write-back
-    tl.store(DV_block_ptr, dv.to(v_p.dtype.element_ty))
-    tl.store(DK_block_ptr, dk.to(k_p.dtype.element_ty))
+    start_n = tl.program_id(0)
+    n_offsets = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    d_offsets = tl.arange(0, BLOCK_HEADDIM)
+    tl.store(dk_p + (n_offsets[None, :] * stride_k_n + d_offsets[:, None]), dk.to(dk_p.dtype.element_ty))
+    tl.store(dv_p + (n_offsets[None, :] * stride_v_n + d_offsets[:, None]), dv.to(dv_p.dtype.element_ty))
 
 
 class _attention(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, q, k, v, pos_q=None, pos_k=None, slopes=None, softmax_scale=None) -> Tensor:
+    def forward(ctx, q, k, v, pos_q=None, pos_k=None, slopes=None, softmax_scale=None, precise: bool = True, stable: bool = True) -> Tensor:
         # shape constraints
         B, H, Lq, D = q.shape
         _, _, Lk, _ = k.shape
@@ -523,32 +458,35 @@ class _attention(torch.autograd.Function):
             slopes.stride(0),
             o.stride(0), o.stride(1), o.stride(2),
             HAS_BIAS=has_bias,
-            NEEDS_SCALE=True,
+            **_attention._select_dtypes(precise, stable, o.dtype),
         )
         # fmt: on
 
         ctx.save_for_backward(q, k, v, o, logit_scale)
         ctx.softmax_scale = softmax_scale
+        ctx.precise = precise
+        ctx.stable = stable
         return o
 
     @staticmethod
+    @torch.inference_mode()
     def backward(ctx, do):
-        q, k, v, o, logit_scale = ctx.saved_tensors
+        q, k, v, o, logit_scale = cast(Tuple[Tensor, ...], ctx.saved_tensors)
         B, H, Lk, D = k.shape
         _, _, Lq, _ = q.shape
         assert logit_scale.shape == (B, H, Lq)
 
-        BLOCK_M = DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=64)({"M": Lq})
-        BLOCK_N = DivisorHeuristic("N", min_val=TENSOR_CORE_K, max_val=128)({"N": Lk})
-
-        do = do.contiguous()
-        dq = torch.zeros((triton.cdiv(Lk, BLOCK_N), B, H, Lq, D), device=q.device, dtype=q.dtype)
+        do = do.contiguous() if do.stride(-1) != 1 else do
+        # NOTE: Using a leading dimension and reducing with sum is faster than atomic_add
+        # NOTE: We get away with using an empty dq because all dimensions are multiples of their block sizes
+        dq = torch.zeros_like(q)
         dk = torch.empty_like(k)
         dv = torch.empty_like(v)
-        delta = torch.empty_like(logit_scale)
+        delta = torch.empty_like(logit_scale, dtype=dq.dtype)
+        locks = torch.zeros(B * H * Lq, dtype=torch.int32, device=q.device)
 
         def pre_grid(META):
-            return (triton.cdiv(Lq, BLOCK_M), B * H)
+            return (triton.cdiv(Lq, META["BLOCK_M"]), B * H)
 
         # fmt: off
         spill_warning(_bwd_preprocess_do_o_dot[pre_grid])(
@@ -557,51 +495,66 @@ class _attention(torch.autograd.Function):
             do.stride(0), do.stride(1), do.stride(2),
             delta.stride(0), delta.stride(1),
             H=H, D=D, M=Lq,
-            BLOCK_M=BLOCK_M,
             BHM=B*H*Lq,
         )
         # fmt: on
 
         def grid(META):
-            return (B * H, triton.cdiv(Lk, BLOCK_N))
+            return (triton.cdiv(Lk, META["BLOCK_N"]), B*H)
 
-        # fmt: on
+        # fmt: off
         spill_warning(_bwd_kernel[grid])(
-            q,
-            k,
-            v,
-            logit_scale,
-            do,
-            dq,
-            dk,
-            dv,
-            delta,
+            q, k, v, logit_scale, 
+            do, dq, dk, dv, delta,
             ctx.softmax_scale,
-            dq.stride(0),
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            k.stride(0),
-            k.stride(1),
-            k.stride(2),
-            v.stride(0),
-            v.stride(1),
-            v.stride(2),
-            B=B,
-            H=H,
-            M=Lq,
-            N=Lk,
-            D=D,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            num_warps=8,
-            num_stages=1,
+            locks,
+            q.stride(0), q.stride(1), q.stride(2),
+            k.stride(0), k.stride(1), k.stride(2),
+            v.stride(0), v.stride(1), v.stride(2),
+            B=B, H=H, M=Lq, N=Lk, D=D,
+            **_attention._select_dtypes(ctx.precise, ctx.stable, dq.dtype),
         )
         # fmt: on
 
-        if len(dq.shape) == 5:
-            dq = dq.sum(dim=0)
-        return dq, dk, dv, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None
+
+    @staticmethod
+    def _select_dtypes(precise: bool, stable: bool, target: torch.dtype) -> Dict[str, Any]:
+        match (precise, stable):
+            # For precise and stable operations, we use FP32 for all intermediates.
+            case (True, True):
+                return dict(
+                    ACCUMULATOR_DTYPE=tl.float32,
+                    PROB_DTYPE=tl.float32,
+                    DOT_DTYPE=tl.float32,
+                )
+            # For speed > stability/precision, we use FP16 for all intermediates.
+            case (False, False):
+                return dict(
+                    ACCUMULATOR_DTYPE=tl.float16,
+                    PROB_DTYPE=tl.float16,
+                    DOT_DTYPE=tl.float16,
+                )
+            # For speed + precision > stability, we do intermediate ops in FP16 and accumulate
+            # into the same dtype as the output
+            case (True, False):
+                return dict(
+                    ACCUMULATOR_DTYPE=tl.float16 if target == torch.float16 else tl.bfloat16,
+                    PROB_DTYPE=tl.float16,
+                    DOT_DTYPE=tl.float16,
+                )
+            # For speed + stability > precision, we do intermediate ops in FP16 and accumulate
+            # into BF16, which is then casted to the output dtype after accumulation.
+            # Triton does not support bfloat16 dot product accumulator, so we use FP32 for dot
+            case (False, True):
+                return dict(
+                    ACCUMULATOR_DTYPE=tl.bfloat16,
+                    PROB_DTYPE=tl.float16,
+                    DOT_DTYPE=tl.float16,
+                )
+
+            case _:
+                raise ValueError("precise and stable must be either True or False")
 
 
 attention_fn = _attention.apply
@@ -615,8 +568,10 @@ def attention(
     pos_k: Tensor | None = None,
     slopes: Tensor | None = None,
     softmax_scale: float | None = None,
+    precise: bool = True,
+    stable: bool = True,
 ) -> Tensor:
-    return cast(Tensor, attention_fn(q, k, v, pos_q, pos_k, slopes, softmax_scale))
+    return cast(Tensor, attention_fn(q, k, v, pos_q, pos_k, slopes, softmax_scale, precise, stable))
 
 
 def _benchmark(
@@ -630,59 +585,70 @@ def _benchmark(
     verbose: bool = False,
     bias: bool = False,
     mode: str = "fwd",
+    dtype: str = "fp16",
 ):
     if verbose:
         with tqdm.external_write_mode():
             print(f"Running benchmark for Lq={Q}, Lk={K}, D={D}, provider={provider}")
     B = 4
-    N_head = 8
+    H = 12
     D_pos = 2
+    torch_dtype = torch.float16 if dtype == "fp16" else torch.bfloat16
 
-    q = torch.randn((B, Q, N_head, D), device="cuda", dtype=torch.float16, requires_grad=mode != "fwd")
-    k = torch.randn((B, K, N_head, D), device="cuda", dtype=torch.float16, requires_grad=mode != "fwd")
-    v = torch.randn((B, K, N_head, D), device="cuda", dtype=torch.float16, requires_grad=mode != "fwd")
+    q = torch.randn((B, H, Q, D), device="cuda", dtype=torch_dtype, requires_grad=mode != "fwd")
+    k = torch.randn((B, H, K, D), device="cuda", dtype=torch_dtype, requires_grad=mode != "fwd")
+    v = torch.randn((B, H, K, D), device="cuda", dtype=torch_dtype, requires_grad=mode != "fwd")
     quantiles = [0.5, 0.2, 0.8]
 
     if bias and provider not in ["flash", "mem-eff"]:
-        pos_q = torch.randn((B, Q, N_head, D_pos), device="cuda", dtype=torch.float16)
-        pos_k = torch.randn((B, K, N_head, D_pos), device="cuda", dtype=torch.float16)
+        pos_q = torch.randn((B, H, Q, D_pos), device="cuda", dtype=torch_dtype)
+        pos_k = torch.randn((B, H, K, D_pos), device="cuda", dtype=torch_dtype)
         attn_mask = -1 * (
-            (pos_q[:, :, None, ...] - pos_k[:, None, ...]).pow(2).sum(-1).sqrt_().movedim(-1, 1).view(B, N_head, Q, K)
+            (pos_q[..., None, :] - pos_k[..., None, :, :]).pow(2).sum(-1).sqrt_().view(B, H, Q, K)
         )
     else:
         pos_q = pos_k = attn_mask = None
 
     match provider:
         case "torch" | "flash" | "mem-eff":
-            q = q.movedim(1, 2)
-            k = k.movedim(1, 2)
-            v = v.movedim(1, 2)
             with torch.backends.cuda.sdp_kernel(
                 enable_flash=provider == "flash",
                 enable_math=provider == "torch",
                 enable_mem_efficient=provider == "mem-eff",
             ):
+                if mode == "fwd":
+                    ms, min_ms, max_ms = triton.testing.do_bench(
+                        lambda: F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask),
+                        quantiles=quantiles,
+                        warmup=warmup,
+                        rep=rep,
+                    )
+                else:
+                    o = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask).mul(2).sum()
+                    ms, min_ms, max_ms = triton.testing.do_bench(
+                        lambda: o.backward(retain_graph=True),
+                        quantiles=quantiles,
+                        warmup=warmup,
+                        rep=rep,
+                    )
+
+        case "triton" | "triton-fast":
+            kwargs = dict(precise=True, stable=True) if provider == "triton" else dict(precise=False, stable=False)
+            if mode == "fwd":
                 ms, min_ms, max_ms = triton.testing.do_bench(
-                    lambda: (
-                        F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
-                        if mode == "fwd"
-                        else F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask).sum().backward()
-                    ),
+                    lambda: attention(q, k, v, pos_q, pos_k, **kwargs),
                     quantiles=quantiles,
                     warmup=warmup,
                     rep=rep,
                 )
-        case "triton":
-            ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: (
-                    attention(q, k, v, pos_q, pos_k)
-                    if mode == "fwd"
-                    else attention(q, k, v, pos_q, pos_k).sum().backward()
-                ),
-                quantiles=quantiles,
-                warmup=warmup,
-                rep=rep,
-            )
+            else:
+                o = attention(q, k, v, pos_q, pos_k, **kwargs).mul(2).sum()
+                ms, min_ms, max_ms = triton.testing.do_bench(
+                    lambda: o.backward(retain_graph=True),
+                    quantiles=quantiles,
+                    warmup=warmup,
+                    rep=rep,
+                )
         case _:
             raise ValueError(f"Unknown provider: {provider}")
 
@@ -709,6 +675,7 @@ def parse_args() -> Namespace:
     parser.add_argument("-v", "--verbose", default=False, action="store_true", help="Print each benchmark result")
     parser.add_argument("-b", "--bias", default=False, action="store_true", help="Benchmark with ALiBi style bias")
     parser.add_argument("--mode", default="fwd", choices=["fwd", "bwd"], help="Mode to benchmark")
+    parser.add_argument("-d", "--dtype", default="fp16", choices=["fp16", "bf16"], help="Data type to test")
     return parser.parse_args()
 
 
@@ -716,18 +683,20 @@ def main(args: Namespace):
     test_configs = list(range(args.step, args.QK + 1, args.step))
 
     # Only torch and triton support bias.
-    providers = ["torch", "triton", "flash", "mem-eff"]
     if args.bias:
-        line_names = ["Torch", "Triton", "Flash (no bias)", "Mem-Eff (no bias)"]
+        providers = ["torch", "triton"]
+        line_names = ["Torch", "Triton"]
     else:
-        line_names = ["Torch", "Triton", "Flash", "Mem-Eff"]
+        providers = ["torch", "triton", "triton-fast", "flash"]
+        line_names = ["Torch", "Triton", "Triton Fast", "Flash Attention 2"]
 
     total_tests = len(providers) * len(test_configs) * len(args.D)
     bar = tqdm(total=total_tests, desc="Benchmarking")
 
     for d in args.D:
-        plot_name = f"flash-attn-d={d}"
+        plot_name = f"flash-attn-d={d}-{args.mode}-{args.dtype}"
         xlabel = f"Input size (Lx{d}, Lx{d})"
+        ylabel = f"{'Forward' if args.mode == 'fwd' else 'Backward'} Pass Latency @ {args.dtype.upper()} (ms)"
         benchmark = triton.testing.perf_report(
             triton.testing.Benchmark(
                 x_names=["Q", "K"],
@@ -737,7 +706,7 @@ def main(args: Namespace):
                 line_names=line_names,
                 styles=[("green", "-"), ("blue", "-"), ("orange", "-"), ("red", "-")],
                 xlabel=xlabel,
-                ylabel="Latency (ms)",
+                ylabel=ylabel,
                 plot_name=plot_name,
                 args={},
             )
@@ -750,6 +719,7 @@ def main(args: Namespace):
                 verbose=args.verbose,
                 bias=args.bias,
                 mode=args.mode,
+                dtype=args.dtype
             )
         )
         df: Any = benchmark.run(
