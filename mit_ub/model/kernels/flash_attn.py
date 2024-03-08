@@ -708,11 +708,10 @@ def main(args: Namespace):
     test_configs = list(range(args.step, args.QK + 1, args.step))
 
     # Only torch and triton support bias.
+    providers = ["torch", "triton", "triton-fast", "flash"]
     if args.bias:
-        providers = ["torch", "triton"]
-        line_names = ["Torch", "Triton"]
+        line_names = ["Torch", "Triton", "Triton Fast", "Flash Attention 2 (no bias)"]
     else:
-        providers = ["torch", "triton", "triton-fast", "flash"]
         line_names = ["Torch", "Triton", "Triton Fast", "Flash Attention 2"]
 
     if not args.torch:
