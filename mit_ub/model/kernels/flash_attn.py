@@ -694,6 +694,7 @@ def parse_args() -> Namespace:
     parser.add_argument("-b", "--bias", default=False, action="store_true", help="Benchmark with ALiBi style bias")
     parser.add_argument("--mode", default="fwd", choices=["fwd", "bwd"], help="Mode to benchmark")
     parser.add_argument("-d", "--dtype", default="fp16", choices=["fp16", "bf16"], help="Data type to test")
+    parser.add_argument("-t", "--torch", default=False, action="store_true", help="Benchmark Torch (slow)")
     return parser.parse_args()
 
 
@@ -707,6 +708,10 @@ def main(args: Namespace):
     else:
         providers = ["torch", "triton", "triton-fast", "flash"]
         line_names = ["Torch", "Triton", "Triton Fast", "Flash Attention 2"]
+
+    if not args.torch:
+        providers = providers[1:]
+        line_names = line_names[1:]
 
     total_tests = len(providers) * len(test_configs) * len(args.D)
     bar = tqdm(total=total_tests, desc="Benchmarking")
