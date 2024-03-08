@@ -18,7 +18,8 @@ from .helpers import TENSOR_CORE_K, IsBlockMultiple, PowerOfTwoHeuristic, PruneC
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_stages=1),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_stages=2),
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}),
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 32}),
         triton.Config({"BLOCK_M": 32, "BLOCK_N": 32}),
@@ -204,11 +205,8 @@ def _fwd_kernel(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_M": 256}, num_warps=4),
-        triton.Config({"BLOCK_M": 128}, num_warps=4),
-        triton.Config({"BLOCK_M": 128}, num_warps=8),
-        triton.Config({"BLOCK_M": 64}, num_warps=4),
-        triton.Config({"BLOCK_M": 64}, num_warps=8),
+        triton.Config({"BLOCK_M": 128}),
+        triton.Config({"BLOCK_M": 64}),
         triton.Config({"BLOCK_M": 32}),
     ],
     key=["M", "D"],
@@ -222,6 +220,7 @@ def _fwd_kernel(
     {
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
         "EVEN_D": IsBlockMultiple("D", "BLOCK_HEADDIM"),
+        "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
     }
 )
 @triton.jit
@@ -280,9 +279,10 @@ def _bwd_preprocess_do_o_dot(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, num_stages=1),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, num_stages=2),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_stages=1),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_stages=2),
         triton.Config({"BLOCK_M": 32, "BLOCK_N": 32}),
     ],
     key=["D", "M", "N", "ACCUMULATOR_DTYPE", "DOT_DTYPE"],
