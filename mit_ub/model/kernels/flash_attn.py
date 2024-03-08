@@ -127,7 +127,7 @@ def _fwd_kernel(
     # NOTE: We use qk_scale = 1 / (ln(2) * sqrt(D)) so we can compute logs and exponentials in base 2,
     # which is empirically faster. We must also scale biases by 1 / ln(2) to match.
     value_accumulator = tl.zeros([BLOCK_M, BLOCK_HEADDIM], dtype=ACCUMULATOR_DTYPE)
-    softmax_denominator = tl.zeros([BLOCK_M], dtype=tl.float32)
+    softmax_denominator = tl.zeros([BLOCK_M], dtype=ACCUMULATOR_DTYPE)
     query_i_maxdot = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
 
     # Q gets loaded into SRAM and stays there. Pre-apply the softmax scale
@@ -171,20 +171,21 @@ def _fwd_kernel(
         query_i_maxdot_new = tl.maximum(query_i_maxdot, tl.max(qk, 1))
 
         # Compute scaling constant alpha and rescale the previous contributions, updating the maximum logit
-        alpha = tl.math.exp2(query_i_maxdot - query_i_maxdot_new)
+        alpha = tl.math.exp2(query_i_maxdot - query_i_maxdot_new).to(ACCUMULATOR_DTYPE)
         query_i_maxdot = query_i_maxdot_new
-        value_accumulator *= alpha.to(ACCUMULATOR_DTYPE)[:, None]
-        softmax_denominator *= alpha
 
         # Compute the softmax numerator for each key, applying the maximum logit offset to avoid numerical overflow
         p = tl.math.exp2(qk - query_i_maxdot_new[:, None]).to(PROB_DTYPE)
 
         # Compute the softmax denominator for each query, applying the maximum logit offset to the existing denominator
-        softmax_denominator += tl.sum(p, 1)
+        softmax_denominator = softmax_denominator * alpha + tl.sum(p, 1)
 
         # Accumulate the weighted values for this block of V
         v = tl.load(v_p + (tl.arange(0, BLOCK_N)[:, None] * stride_v_n + tl.arange(0, BLOCK_HEADDIM)[None, :]))
-        value_accumulator += tl.dot(p.to(v.dtype), v, allow_tf32=True, out_dtype=DOT_DTYPE).to(ACCUMULATOR_DTYPE)
+        value_accumulator = (
+            value_accumulator * alpha[:, None] 
+            + tl.dot(p.to(v.dtype), v, allow_tf32=True, out_dtype=DOT_DTYPE).to(ACCUMULATOR_DTYPE)
+        )
 
         # Advance pointers
         k_p += BLOCK_N * stride_k_n
@@ -198,7 +199,7 @@ def _fwd_kernel(
     # Per Flash Attention 2, we store only logsumexp for the backward pass
     tl.store(
         logit_scale_p + tl.arange(0, BLOCK_M),
-        (query_i_maxdot + tl.math.log2(softmax_denominator)),
+        (query_i_maxdot + tl.math.log2(softmax_denominator.to(tl.float32))),
     )
 
     # Write output
