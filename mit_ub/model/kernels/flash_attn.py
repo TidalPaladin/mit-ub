@@ -2,7 +2,7 @@ import math
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from functools import partial
 from pathlib import Path
-from typing import Any, cast, Tuple, Dict
+from typing import Any, Dict, Tuple, cast
 
 import torch
 import torch.nn.functional as F
@@ -12,34 +12,31 @@ from torch import Tensor
 from tqdm import tqdm
 
 from .distance import _euclidean_distance_matmul_inner
-from .helpers import TENSOR_CORE_K, DivisorHeuristic, IsBlockMultiple, PowerOfTwoHeuristic, spill_warning, SelectHeuristic
+from .helpers import TENSOR_CORE_K, IsBlockMultiple, PowerOfTwoHeuristic, PruneConfigs, spill_warning
 
 
-#@triton.autotune(
-#   configs=[
-#       triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}),
-#       triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}),
-#       triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}),
-#       triton.Config({"BLOCK_M": 64, "BLOCK_N": 32}),
-#   ],
-#   key=["D", "M", "N", "D_pos"],
-#)
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 32}),
+        triton.Config({"BLOCK_M": 32, "BLOCK_N": 32}),
+    ],
+    key=["M", "N", "D", "D_pos", "HAS_BIAS", "ACCUMULATOR_DTYPE", "PROB_DTYPE", "DOT_DTYPE"],
+    # No boundary checks so don't try configs that are bigger than the input
+    prune_configs_by={
+        "early_config_prune": PruneConfigs.compose(
+            PruneConfigs("BLOCK_M", high="M"),
+            PruneConfigs("BLOCK_N", high="N"),
+        )
+    },
+)
 @triton.heuristics(
     {
-        # BLOCK_HEADDIM must go up to the size of D.
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
         "BLOCK_POSDIM": PowerOfTwoHeuristic("D_pos", min_val=TENSOR_CORE_K),
-        "BLOCK_M": SelectHeuristic(
-            lambda args: args["HAS_BIAS"],
-            # Spilling seems to happen with bias for M=128
-            DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=64),
-            DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=128),
-        ),
-        "BLOCK_N": DivisorHeuristic("N", min_val=TENSOR_CORE_K, max_val=64),
         "EVEN_POSDIM": IsBlockMultiple("D_pos", "BLOCK_POSDIM"),
-        "BHM": lambda args: args["B"] * args["H"] * args["M"],
-        "BHN": lambda args: args["B"] * args["H"] * args["N"],
-        "BH": lambda args: args["B"] * args["H"],
         "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
     }
 )
@@ -58,7 +55,7 @@ def _fwd_kernel(
     # V strides
     stride_v_b: tl.constexpr, stride_v_h: tl.constexpr, stride_v_n: tl.constexpr,
     # Logit scale strides
-    stride_logit_b: tl.constexpr, stride_logit_h: tl.constexpr, stride_logit_m: tl.constexpr,
+    stride_logit_b: tl.constexpr, stride_logit_h: tl.constexpr,
     # Position Q strides
     stride_posq_b: tl.constexpr, stride_posq_h: tl.constexpr, stride_posq_m: tl.constexpr,
     # Position K strides
@@ -67,15 +64,13 @@ def _fwd_kernel(
     stride_slopes_b: tl.constexpr,
     # Output strides
     stride_o_b: tl.constexpr, stride_o_h: tl.constexpr, stride_o_m: tl.constexpr,
-    # Block sizes
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_HEADDIM: tl.constexpr, BLOCK_POSDIM: tl.constexpr,
+    # Dtypes
+    ACCUMULATOR_DTYPE: tl.constexpr, PROB_DTYPE: tl.constexpr, DOT_DTYPE: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
     # Heuristics for boundary checks
     EVEN_POSDIM: tl.constexpr, 
-    BHM: tl.constexpr, BHN: tl.constexpr, BH: tl.constexpr,
-    HAS_BIAS: tl.constexpr,
-    # Dtypes
-    ACCUMULATOR_DTYPE: tl.constexpr = tl.float32, 
-    PROB_DTYPE: tl.constexpr = tl.float32, DOT_DTYPE: tl.constexpr = tl.float32,
+    # Block sizes
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_HEADDIM: tl.constexpr, BLOCK_POSDIM: tl.constexpr,
     # fmt: on
 ):
     # Grid is (L, H * B)
@@ -131,7 +126,7 @@ def _fwd_kernel(
 
     # Q gets loaded into SRAM and stays there. Pre-apply the softmax scale
     m_offsets = tl.arange(0, BLOCK_M)
-    d_offsets = tl.arange(0, BLOCK_HEADDIM) 
+    d_offsets = tl.arange(0, BLOCK_HEADDIM)
     q = tl.load(q_p + (m_offsets[:, None] * stride_q_m + d_offsets[None, :]))
     q *= tl.full((1,), softmax_scale, dtype=q.dtype)
 
@@ -139,6 +134,7 @@ def _fwd_kernel(
     # NOTE: Since distances are likely < D_pos we must apply masking along D_pos
     if HAS_BIAS:
         # Load the slopes squared
+        d_offsets = tl.arange(0, BLOCK_POSDIM)
         if EVEN_POSDIM:
             pos_q = tl.load(pos_q_p + (m_offsets[:, None] * stride_posq_m + d_offsets[None, :]))
         else:
@@ -154,12 +150,13 @@ def _fwd_kernel(
 
         # Compute the bias
         if HAS_BIAS:
-            d_offsets = tl.arange(0, BLOCK_HEADDIM)
+            n_offsets = tl.arange(0, BLOCK_N)
+            d_offsets = tl.arange(0, BLOCK_POSDIM)
             if EVEN_POSDIM:
-                pos_k = tl.load(pos_k_p + (m_offsets[None, :] * stride_posk_n + d_offsets[:, None]))
+                pos_k = tl.load(pos_k_p + (n_offsets[None, :] * stride_posk_n + d_offsets[:, None]))
             else:
                 pos_k_mask = (d_offsets < D_pos)[:, None]
-                pos_k = tl.load(pos_k_p + (m_offsets[None, :] * stride_posk_n + d_offsets[:, None]), mask=pos_k_mask)
+                pos_k = tl.load(pos_k_p + (n_offsets[None, :] * stride_posk_n + d_offsets[:, None]), mask=pos_k_mask)
             bias = _euclidean_distance_matmul_inner(pos_q, pos_k, BLOCK_M, BLOCK_N, DOT_DTYPE)
             bias = pos_slope * tl.sqrt(bias.to(tl.float32)).to(bias.dtype)
             qk += bias
@@ -200,17 +197,31 @@ def _fwd_kernel(
 
     # Write output
     tl.store(
-        out_p + (tl.arange(0, BLOCK_M)[:, None] * stride_o_m + tl.arange(0, BLOCK_HEADDIM)[None, :]), 
+        out_p + (tl.arange(0, BLOCK_M)[:, None] * stride_o_m + tl.arange(0, BLOCK_HEADDIM)[None, :]),
         value_accumulator.to(out_p.dtype.element_ty),
     )
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": 256}, num_warps=4),
+        triton.Config({"BLOCK_M": 128}, num_warps=4),
+        triton.Config({"BLOCK_M": 128}, num_warps=8),
+        triton.Config({"BLOCK_M": 64}, num_warps=4),
+        triton.Config({"BLOCK_M": 64}, num_warps=8),
+        triton.Config({"BLOCK_M": 32}),
+    ],
+    key=["M", "D"],
+    prune_configs_by={
+        "early_config_prune": PruneConfigs.compose(
+            PruneConfigs("BLOCK_M", high="M"),
+        )
+    },
+)
 @triton.heuristics(
     {
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
-        "BLOCK_M": DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=128),
         "EVEN_D": IsBlockMultiple("D", "BLOCK_HEADDIM"),
-        "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
     }
 )
 @triton.jit
@@ -267,15 +278,25 @@ def _bwd_preprocess_do_o_dot(
     tl.store(delta_ptrs, delta)
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}),
+        triton.Config({"BLOCK_M": 32, "BLOCK_N": 32}),
+    ],
+    key=["D", "M", "N", "ACCUMULATOR_DTYPE", "DOT_DTYPE"],
+    prune_configs_by={
+        "early_config_prune": PruneConfigs.compose(
+            PruneConfigs("BLOCK_M", high="M"),
+            PruneConfigs("BLOCK_N", high="N"),
+        )
+    },
+    reset_to_zero=["dq_p"],
+)
 @triton.heuristics(
     {
-        "BHM": lambda args: args["B"] * args["H"] * args["M"],
-        "BHN": lambda args: args["B"] * args["H"] * args["N"],
-        "BHMN": lambda args: args["B"] * args["H"] * args["M"] * args["N"],
-        "BH": lambda args: args["B"] * args["H"],
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
-        "BLOCK_M": DivisorHeuristic("M", min_val=TENSOR_CORE_K, max_val=64),
-        "BLOCK_N": DivisorHeuristic("N", min_val=TENSOR_CORE_K, max_val=128),
         "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
     }
 )
@@ -294,13 +315,10 @@ def _bwd_kernel(
     stride_v_b: tl.constexpr, stride_v_h: tl.constexpr , stride_v_n: tl.constexpr, 
     # Sizes
     B: tl.constexpr, H: tl.constexpr, M: tl.constexpr, N: tl.constexpr, D: tl.constexpr,
-    # Derived sizes
-    BHM: tl.constexpr, BHN: tl.constexpr, BHMN: tl.constexpr, BH: tl.constexpr,
+    # Dtypes
+    ACCUMULATOR_DTYPE: tl.constexpr, DOT_DTYPE: tl.constexpr, PROB_DTYPE: tl.constexpr,
     # Blocks
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_HEADDIM: tl.constexpr,
-    # Dtypes
-    ACCUMULATOR_DTYPE: tl.constexpr = tl.float32, 
-    PROB_DTYPE: tl.constexpr = tl.float32, DOT_DTYPE: tl.constexpr = tl.float32,
     # fmt: on
 ):
     # Initialize offsets.
@@ -317,8 +335,8 @@ def _bwd_kernel(
     k_p += offset_b * stride_k_b + offset_h * stride_k_h
     v_p += offset_b * stride_v_b + offset_h * stride_v_h
     do_p += offset_b * stride_q_b + offset_h * stride_q_h
-    dq_p += offset_b * stride_q_b + offset_h * stride_q_h 
-    dk_p += offset_b * stride_k_b + offset_h * stride_k_h 
+    dq_p += offset_b * stride_q_b + offset_h * stride_q_h
+    dk_p += offset_b * stride_k_b + offset_h * stride_k_h
     dv_p += offset_b * stride_v_b + offset_h * stride_v_h
     delta_p += offset_bh * M
     logit_scale_p += offset_bh * M
@@ -402,7 +420,9 @@ def _bwd_kernel(
 class _attention(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, q, k, v, pos_q=None, pos_k=None, slopes=None, softmax_scale=None, precise: bool = True, stable: bool = True) -> Tensor:
+    def forward(
+        ctx, q, k, v, pos_q=None, pos_k=None, slopes=None, softmax_scale=None, precise: bool = True, stable: bool = True
+    ) -> Tensor:
         # shape constraints
         B, H, Lq, D = q.shape
         _, _, Lk, _ = k.shape
@@ -439,20 +459,20 @@ class _attention(torch.autograd.Function):
         logit_scale = torch.empty((B, H, Lq), device=q.device, dtype=torch.float32)
         o = torch.empty_like(q)
         # NOTE: It seems important that we seed to at most 2**30. Otherwise we randomly get huge latency spikes.
-        #seed = torch.randint(0, 2**30, (1,), dtype=torch.int64).item()
+        # seed = torch.randint(0, 2**30, (1,), dtype=torch.int64).item()
 
         def grid(META):
             return (triton.cdiv(Lq, META["BLOCK_M"]), B * H)
 
         # fmt: off
-        spill_warning(_fwd_kernel[grid])(
+        spill_warning()(_fwd_kernel[grid])(
             q, k, v, logit_scale, pos_q, pos_k, slopes, o,
             softmax_scale,
             B, H, Lq, Lk, D, D_pos,
             q.stride(0), q.stride(1), q.stride(2),
             k.stride(0), k.stride(1), k.stride(2),
             v.stride(0), v.stride(1), v.stride(2),
-            logit_scale.stride(0), logit_scale.stride(1), logit_scale.stride(2),
+            logit_scale.stride(0), logit_scale.stride(1),
             pos_q.stride(0), pos_q.stride(1), pos_q.stride(2),
             pos_k.stride(0), pos_k.stride(1), pos_k.stride(2),
             slopes.stride(0),
@@ -489,21 +509,21 @@ class _attention(torch.autograd.Function):
             return (triton.cdiv(Lq, META["BLOCK_M"]), B * H)
 
         # fmt: off
-        spill_warning(_bwd_preprocess_do_o_dot[pre_grid])(
+        spill_warning()(_bwd_preprocess_do_o_dot[pre_grid])(
             o, do, delta,
             o.stride(0), o.stride(1), o.stride(2),
             do.stride(0), do.stride(1), do.stride(2),
             delta.stride(0), delta.stride(1),
-            H=H, D=D, M=Lq,
+            H, D, Lq,
             BHM=B*H*Lq,
         )
         # fmt: on
 
         def grid(META):
-            return (triton.cdiv(Lk, META["BLOCK_N"]), B*H)
+            return (triton.cdiv(Lk, META["BLOCK_N"]), B * H)
 
         # fmt: off
-        spill_warning(_bwd_kernel[grid])(
+        spill_warning()(_bwd_kernel[grid])(
             q, k, v, logit_scale, 
             do, dq, dk, dv, delta,
             ctx.softmax_scale,
@@ -511,7 +531,7 @@ class _attention(torch.autograd.Function):
             q.stride(0), q.stride(1), q.stride(2),
             k.stride(0), k.stride(1), k.stride(2),
             v.stride(0), v.stride(1), v.stride(2),
-            B=B, H=H, M=Lq, N=Lk, D=D,
+            B, H, Lq, Lk, D,
             **_attention._select_dtypes(ctx.precise, ctx.stable, dq.dtype),
         )
         # fmt: on
@@ -603,9 +623,7 @@ def _benchmark(
     if bias and provider not in ["flash", "mem-eff"]:
         pos_q = torch.randn((B, H, Q, D_pos), device="cuda", dtype=torch_dtype)
         pos_k = torch.randn((B, H, K, D_pos), device="cuda", dtype=torch_dtype)
-        attn_mask = -1 * (
-            (pos_q[..., None, :] - pos_k[..., None, :, :]).pow(2).sum(-1).sqrt_().view(B, H, Q, K)
-        )
+        attn_mask = -1 * ((pos_q[..., None, :] - pos_k[..., None, :, :]).pow(2).sum(-1).sqrt_().view(B, H, Q, K))
     else:
         pos_q = pos_k = attn_mask = None
 
@@ -719,7 +737,7 @@ def main(args: Namespace):
                 verbose=args.verbose,
                 bias=args.bias,
                 mode=args.mode,
-                dtype=args.dtype
+                dtype=args.dtype,
             )
         )
         df: Any = benchmark.run(

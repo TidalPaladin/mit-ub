@@ -2,7 +2,7 @@ import sys
 import warnings
 from dataclasses import dataclass
 from functools import wraps
-from typing import Any, Callable, Dict, Final, TypeVar, cast
+from typing import Any, Callable, Dict, Final, List, TypeVar, cast
 
 import triton
 from triton.compiler import CompiledKernel
@@ -108,17 +108,18 @@ class DivisorHeuristic:
         return result
 
 
-T = TypeVar("T")
+T = TypeVar("T", bound=Callable)
+WARN_SPILLS: bool = False
 
 
-def spill_warning(func: triton.JITFunction[T], limit: int = 0) -> Callable[..., T]:
+def spill_warning(limit: int = 0, enable: bool | None = None) -> Callable[[T], T]:
     r"""Wrapper to emit a warning if the compiled kernel spills registers.
 
     This should not be used as a decorator. See the example below.
 
     Args:
-        func: JIT function to wrap
         limit: Maximum number of spills before emitting a warning
+        enable: If set, it will override the global `WARN_SPILLS` variable
 
     Returns:
         Wrapped JIT function
@@ -128,16 +129,22 @@ def spill_warning(func: triton.JITFunction[T], limit: int = 0) -> Callable[..., 
         >>> def _my_kernel(x_ptr, y_ptr):
         >>>     ...
         >>> # Wrap the JIT function with grid specialization
-        >>> _my_kernel = spill_warning(_my_kernel[(1,)], limit=10)(x, y)
+        >>> _my_kernel = spill_warning(limit=10)(_my_kernel[(1,)])(x, y)
     """
 
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        compiled: CompiledKernel = func(*args, **kwargs)
-        if compiled.n_spills > limit:
-            warnings.warn(f"{compiled.fn} spilled {compiled.n_spills} times using {compiled.n_regs} registers")
+    def outer(func: T) -> T:
+        @wraps(func)
+        def inner(*args, **kwargs):
+            compiled = cast(CompiledKernel, func(*args, **kwargs))
+            if enable is not None:
+                global WARN_SPILLS
+                WARN_SPILLS = enable
+            if WARN_SPILLS and compiled.n_spills > limit:
+                warnings.warn(f"{compiled.fn} spilled {compiled.n_spills} times using {compiled.n_regs} registers")
 
-    return cast(Callable[..., T], wrapper)
+        return cast(T, inner)
+
+    return cast(Any, outer)
 
 
 @dataclass
@@ -159,3 +166,44 @@ class SelectHeuristic:
 
     def __call__(self, args: Dict[str, Any]) -> Any:
         return self.when_true(args) if self.func(args) else self.when_false(args)
+
+
+@dataclass
+class PruneConfigs:
+    r"""Prune autotuner configs based on a condition.
+
+    Args:
+        key: Key to check in the config
+        low: Either an integer indicating the minimum allowed value of ``key`` or a string indicating the key to use
+            as the minimum value
+        high: Either an integer indicating the maximum allowed value of ``key`` or a string indicating the key to use
+            as the maximum value
+    """
+
+    key: str
+    low: int | str = 0
+    high: int | str = sys.maxsize
+
+    def __call__(self, configs: List[triton.Config], args: Dict[str, Any]) -> List[triton.Config]:
+        out: List[triton.Config] = []
+        for config in configs:
+            val = config.kwargs[self.key]
+            low = self.low if isinstance(self.low, int) else args[self.low]
+            high = self.high if isinstance(self.high, int) else args[self.high]
+            if low <= val <= high:
+                out.append(config)
+
+        if not out:
+            raise ValueError("All configurations were pruned")
+        return out
+
+    @classmethod
+    def compose(cls, *pruners: "PruneConfigs") -> Callable[[List[triton.Config], Dict[str, Any]], List[triton.Config]]:
+        r"""Compose multiple pruners into a single pruner."""
+
+        def _composed(configs: List[triton.Config], args: Dict[str, Any]) -> List[triton.Config]:
+            for pruner in pruners:
+                configs = pruner(configs, args)
+            return configs
+
+        return _composed
