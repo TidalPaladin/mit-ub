@@ -171,16 +171,17 @@ def _euclidean_distance_matmul_inner(
     b: tl.tensor,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
-    DOT_DTYPE: tl.constexpr = tl.float32,
+    DOT_DTYPE: tl.constexpr,
 ):
     # Compute diag(a @ a.T)
     block_idx = tl.arange(0, BLOCK_SIZE_M)
-    diag_a = tl.where(block_idx[:, None] == block_idx, tl.dot(a, tl.trans(a), out_dtype=DOT_DTYPE), float(0.0))
+    other = tl.full((1,), 0.0, dtype=DOT_DTYPE)
+    diag_a = tl.where(block_idx[:, None] == block_idx, tl.dot(a, tl.trans(a), out_dtype=DOT_DTYPE), other)
     diag_a = tl.sum(diag_a, 1)
 
     # Compute diag(b @ b.T)
     block_idx = tl.arange(0, BLOCK_SIZE_N)
-    diag_b = tl.where(block_idx[:, None] == block_idx, tl.dot(tl.trans(b), b, out_dtype=DOT_DTYPE), float(0.0))
+    diag_b = tl.where(block_idx[:, None] == block_idx, tl.dot(tl.trans(b), b, out_dtype=DOT_DTYPE), other)
     diag_b = tl.sum(diag_b, 1)
 
     # Compute a @ b.T
@@ -188,7 +189,11 @@ def _euclidean_distance_matmul_inner(
     ab = tl.dot(a, b, out_dtype=DOT_DTYPE)
 
     # Update accumulator -> diag(a @ a.T) - 2 * a @ b + diag(b @ b.T)
-    return diag_a[:, None] - 2 * ab + diag_b[None, :]
+    # Optimize for FMA for FP32 
+    if DOT_DTYPE is tl.float32:
+        return diag_a[:, None] + tl.math.fma(-2, ab, diag_b[None, :])
+    else:
+        return diag_a[:, None] + diag_b[None, :] - 2 * ab
 
 
 @triton.heuristics(
@@ -311,7 +316,7 @@ def _euclidean_distance_kernel_fwd_matmul(
             b = b * w[:, None]
             w_block_ptr = tl.advance(w_block_ptr, (BLOCK_SIZE_K,))
 
-        accumulator += _euclidean_distance_matmul_inner(a, b, BLOCK_SIZE_M, BLOCK_SIZE_N)
+        accumulator += _euclidean_distance_matmul_inner(a, b, BLOCK_SIZE_M, BLOCK_SIZE_N, tl.float32)
 
         # Advance block pointers
         a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))

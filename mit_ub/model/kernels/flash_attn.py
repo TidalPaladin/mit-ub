@@ -146,7 +146,7 @@ def _fwd_kernel(
         else:
             pos_q_mask = (d_offsets < D_pos)[None, :]
             pos_q = tl.load(pos_q_p + (m_offsets[:, None] * stride_posq_m + d_offsets[None, :]), mask=pos_q_mask)
-        pos_slope = tl.load(pos_slopes_p).to(pos_q.dtype) * bias_scale
+        pos_slope = (tl.load(pos_slopes_p) * bias_scale).to(DOT_DTYPE)
 
     # Iterate over KV blocks
     for _ in range(0, N, BLOCK_N):
@@ -164,8 +164,8 @@ def _fwd_kernel(
                 pos_k_mask = (d_offsets < D_pos)[:, None]
                 pos_k = tl.load(pos_k_p + (n_offsets[None, :] * stride_posk_n + d_offsets[:, None]), mask=pos_k_mask)
             bias = _euclidean_distance_matmul_inner(pos_q, pos_k, BLOCK_M, BLOCK_N, DOT_DTYPE)
-            bias = pos_slope * tl.sqrt(bias.to(tl.float32)).to(bias.dtype)
-            qk += bias
+            bias = tl.sqrt(bias.to(tl.float32)).to(DOT_DTYPE)
+            qk = bias * pos_slope + qk
 
         # Determine the maximum logit seen for each query
         query_i_maxdot_new = tl.maximum(query_i_maxdot, tl.max(qk, 1))
@@ -351,16 +351,16 @@ def _bwd_kernel(
     # Load K and V - stay in SRAM for the entire kernel
     n_offsets = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
     d_offsets = tl.arange(0, BLOCK_HEADDIM)
-    k_ptrs = k_p + (n_offsets[None, :] * stride_k_n + d_offsets[:, None])
+    k_ptrs = k_p + (n_offsets[:, None] * stride_k_n + d_offsets[None, :])
     k = tl.load(k_ptrs)
-    v_ptrs = v_p + (n_offsets[None, :] * stride_v_n + d_offsets[:, None])
+    v_ptrs = v_p + (n_offsets[:, None] * stride_v_n + d_offsets[None, :])
     v = tl.load(v_ptrs)
 
     # Init dv and dk
     # These will be accumulated at the same precision as their destination.
     # Likewise, since dQ is accumulated to HBM every loop iteration, we will accumulate it at the same precision.
-    dv = tl.zeros([BLOCK_HEADDIM, BLOCK_N], dtype=ACCUMULATOR_DTYPE)
-    dk = tl.zeros([BLOCK_HEADDIM, BLOCK_N], dtype=ACCUMULATOR_DTYPE)
+    dv = tl.zeros([BLOCK_N, BLOCK_HEADDIM], dtype=ACCUMULATOR_DTYPE)
+    dk = tl.zeros([BLOCK_N, BLOCK_HEADDIM], dtype=ACCUMULATOR_DTYPE)
 
     # Recall that for matrix multiplication C = A * B,
     # * dC/dA = B.T
@@ -372,7 +372,7 @@ def _bwd_kernel(
         # Recompute p = softmax(qk), p is (MxN)
         # NOTE: Keep qk in fp32 to avoid overflow and because exponentiation requires FP32
         q = tl.load(q_p + (m_offsets[:, None] + d_offsets[None, :]))
-        qk = tl.dot(q, k)
+        qk = tl.dot(q, tl.trans(k))
         logit_scale = tl.load(logit_scale_p + tl.arange(0, BLOCK_M))
         p = tl.math.exp2(qk * qk_scale - logit_scale[:, None]).to(do_p.dtype.element_ty)
 
@@ -380,11 +380,11 @@ def _bwd_kernel(
         # Shape do = (MxD)
         # NOTE: `do` is pre-divided by `l`; no normalization here
         do = tl.load(do_p + (m_offsets[:, None] + d_offsets[None, :]))  # (MxD)
-        dv += tl.dot(tl.trans(do), p, allow_tf32=True, out_dtype=DOT_DTYPE).to(ACCUMULATOR_DTYPE)
+        dv += tl.dot(tl.trans(p), do, allow_tf32=True, out_dtype=DOT_DTYPE).to(ACCUMULATOR_DTYPE)
 
         # compute dL/dp = dL/do * do/dp = dL/do * v
         # Shape dp = (MxN)
-        dp = tl.dot(do, v, allow_tf32=True, out_dtype=DOT_DTYPE)
+        dp = tl.dot(do, tl.trans(v), allow_tf32=True, out_dtype=DOT_DTYPE)
 
         # compute dL/ds = dL/dp * dp/ds = p * (dp - delta[:, None])
         # Shape ds = (MxN)
@@ -392,15 +392,15 @@ def _bwd_kernel(
         ds = ((p * (dp - delta[:, None])) * softmax_scale).to(q_p.dtype.element_ty)
 
         # compute dL/dk = dL/ds * ds/dk = dot(ds.T, q)
-        q = tl.load(q_p + (m_offsets[None, :] + d_offsets[:, None]))
-        dk += tl.dot(q, ds, allow_tf32=True, out_dtype=DOT_DTYPE).to(ACCUMULATOR_DTYPE)
+        q = tl.load(q_p + (m_offsets[:, None] + d_offsets[None, :]))
+        dk += tl.dot(tl.trans(ds), q, allow_tf32=True, out_dtype=DOT_DTYPE).to(ACCUMULATOR_DTYPE)
 
         # compute dL/dq = dL/ds * ds/dq = dot(ds, k)
         # NOTE: We do an atomic add here since multiple threads may be writing to the dq location.
         # For some reason tl.atomic_add is much slower than what we have here.
         # Using a counter to avoid initializing dq to 0 results in register spilling, so we just start with
         # zero initialization and add at each step
-        dq = tl.dot(ds, tl.trans(k), allow_tf32=True, out_dtype=DOT_DTYPE).to(dq_p.dtype.element_ty)
+        dq = tl.dot(ds, k, allow_tf32=True, out_dtype=DOT_DTYPE).to(dq_p.dtype.element_ty)
         while tl.atomic_cas(lock_p, 0, 1) == 1:
             pass
         dq += tl.load(dq_p + (m_offsets[:, None] + d_offsets[None, :]))
@@ -419,8 +419,8 @@ def _bwd_kernel(
     start_n = tl.program_id(0)
     n_offsets = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
     d_offsets = tl.arange(0, BLOCK_HEADDIM)
-    tl.store(dk_p + (n_offsets[None, :] * stride_k_n + d_offsets[:, None]), dk.to(dk_p.dtype.element_ty))
-    tl.store(dv_p + (n_offsets[None, :] * stride_v_n + d_offsets[:, None]), dv.to(dv_p.dtype.element_ty))
+    tl.store(dk_p + (n_offsets[:, None] * stride_k_n + d_offsets[None, :]), dk.to(dk_p.dtype.element_ty))
+    tl.store(dv_p + (n_offsets[:, None] * stride_v_n + d_offsets[None, :]), dv.to(dv_p.dtype.element_ty))
 
 
 class _attention(torch.autograd.Function):
@@ -722,7 +722,7 @@ def main(args: Namespace):
     bar = tqdm(total=total_tests, desc="Benchmarking")
 
     for d in args.D:
-        plot_name = f"flash-attn-d={d}-{args.mode}-{args.dtype}"
+        plot_name = f"flash-attn-d={d}-{args.mode}-{args.dtype}" + ("-bias" if args.bias else "")
         xlabel = f"Input size (Lx{d}, Lx{d})"
         ylabel = f"{'Forward' if args.mode == 'fwd' else 'Backward'} Pass Latency @ {args.dtype.upper()} (ms)"
         benchmark = triton.testing.perf_report(
