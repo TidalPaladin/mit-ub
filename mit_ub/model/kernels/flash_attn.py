@@ -312,7 +312,7 @@ def _bwd_kernel(
     q_p, k_p, v_p, logit_scale_p,
     # Derivatives
     do_p, dq_p, dk_p, dv_p, delta_p,
-    softmax_scale: tl.constexpr,  
+    softmax_scale: tl.constexpr, qk_scale: tl.constexpr, bias_scale: tl.constexpr, 
     lock_p,
     # Strides
     stride_q_b: tl.constexpr, stride_q_h: tl.constexpr , stride_q_m: tl.constexpr,
@@ -373,7 +373,7 @@ def _bwd_kernel(
         q = tl.load(q_p + (m_offsets[:, None] + d_offsets[None, :]))
         qk = tl.dot(q, k)
         logit_scale = tl.load(logit_scale_p + tl.arange(0, BLOCK_M))
-        p = tl.math.exp(qk * softmax_scale - logit_scale[:, None]).to(do_p.dtype.element_ty)
+        p = tl.math.exp2(qk * qk_scale - logit_scale[:, None]).to(do_p.dtype.element_ty)
 
         # compute dL/dv = dL/do * do/dv = dL/do * p
         # Shape do = (MxD)
@@ -531,7 +531,7 @@ class _attention(torch.autograd.Function):
         spill_warning()(_bwd_kernel[grid])(
             q, k, v, logit_scale, 
             do, dq, dk, dv, delta,
-            ctx.softmax_scale,
+            ctx.softmax_scale, ctx.softmax_scale * LN_2_RECIP, LN_2_RECIP,
             locks,
             q.stride(0), q.stride(1), q.stride(2),
             k.stride(0), k.stride(1), k.stride(2),
