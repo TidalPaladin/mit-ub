@@ -2,7 +2,7 @@ import math
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, Tuple, cast
+from typing import Any, Dict, Tuple, cast, Final
 
 import torch
 import torch.nn.functional as F
@@ -13,6 +13,9 @@ from tqdm import tqdm
 
 from .distance import _euclidean_distance_matmul_inner
 from .helpers import TENSOR_CORE_K, IsBlockMultiple, PowerOfTwoHeuristic, PruneConfigs, spill_warning
+
+
+LN_2_RECIP: Final = 1 / math.log(2) 
 
 
 @triton.autotune(
@@ -46,7 +49,7 @@ def _fwd_kernel(
     # fmt: off
     # Inputs
     q_p, k_p, v_p, logit_scale_p, pos_q_p, pos_k_p, pos_slopes_p, out_p, 
-    softmax_scale: tl.constexpr,
+    softmax_scale: tl.constexpr, qk_scale: tl.constexpr, bias_scale: tl.constexpr,
     # Sizes 
     B: tl.constexpr, H: tl.constexpr, M: tl.constexpr, N: tl.constexpr, D: tl.constexpr, D_pos: tl.constexpr,
     # Q strides
@@ -121,6 +124,8 @@ def _fwd_kernel(
     #   * `p` - exp(x_i - c) for each query
     #   * `softmax_denominator` - sum_j exp(x_j - c) for each query
     #   * `alpha` - exp(c - d) for each query
+    # NOTE: We use qk_scale = 1 / (ln(2) * sqrt(D)) so we can compute logs and exponentials in base 2,
+    # which is empirically faster. We must also scale biases by 1 / ln(2) to match.
     value_accumulator = tl.zeros([BLOCK_M, BLOCK_HEADDIM], dtype=ACCUMULATOR_DTYPE)
     softmax_denominator = tl.zeros([BLOCK_M], dtype=tl.float32)
     query_i_maxdot = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
@@ -129,7 +134,7 @@ def _fwd_kernel(
     m_offsets = tl.arange(0, BLOCK_M)
     d_offsets = tl.arange(0, BLOCK_HEADDIM)
     q = tl.load(q_p + (m_offsets[:, None] * stride_q_m + d_offsets[None, :]))
-    q *= tl.full((1,), softmax_scale, dtype=q.dtype)
+    q *= tl.full((1,), qk_scale, dtype=q.dtype)
 
     # If we have bias, we will also load the Q positions and ALiBi slopes
     # NOTE: Since distances are likely < D_pos we must apply masking along D_pos
@@ -141,11 +146,11 @@ def _fwd_kernel(
         else:
             pos_q_mask = (d_offsets < D_pos)[None, :]
             pos_q = tl.load(pos_q_p + (m_offsets[:, None] * stride_posq_m + d_offsets[None, :]), mask=pos_q_mask)
-        pos_slope = tl.load(pos_slopes_p).to(pos_q.dtype)
+        pos_slope = tl.load(pos_slopes_p).to(pos_q.dtype) * bias_scale
 
     # Iterate over KV blocks
     for _ in range(0, N, BLOCK_N):
-        # Load K block and compute QK (must be FP32 for exponential)
+        # Load K block and compute QK 
         k = tl.load(k_p + (tl.arange(0, BLOCK_N)[None, :] * stride_k_n + tl.arange(0, BLOCK_HEADDIM)[:, None]))
         qk = tl.dot(q, k, allow_tf32=True)
 
@@ -166,13 +171,13 @@ def _fwd_kernel(
         query_i_maxdot_new = tl.maximum(query_i_maxdot, tl.max(qk, 1))
 
         # Compute scaling constant alpha and rescale the previous contributions, updating the maximum logit
-        alpha = tl.exp(query_i_maxdot - query_i_maxdot_new)
+        alpha = tl.math.exp2(query_i_maxdot - query_i_maxdot_new)
         query_i_maxdot = query_i_maxdot_new
         value_accumulator *= alpha.to(ACCUMULATOR_DTYPE)[:, None]
         softmax_denominator *= alpha
 
         # Compute the softmax numerator for each key, applying the maximum logit offset to avoid numerical overflow
-        p = tl.exp(qk - query_i_maxdot_new[:, None]).to(PROB_DTYPE)
+        p = tl.math.exp2(qk - query_i_maxdot_new[:, None]).to(PROB_DTYPE)
 
         # Compute the softmax denominator for each query, applying the maximum logit offset to the existing denominator
         softmax_denominator += tl.sum(p, 1)
@@ -193,7 +198,7 @@ def _fwd_kernel(
     # Per Flash Attention 2, we store only logsumexp for the backward pass
     tl.store(
         logit_scale_p + tl.arange(0, BLOCK_M),
-        (query_i_maxdot + tl.math.log(softmax_denominator)),
+        (query_i_maxdot + tl.math.log2(softmax_denominator)),
     )
 
     # Write output
@@ -467,7 +472,7 @@ class _attention(torch.autograd.Function):
         # fmt: off
         spill_warning()(_fwd_kernel[grid])(
             q, k, v, logit_scale, pos_q, pos_k, slopes, o,
-            softmax_scale,
+            softmax_scale, softmax_scale * LN_2_RECIP, LN_2_RECIP,
             B, H, Lq, Lk, D, D_pos,
             q.stride(0), q.stride(1), q.stride(2),
             k.stride(0), k.stride(1), k.stride(2),
