@@ -2,7 +2,7 @@ import math
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, Tuple, cast, Final
+from typing import Any, Dict, Final, Tuple, cast
 
 import torch
 import torch.nn.functional as F
@@ -10,12 +10,13 @@ import triton
 import triton.language as tl
 from torch import Tensor
 from tqdm import tqdm
+from triton import JITFunction
 
 from .distance import _euclidean_distance_matmul_inner
 from .helpers import TENSOR_CORE_K, IsBlockMultiple, PowerOfTwoHeuristic, PruneConfigs, spill_warning
 
 
-LN_2_RECIP: Final = 1 / math.log(2) 
+LN_2_RECIP: Final = 1 / math.log(2)
 
 
 @triton.autotune(
@@ -147,10 +148,13 @@ def _fwd_kernel(
             pos_q_mask = (d_offsets < D_pos)[None, :]
             pos_q = tl.load(pos_q_p + (m_offsets[:, None] * stride_posq_m + d_offsets[None, :]), mask=pos_q_mask)
         pos_slope = (tl.load(pos_slopes_p) * bias_scale).to(DOT_DTYPE)
+    else:
+        pos_slope = None
+        pos_q = None
 
     # Iterate over KV blocks
     for _ in range(0, N, BLOCK_N):
-        # Load K block and compute QK 
+        # Load K block and compute QK
         k = tl.load(k_p + (tl.arange(0, BLOCK_N)[None, :] * stride_k_n + tl.arange(0, BLOCK_HEADDIM)[:, None]))
         qk = tl.dot(q, k, allow_tf32=True)
 
@@ -182,10 +186,9 @@ def _fwd_kernel(
 
         # Accumulate the weighted values for this block of V
         v = tl.load(v_p + (tl.arange(0, BLOCK_N)[:, None] * stride_v_n + tl.arange(0, BLOCK_HEADDIM)[None, :]))
-        value_accumulator = (
-            value_accumulator * alpha[:, None] 
-            + tl.dot(p.to(v.dtype), v, allow_tf32=True, out_dtype=DOT_DTYPE).to(ACCUMULATOR_DTYPE)
-        )
+        value_accumulator = value_accumulator * alpha[:, None] + tl.dot(
+            p.to(v.dtype), v, allow_tf32=True, out_dtype=cast(tl.dtype, DOT_DTYPE)
+        ).to(ACCUMULATOR_DTYPE)
 
         # Advance pointers
         k_p += BLOCK_N * stride_k_n
@@ -298,7 +301,7 @@ def _bwd_preprocess_do_o_dot(
             PruneConfigs("BLOCK_N", high="N"),
         )
     },
-    reset_to_zero=["dq_p"],
+    reset_to_zero=["dq_p", "lock_p"],
 )
 @triton.heuristics(
     {
@@ -380,11 +383,11 @@ def _bwd_kernel(
         # Shape do = (MxD)
         # NOTE: `do` is pre-divided by `l`; no normalization here
         do = tl.load(do_p + (m_offsets[:, None] + d_offsets[None, :]))  # (MxD)
-        dv += tl.dot(tl.trans(p), do, allow_tf32=True, out_dtype=DOT_DTYPE).to(ACCUMULATOR_DTYPE)
+        dv += tl.dot(tl.trans(p), do, allow_tf32=True, out_dtype=cast(tl.dtype, DOT_DTYPE)).to(ACCUMULATOR_DTYPE)
 
         # compute dL/dp = dL/do * do/dp = dL/do * v
         # Shape dp = (MxN)
-        dp = tl.dot(do, tl.trans(v), allow_tf32=True, out_dtype=DOT_DTYPE)
+        dp = tl.dot(do, tl.trans(v), allow_tf32=True, out_dtype=cast(tl.dtype, DOT_DTYPE))
 
         # compute dL/ds = dL/dp * dp/ds = p * (dp - delta[:, None])
         # Shape ds = (MxN)
@@ -393,18 +396,19 @@ def _bwd_kernel(
 
         # compute dL/dk = dL/ds * ds/dk = dot(ds.T, q)
         q = tl.load(q_p + (m_offsets[:, None] + d_offsets[None, :]))
-        dk += tl.dot(tl.trans(ds), q, allow_tf32=True, out_dtype=DOT_DTYPE).to(ACCUMULATOR_DTYPE)
+        dk += tl.dot(tl.trans(ds), q, allow_tf32=True, out_dtype=cast(tl.dtype, DOT_DTYPE)).to(ACCUMULATOR_DTYPE)
 
         # compute dL/dq = dL/ds * ds/dq = dot(ds, k)
         # NOTE: We do an atomic add here since multiple threads may be writing to the dq location.
         # For some reason tl.atomic_add is much slower than what we have here.
         # Using a counter to avoid initializing dq to 0 results in register spilling, so we just start with
         # zero initialization and add at each step
-        dq = tl.dot(ds, k, allow_tf32=True, out_dtype=DOT_DTYPE).to(dq_p.dtype.element_ty)
+        dq = tl.dot(ds, k, allow_tf32=True, out_dtype=cast(tl.dtype, DOT_DTYPE)).to(dq_p.dtype.element_ty)
+        # tl.atomic_add(dq_p + (m_offsets[:, None] + d_offsets[None, :]), dq)
         while tl.atomic_cas(lock_p, 0, 1) == 1:
             pass
-        dq += tl.load(dq_p + (m_offsets[:, None] + d_offsets[None, :]))
-        tl.store(dq_p + (m_offsets[:, None] + d_offsets[None, :]), dq)
+        dq += tl.load(dq_p + (m_offsets[:, None] + d_offsets[None, :]), eviction_policy="evict_last")
+        tl.store(dq_p + (m_offsets[:, None] + d_offsets[None, :]), dq, eviction_policy="evict_last")
         tl.atomic_xchg(lock_p, 0)
 
         # advance pointers
@@ -471,7 +475,7 @@ class _attention(torch.autograd.Function):
             return (triton.cdiv(Lq, META["BLOCK_M"]), B * H)
 
         # fmt: off
-        spill_warning()(_fwd_kernel[grid])(
+        spill_warning()(cast(JITFunction, _fwd_kernel)[grid])(
             q, k, v, logit_scale, pos_q, pos_k, slopes, o,
             softmax_scale, softmax_scale * LN_2_RECIP, LN_2_RECIP,
             B, H, Lq, Lk, D, D_pos,
@@ -509,13 +513,16 @@ class _attention(torch.autograd.Function):
         dk = torch.empty_like(k)
         dv = torch.empty_like(v)
         delta = torch.empty_like(logit_scale, dtype=dq.dtype)
-        locks = torch.zeros(B * H * Lq, dtype=torch.int32, device=q.device)
+        # TODO: We don't know how many locks we need until the autotuner chooses a config.
+        # The best we can do is to allocate enough for the worst case. Can this be improved?
+        MIN_AUTOTUNER_N = 32
+        locks = torch.zeros(B * H * triton.cdiv(Lq, MIN_AUTOTUNER_N), dtype=torch.int32, device=q.device)
 
         def pre_grid(META):
             return (triton.cdiv(Lq, META["BLOCK_M"]), B * H)
 
         # fmt: off
-        spill_warning()(_bwd_preprocess_do_o_dot[pre_grid])(
+        spill_warning()(cast(JITFunction, _bwd_preprocess_do_o_dot)[pre_grid])(
             o, do, delta,
             o.stride(0), o.stride(1), o.stride(2),
             do.stride(0), do.stride(1), do.stride(2),
@@ -529,7 +536,7 @@ class _attention(torch.autograd.Function):
             return (triton.cdiv(Lk, META["BLOCK_N"]), B * H)
 
         # fmt: off
-        spill_warning()(_bwd_kernel[grid])(
+        spill_warning()(cast(JITFunction, _bwd_kernel)[grid])(
             q, k, v, logit_scale, 
             do, dq, dk, dv, delta,
             ctx.softmax_scale, ctx.softmax_scale * LN_2_RECIP, LN_2_RECIP,
@@ -657,7 +664,9 @@ def _benchmark(
                     )
 
         case "triton" | "triton-fast":
-            kwargs = dict(precise=True, stable=True) if provider == "triton" else dict(precise=False, stable=False)
+            kwargs: Dict[str, Any] = (
+                dict(precise=True, stable=True) if provider == "triton" else dict(precise=False, stable=False)
+            )
             if mode == "fwd":
                 ms, min_ms, max_ms = triton.testing.do_bench(
                     lambda: attention(q, k, v, pos_q, pos_k, **kwargs),

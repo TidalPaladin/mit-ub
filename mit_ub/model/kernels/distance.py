@@ -189,7 +189,7 @@ def _euclidean_distance_matmul_inner(
     ab = tl.dot(a, b, out_dtype=DOT_DTYPE)
 
     # Update accumulator -> diag(a @ a.T) - 2 * a @ b + diag(b @ b.T)
-    # Optimize for FMA for FP32 
+    # Optimize for FMA for FP32
     if DOT_DTYPE is tl.float32:
         return diag_a[:, None] + tl.math.fma(-2, ab, diag_b[None, :])
     else:
