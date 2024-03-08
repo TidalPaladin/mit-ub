@@ -181,12 +181,12 @@ def _euclidean_distance_matmul_inner(
 
     # Compute diag(b @ b.T)
     block_idx = tl.arange(0, BLOCK_SIZE_N)
-    diag_b = tl.where(block_idx[:, None] == block_idx, tl.dot(b, tl.trans(b), out_dtype=DOT_DTYPE), other)
+    diag_b = tl.where(block_idx[:, None] == block_idx, tl.dot(tl.trans(b), b, out_dtype=DOT_DTYPE), other)
     diag_b = tl.sum(diag_b, 1)
 
     # Compute a @ b.T
     # Compute this last to minimize register pressure
-    ab = tl.dot(a, tl.trans(b), out_dtype=DOT_DTYPE)
+    ab = tl.dot(a, b, out_dtype=DOT_DTYPE)
 
     # Update accumulator -> diag(a @ a.T) - 2 * a @ b + diag(b @ b.T)
     # Optimize for FMA for FP32 
@@ -257,11 +257,11 @@ def _euclidean_distance_kernel_fwd_matmul(
     )
     b_block_ptr = tl.make_block_ptr(
         base=b_ptr,
-        shape=(N, K),
-        strides=(stride_bn, stride_bk),
-        offsets=(pid_n * BLOCK_SIZE_N, 0),
-        block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_K),
-        order=(1, 0),
+        shape=(K, N),
+        strides=(stride_bk, stride_bn),
+        offsets=(0, pid_n * BLOCK_SIZE_N),
+        block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_N),
+        order=(0, 1),
     )
     c_block_ptr = tl.make_block_ptr(
         base=c_ptr,
@@ -305,7 +305,7 @@ def _euclidean_distance_kernel_fwd_matmul(
         )
         b = tl.load(
             b_block_ptr,
-            boundary_check=(0, 1) if not (EVEN_K and EVEN_N) else (0,) if not EVEN_K else (1,) if not EVEN_N else None,
+            boundary_check=(0, 1) if not (EVEN_K and EVEN_N) else (1,) if not EVEN_K else (0,) if not EVEN_N else None,
         )
 
         # Load the weight matrix if it is provided and apply it to a
@@ -313,14 +313,14 @@ def _euclidean_distance_kernel_fwd_matmul(
             w = tl.load(w_block_ptr, boundary_check=(0,) if not EVEN_K else None).to(tl.float32)
             w = tl.math.sqrt(w)
             a = a * w[None, :]
-            b = b * w[None, :]
+            b = b * w[:, None]
             w_block_ptr = tl.advance(w_block_ptr, (BLOCK_SIZE_K,))
 
         accumulator += _euclidean_distance_matmul_inner(a, b, BLOCK_SIZE_M, BLOCK_SIZE_N, tl.float32)
 
         # Advance block pointers
         a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
-        b_block_ptr = tl.advance(b_block_ptr, (0, BLOCK_SIZE_K))
+        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_SIZE_K, 0))
 
     # Apply the square root and store the result
     c = tl.sqrt(accumulator).to(c_ptr.dtype.element_ty)
