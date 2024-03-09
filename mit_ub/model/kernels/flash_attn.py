@@ -182,7 +182,7 @@ def _fwd_kernel(
         p = tl.math.exp2(qk - query_i_maxdot_new[:, None]).to(PROB_DTYPE)
 
         # Compute the softmax denominator for each query, applying the maximum logit offset to the existing denominator
-        softmax_denominator = softmax_denominator * alpha + tl.sum(p, 1)
+        softmax_denominator = softmax_denominator * alpha + tl.sum(p, 1).to(ACCUMULATOR_DTYPE)
 
         # Accumulate the weighted values for this block of V
         v = tl.load(v_p + (tl.arange(0, BLOCK_N)[:, None] * stride_v_n + tl.arange(0, BLOCK_HEADDIM)[None, :]))
@@ -306,6 +306,8 @@ def _bwd_preprocess_do_o_dot(
 @triton.heuristics(
     {
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
+        "BLOCK_POSDIM": PowerOfTwoHeuristic("D_pos", min_val=TENSOR_CORE_K),
+        "EVEN_POSDIM": IsBlockMultiple("D_pos", "BLOCK_POSDIM"),
         "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
     }
 )
@@ -313,7 +315,7 @@ def _bwd_preprocess_do_o_dot(
 def _bwd_kernel(
     # fmt: off
     # Inputs
-    q_p, k_p, v_p, logit_scale_p,
+    q_p, k_p, v_p, logit_scale_p, pos_q_p, pos_k_p, pos_slopes_p,
     # Derivatives
     do_p, dq_p, dk_p, dv_p, delta_p,
     softmax_scale: tl.constexpr, qk_scale: tl.constexpr, bias_scale: tl.constexpr, 
@@ -322,12 +324,18 @@ def _bwd_kernel(
     stride_q_b: tl.constexpr, stride_q_h: tl.constexpr , stride_q_m: tl.constexpr,
     stride_k_b: tl.constexpr, stride_k_h: tl.constexpr , stride_k_n: tl.constexpr, 
     stride_v_b: tl.constexpr, stride_v_h: tl.constexpr , stride_v_n: tl.constexpr, 
+    stride_posq_b: tl.constexpr, stride_posq_h: tl.constexpr , stride_posq_m: tl.constexpr,
+    stride_posk_b: tl.constexpr, stride_posk_h: tl.constexpr , stride_posk_n: tl.constexpr,
+    stride_slopes_b: tl.constexpr,
     # Sizes
-    B: tl.constexpr, H: tl.constexpr, M: tl.constexpr, N: tl.constexpr, D: tl.constexpr,
+    B: tl.constexpr, H: tl.constexpr, M: tl.constexpr, N: tl.constexpr, D: tl.constexpr, D_pos: tl.constexpr,
     # Dtypes
     ACCUMULATOR_DTYPE: tl.constexpr, DOT_DTYPE: tl.constexpr, PROB_DTYPE: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
     # Blocks
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_HEADDIM: tl.constexpr,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_HEADDIM: tl.constexpr, BLOCK_POSDIM: tl.constexpr,
+    # Heuristics
+    EVEN_POSDIM: tl.constexpr,
     # fmt: on
 ):
     # Initialize offsets.
@@ -347,6 +355,9 @@ def _bwd_kernel(
     dq_p += offset_b * stride_q_b + offset_h * stride_q_h
     dk_p += offset_b * stride_k_b + offset_h * stride_k_h
     dv_p += offset_b * stride_v_b + offset_h * stride_v_h
+    pos_q_p += offset_b * stride_posq_b + offset_h * stride_posq_h
+    pos_k_p += offset_b * stride_posk_b + offset_h * stride_posk_h
+    pos_slopes_p += offset_b * stride_slopes_b
     delta_p += offset_bh * M
     logit_scale_p += offset_bh * M
     lock_p += offset_bh * tl.cdiv(M, BLOCK_M)
@@ -365,6 +376,20 @@ def _bwd_kernel(
     dv = tl.zeros([BLOCK_N, BLOCK_HEADDIM], dtype=ACCUMULATOR_DTYPE)
     dk = tl.zeros([BLOCK_N, BLOCK_HEADDIM], dtype=ACCUMULATOR_DTYPE)
 
+    # Init pos_k
+    if HAS_BIAS:
+        # Load the slopes squared
+        pos_d_offsets = tl.arange(0, BLOCK_POSDIM)
+        if EVEN_POSDIM:
+            pos_k = tl.load(pos_k_p + (n_offsets[None, :] * stride_posk_n + pos_d_offsets[:, None]))
+        else:
+            pos_k_mask = (pos_d_offsets < D_pos)[:, None]
+            pos_k = tl.load(pos_k_p + (n_offsets[None, :] * stride_posk_n + pos_d_offsets[:, None]), mask=pos_k_mask)
+        pos_slope = (tl.load(pos_slopes_p) * bias_scale).to(DOT_DTYPE)
+    else:
+        pos_slope = None
+        pos_k = None
+
     # Recall that for matrix multiplication C = A * B,
     # * dC/dA = B.T
     # * dC/dB = A.T
@@ -375,9 +400,22 @@ def _bwd_kernel(
         # Recompute p = softmax(qk), p is (MxN)
         # NOTE: Keep qk in fp32 to avoid overflow and because exponentiation requires FP32
         q = tl.load(q_p + (m_offsets[:, None] + d_offsets[None, :]))
-        qk = tl.dot(q, tl.trans(k))
         logit_scale = tl.load(logit_scale_p + tl.arange(0, BLOCK_M))
-        p = tl.math.exp2(qk * qk_scale - logit_scale[:, None]).to(do_p.dtype.element_ty)
+        qk = tl.dot(q, tl.trans(k))
+        if HAS_BIAS:
+            pos_m_offsets = tl.arange(0, BLOCK_M) * stride_posq_m
+            pos_d_offsets = tl.arange(0, BLOCK_POSDIM)
+            if EVEN_POSDIM:
+                pos_q = tl.load(pos_q_p + (pos_m_offsets[:, None] + pos_d_offsets[None, :]))
+            else:
+                pos_q_mask = (pos_d_offsets < D_pos)[None, :]
+                pos_q = tl.load(pos_q_p + (pos_m_offsets[:, None] + pos_d_offsets[None, :]), mask=pos_q_mask)
+            bias = _euclidean_distance_matmul_inner(pos_q, pos_k, BLOCK_M, BLOCK_N, DOT_DTYPE)
+            bias = pos_slope * tl.sqrt(bias.to(tl.float32)).to(DOT_DTYPE)
+            qk = qk * qk_scale + bias
+            p = tl.math.exp2(qk - logit_scale[:, None]).to(do_p.dtype.element_ty)
+        else:
+            p = tl.math.exp2(qk * qk_scale - logit_scale[:, None]).to(do_p.dtype.element_ty)
 
         # compute dL/dv = dL/do * do/dv = dL/do * p
         # Shape do = (MxD)
@@ -492,18 +530,20 @@ class _attention(torch.autograd.Function):
         )
         # fmt: on
 
-        ctx.save_for_backward(q, k, v, o, logit_scale)
+        ctx.save_for_backward(q, k, v, o, logit_scale, pos_q, pos_k, slopes)
         ctx.softmax_scale = softmax_scale
         ctx.precise = precise
         ctx.stable = stable
+        ctx.has_bias = has_bias
         return o
 
     @staticmethod
     @torch.inference_mode()
     def backward(ctx, do):
-        q, k, v, o, logit_scale = cast(Tuple[Tensor, ...], ctx.saved_tensors)
+        q, k, v, o, logit_scale, pos_q, pos_k, slopes = cast(Tuple[Tensor, ...], ctx.saved_tensors)
         B, H, Lk, D = k.shape
         _, _, Lq, _ = q.shape
+        D_pos = pos_q.shape[-1] if ctx.has_bias else 0
         assert logit_scale.shape == (B, H, Lq)
 
         do = do.contiguous() if do.stride(-1) != 1 else do
@@ -537,14 +577,18 @@ class _attention(torch.autograd.Function):
 
         # fmt: off
         spill_warning()(cast(JITFunction, _bwd_kernel)[grid])(
-            q, k, v, logit_scale, 
+            q, k, v, logit_scale, pos_q, pos_k, slopes,
             do, dq, dk, dv, delta,
             ctx.softmax_scale, ctx.softmax_scale * LN_2_RECIP, LN_2_RECIP,
             locks,
             q.stride(0), q.stride(1), q.stride(2),
             k.stride(0), k.stride(1), k.stride(2),
             v.stride(0), v.stride(1), v.stride(2),
-            B, H, Lq, Lk, D,
+            pos_q.stride(0), pos_q.stride(1), pos_q.stride(2),
+            pos_k.stride(0), pos_k.stride(1), pos_k.stride(2),
+            slopes.stride(0),
+            B, H, Lq, Lk, D, D_pos,
+            HAS_BIAS=ctx.has_bias,
             **_attention._select_dtypes(ctx.precise, ctx.stable, dq.dtype),
         )
         # fmt: on
@@ -553,24 +597,25 @@ class _attention(torch.autograd.Function):
 
     @staticmethod
     def _select_dtypes(precise: bool, stable: bool, target: torch.dtype) -> Dict[str, Any]:
-        match (precise, stable):
+        match (target, precise, stable):
             # For precise and stable operations, we use FP32 for all intermediates.
-            case (True, True):
+            # BF16 seems to be slower in all configurations, so we use FP32 for everything in this case.
+            case (_, True, True) | (torch.bfloat16, _, _):
                 return dict(
                     ACCUMULATOR_DTYPE=tl.float32,
                     PROB_DTYPE=tl.float32,
                     DOT_DTYPE=tl.float32,
                 )
             # For speed > stability/precision, we use FP16 for all intermediates.
-            case (False, False):
+            case (torch.float16, False, False):
                 return dict(
                     ACCUMULATOR_DTYPE=tl.float16,
-                    PROB_DTYPE=tl.float16,
+                    PROB_DTYPE=tl.bfloat16,
                     DOT_DTYPE=tl.float16,
                 )
             # For speed + precision > stability, we do intermediate ops in FP16 and accumulate
             # into the same dtype as the output
-            case (True, False):
+            case (torch.float16, True, False):
                 return dict(
                     ACCUMULATOR_DTYPE=tl.float16 if target == torch.float16 else tl.bfloat16,
                     PROB_DTYPE=tl.float16,
@@ -579,7 +624,7 @@ class _attention(torch.autograd.Function):
             # For speed + stability > precision, we do intermediate ops in FP16 and accumulate
             # into BF16, which is then casted to the output dtype after accumulation.
             # Triton does not support bfloat16 dot product accumulator, so we use FP32 for dot
-            case (False, True):
+            case (torch.float16, False, True):
                 return dict(
                     ACCUMULATOR_DTYPE=tl.bfloat16,
                     PROB_DTYPE=tl.float16,
@@ -663,10 +708,10 @@ def _benchmark(
                         rep=rep,
                     )
 
-        case "triton" | "triton-fast":
-            kwargs: Dict[str, Any] = (
-                dict(precise=True, stable=True) if provider == "triton" else dict(precise=False, stable=False)
-            )
+        case "triton" | "triton-fast" | "triton-precise" | "triton-stable":
+            precise = provider in {"triton", "triton-precise"}
+            stable = provider in {"triton", "triton-stable"}
+            kwargs: Dict[str, Any] = dict(precise=precise, stable=stable)
             if mode == "fwd":
                 ms, min_ms, max_ms = triton.testing.do_bench(
                     lambda: attention(q, k, v, pos_q, pos_k, **kwargs),
@@ -710,26 +755,31 @@ def parse_args() -> Namespace:
     parser.add_argument("--mode", default="fwd", choices=["fwd", "bwd"], help="Mode to benchmark")
     parser.add_argument("-d", "--dtype", default="fp16", choices=["fp16", "bf16"], help="Data type to test")
     parser.add_argument("-t", "--torch", default=False, action="store_true", help="Benchmark Torch (slow)")
+    parser.add_argument(
+        "-p",
+        "--providers",
+        default=["triton", "triton-fast", "flash"],
+        nargs="+",
+        choices=["triton", "triton-fast", "triton-precise", "triton-stable", "torch", "flash"],
+        help="Additional variations to benchmark",
+    )
     return parser.parse_args()
 
 
 def main(args: Namespace):
     test_configs = list(range(args.step, args.QK + 1, args.step))
+    PROVIDER_NAMES = {
+        "triton": "Triton",
+        "triton-fast": "Triton (Fast)",
+        "triton-precise": "Triton (Precise)",
+        "triton-stable": "Triton (Stable)",
+        "torch": "Torch",
+        "flash": f"Flash Attention 2" + (" (no bias)" if args.bias else ""),
+    }
+    line_names = [PROVIDER_NAMES[p] for p in args.providers]
 
-    # Only torch and triton support bias.
-    providers = ["torch", "triton", "triton-fast", "flash"]
-    if args.bias:
-        line_names = ["Torch", "Triton", "Triton Fast", "Flash Attention 2 (no bias)"]
-    else:
-        line_names = ["Torch", "Triton", "Triton Fast", "Flash Attention 2"]
-
-    if not args.torch:
-        providers = providers[1:]
-        line_names = line_names[1:]
-
-    total_tests = len(providers) * len(test_configs) * len(args.D)
+    total_tests = len(args.providers) * len(test_configs) * len(args.D)
     bar = tqdm(total=total_tests, desc="Benchmarking")
-
     for d in args.D:
         plot_name = f"flash-attn-d={d}-{args.mode}-{args.dtype}" + ("-bias" if args.bias else "")
         xlabel = f"Input size (Lx{d}, Lx{d})"
@@ -739,9 +789,9 @@ def main(args: Namespace):
                 x_names=["Q", "K"],
                 x_vals=test_configs,
                 line_arg="provider",
-                line_vals=providers,
+                line_vals=args.providers,
                 line_names=line_names,
-                styles=[("green", "-"), ("blue", "-"), ("orange", "-"), ("red", "-")],
+                # styles=[("green", "-"), ("blue", "-"), ("orange", "-"), ("red", "-")],
                 xlabel=xlabel,
                 ylabel=ylabel,
                 plot_name=plot_name,

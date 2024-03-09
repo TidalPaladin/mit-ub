@@ -5,6 +5,7 @@ from functools import wraps
 from typing import Any, Callable, Dict, Final, List, TypeVar, cast
 
 import triton
+import triton.language as tl
 from triton.compiler import CompiledKernel
 
 
@@ -207,3 +208,8 @@ class PruneConfigs:
             return configs
 
         return _composed
+
+
+@triton.jit
+def scalar(val: tl.constexpr, dtype: tl.dtype) -> tl.tensor:
+    return tl.full((1,), val, dtype=dtype)
