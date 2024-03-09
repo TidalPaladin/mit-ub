@@ -42,6 +42,10 @@ LN_2_RECIP: Final = 1 / math.log(2)
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
         "BLOCK_POSDIM": PowerOfTwoHeuristic("D_pos", min_val=TENSOR_CORE_K),
         "EVEN_POSDIM": IsBlockMultiple("D_pos", "BLOCK_POSDIM"),
+        ACCUMULATOR_DTYPE=tl.float32,
+        PROB_DTYPE=tl.float32,
+        DOT_DTYPE=tl.float32,
+
         "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
     }
 )
@@ -526,7 +530,7 @@ class _attention(torch.autograd.Function):
             slopes.stride(0),
             o.stride(0), o.stride(1), o.stride(2),
             HAS_BIAS=has_bias,
-            **_attention._select_dtypes(precise, stable, o.dtype),
+            **_attention._select_dtypes(precise, stable, o.dtype, fwd=True),
         )
         # fmt: on
 
@@ -589,15 +593,15 @@ class _attention(torch.autograd.Function):
             slopes.stride(0),
             B, H, Lq, Lk, D, D_pos,
             HAS_BIAS=ctx.has_bias,
-            **_attention._select_dtypes(ctx.precise, ctx.stable, dq.dtype),
+            **_attention._select_dtypes(ctx.precise, ctx.stable, dq.dtype, fwd=False),
         )
         # fmt: on
 
         return dq, dk, dv, None, None, None, None, None, None
 
     @staticmethod
-    def _select_dtypes(precise: bool, stable: bool, target: torch.dtype) -> Dict[str, Any]:
-        match (target, precise, stable):
+    def _select_dtypes(precise: bool, stable: bool, target: torch.dtype, fwd: bool) -> Dict[str, Any]:
+        match (fwd, target, precise, stable):
             # For precise and stable operations, we use FP32 for all intermediates.
             # BF16 seems to be slower in all configurations, so we use FP32 for everything in this case.
             case (_, True, True) | (torch.bfloat16, _, _):

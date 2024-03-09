@@ -1,29 +1,17 @@
-from abc import abstractmethod, abstractproperty
-from re import M
-from copy import copy
-from typing import Any, Dict, Optional, Set, Tuple, cast, Final, Iterable, List
-from pathlib import Path
-from torch_dicom.datasets import AggregateDataset
-from torch_dicom.preprocessing import TileCrop, MinMaxCrop, Resize
-from einops import rearrange
-from dicom_utils.container.collection import iterate_input_path
-import argparse
 import math
-import torch.nn.functional as F 
-from torchvision.ops import sigmoid_focal_loss
+from typing import Any, Dict, Final, Optional, Set, cast
 
-
-import torchmetrics as tm
-import math
 import torch
 import torch.nn as nn
 import torchmetrics as tm
 from deep_helpers.structs import State
 from deep_helpers.tasks import Task
-from torch import Tensor
 from gpvit import GPViT
 from gpvit.layers import MLPMixerPooling
-#from gpvit.train import BACKBONES
+from torch import Tensor
+from torchvision.ops import sigmoid_focal_loss
+
+# from gpvit.train import BACKBONES
 from ..model import BACKBONES
 
 
@@ -56,6 +44,7 @@ class TriageTask(Task):
         log_train_metrics_on_epoch: If True, log training metrics at the end of each epoch.
         weight_decay_exemptions: Set of parameter names to exempt from weight decay.
     """
+
     def __init__(
         self,
         backbone: str,
@@ -91,21 +80,19 @@ class TriageTask(Task):
             MLPMixerPooling(dim, group_tokens, group_tokens, dim, dropout=0.1),
             nn.Linear(dim, 1),
         )
-        self.criterion = (
-            nn.BCEWithLogitsLoss(reduction="none")
-            if not focal_loss
-            else sigmoid_focal_loss
-        )
+        self.criterion = nn.BCEWithLogitsLoss(reduction="none") if not focal_loss else sigmoid_focal_loss
 
     def prepare_backbone(self, name: str) -> nn.Module:
         return BACKBONES.get(name).instantiate_with_metadata().fn
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
-        return tm.MetricCollection({
-            "auroc": tm.AUROC(task="binary"),
-            "acc": tm.Accuracy(task="binary"),
-            "pos-acc": tm.Accuracy(task="binary", ignore_index=0),
-        })
+        return tm.MetricCollection(
+            {
+                "auroc": tm.AUROC(task="binary"),
+                "acc": tm.Accuracy(task="binary"),
+                "pos-acc": tm.Accuracy(task="binary", ignore_index=0),
+            }
+        )
 
     @torch.no_grad()
     def get_crop_mask(self, batch: Dict[str, Any]) -> Tensor:
@@ -145,7 +132,7 @@ class TriageTask(Task):
     @torch.no_grad()
     def sanitize_boxes(self, batch: Dict[str, Any], min_size: float = 16.0) -> Dict[str, Any]:
         for example in batch["bounding_boxes"]:
-            box_metadata = (example or {})
+            box_metadata = example or {}
             boxes = box_metadata.get("boxes", None)
             trait = box_metadata.get("trait", None)
             types = box_metadata.get("types", None)
@@ -164,7 +151,7 @@ class TriageTask(Task):
                 trait = [t for i, t in enumerate(trait) if valid_size[i]]
                 types = [t for i, t in enumerate(types) if valid_size[i]]
 
-                if boxes.numel(): 
+                if boxes.numel():
                     box_metadata["boxes"] = boxes
                     box_metadata["trait"] = trait
                     box_metadata["types"] = types
@@ -175,17 +162,15 @@ class TriageTask(Task):
 
         return batch
 
-        
-
     @torch.no_grad()
     def get_tensor_label(self, batch: Dict[str, Any], crop_adjust: bool = True) -> Tensor:
         """
         Extracts the label from the batch and converts it into a tensor.
 
-        The label is extracted from the "malignant" field of each example in the batch. 
+        The label is extracted from the "malignant" field of each example in the batch.
         If the field is not present or the example is None, the label is considered unknown.
 
-        The labels are then converted into a tensor of float32, with 1 representing a positive label, 
+        The labels are then converted into a tensor of float32, with 1 representing a positive label,
         -1 representing an unknown label, and 0 representing a negative label.
 
         Args:
@@ -215,7 +200,9 @@ class TriageTask(Task):
             # - If the original label is positive and no malignant bounding box is present, the crop label is updated to unknown.
             # Other cases are left unchanged.
             label[is_crop & (label == 1) & (~has_malignant_trace)] = UNKNOWN_INT
-            assert not (is_crop & (label == 1) & (~has_malignant_trace)).any(), "Crops with no malignant trace should have unknown label"
+            assert not (
+                is_crop & (label == 1) & (~has_malignant_trace)
+            ).any(), "Crops with no malignant trace should have unknown label"
 
         return label.float()
 
@@ -226,23 +213,20 @@ class TriageTask(Task):
         Args:
             batch: The batch of examples.
             crop_adjust: If True, adjust the mask for crops.
-        
+
         Returns:
             The boolean mask indicating which examples have an unknown label, with shape :math:`(B,)`,
             where :math:`B` is the batch size.
         """
         mask = torch.tensor(
-            [
-                (example or {}).get("malignant", None) is None
-                for example in batch["annotation"]
-            ],
+            [(example or {}).get("malignant", None) is None for example in batch["annotation"]],
             device=self.device,
         )
-        
+
         if crop_adjust:
             label = self.get_tensor_label(batch)
             mask = torch.where(label == UNKNOWN_INT, label, mask)
-        
+
         return mask.bool()
 
     @torch.no_grad()
@@ -252,10 +236,10 @@ class TriageTask(Task):
 
         The loss weight is computed as the inverse of the number of known labels in the batch.
         For examples with unknown labels, the loss weight is set to 0.
-        
+
         Args:
             batch: The batch of examples.
-        
+
         Returns:
             The loss weight for each example in the batch.
         """
@@ -293,10 +277,7 @@ class TriageTask(Task):
         # log metrics
         with torch.no_grad():
             if metrics is not None:
-                metrics.update(
-                    pred[weight > 0],
-                    y[weight > 0]
-                )
+                metrics.update(pred[weight > 0], y[weight > 0])
 
         output = {
             "triage_score": pred.detach(),
@@ -367,10 +348,7 @@ class BreastTriageTask(TriageTask):
     def get_standard_view_mask(self, batch: Dict[str, Any]) -> Tensor:
         r"""Returns a boolean mask of shape :math:`(B,)` indicating which examples are standard mammogram views."""
         return torch.tensor(
-            [
-                bool((example or {}).get("standard_view", None))
-                for example in batch["manifest"]
-            ],
+            [bool((example or {}).get("standard_view", None)) for example in batch["manifest"]],
             device=self.device,
         )
 
@@ -378,21 +356,14 @@ class BreastTriageTask(TriageTask):
     def get_implant_mask(self, batch: Dict[str, Any]) -> Tensor:
         r"""Returns a boolean mask of shape :math:`(B,)` indicating which examples implant views."""
         implant = torch.tensor(
-            [
-                bool((example or {}).get("implant", None))
-                for example in batch["manifest"]
-            ],
+            [bool((example or {}).get("implant", None)) for example in batch["manifest"]],
             device=self.device,
         )
         implant_displaced = torch.tensor(
-            [
-                bool((example or {}).get("implant_displaced", None))
-                for example in batch["manifest"]
-            ],
+            [bool((example or {}).get("implant_displaced", None)) for example in batch["manifest"]],
             device=self.device,
         )
         return implant.logical_and_(implant_displaced.logical_not_())
-
 
     @torch.no_grad()
     def compute_loss_weight(self, batch: Dict[str, Any]) -> Tensor:
@@ -401,10 +372,10 @@ class BreastTriageTask(TriageTask):
 
         The baseline loss weight is computed as the inverse of the number of known labels in the batch.
         For examples with unknown labels, the loss weight is set to 0. The loss is then scaled by the
-        
+
         Args:
             batch: The batch of examples.
-        
+
         Returns:
             The loss weight for each example in the batch.
         """
