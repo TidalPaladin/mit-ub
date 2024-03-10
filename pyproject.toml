@@ -63,6 +63,16 @@ lines_after_imports = 2
 multi_line_output = 3
 use_parentheses = false
 
+[tool.pyright]
+include = ["mit_ub", "tests"]
+exclude = [
+  "**/node_modules",
+  "**/__pycache__",
+  "**/.pytest_cache",
+]
+pythonVersion = "3.11"
+pythonPlatform = "Linux"
+
 [tool.pdm]
 version = { source = "scm" }
 
@@ -87,7 +97,9 @@ markers = [
   "ci_skip",
   "slow",
 ]
-filterwarnings = []
+filterwarnings = [
+  "ignore:.*Reducing precision for BF16 inputs is slower than full precision.*:UserWarning",
+]
 
 # Sample script config
 #[project.scripts]

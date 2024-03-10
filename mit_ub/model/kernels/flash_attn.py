@@ -1,4 +1,5 @@
 import math
+import warnings
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from functools import partial
 from pathlib import Path
@@ -42,10 +43,6 @@ LN_2_RECIP: Final = 1 / math.log(2)
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
         "BLOCK_POSDIM": PowerOfTwoHeuristic("D_pos", min_val=TENSOR_CORE_K),
         "EVEN_POSDIM": IsBlockMultiple("D_pos", "BLOCK_POSDIM"),
-        ACCUMULATOR_DTYPE=tl.float32,
-        PROB_DTYPE=tl.float32,
-        DOT_DTYPE=tl.float32,
-
         "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
     }
 )
@@ -414,7 +411,8 @@ def _bwd_kernel(
             else:
                 pos_q_mask = (pos_d_offsets < D_pos)[None, :]
                 pos_q = tl.load(pos_q_p + (pos_m_offsets[:, None] + pos_d_offsets[None, :]), mask=pos_q_mask)
-            bias = _euclidean_distance_matmul_inner(pos_q, pos_k, BLOCK_M, BLOCK_N, DOT_DTYPE)
+            # NOTE: Compute this in FP32, it's overflow prone
+            bias = _euclidean_distance_matmul_inner(pos_q, pos_k, BLOCK_M, BLOCK_N, tl.float32)
             bias = pos_slope * tl.sqrt(bias.to(tl.float32)).to(DOT_DTYPE)
             qk = qk * qk_scale + bias
             p = tl.math.exp2(qk - logit_scale[:, None]).to(do_p.dtype.element_ty)
@@ -473,7 +471,15 @@ class _attention(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx, q, k, v, pos_q=None, pos_k=None, slopes=None, softmax_scale=None, precise: bool = True, stable: bool = True
+        ctx,
+        q,
+        k,
+        v,
+        pos_q=None,
+        pos_k=None,
+        slopes=None,
+        softmax_scale=None,
+        full_precision: bool = True,
     ) -> Tensor:
         # shape constraints
         B, H, Lq, D = q.shape
@@ -530,14 +536,13 @@ class _attention(torch.autograd.Function):
             slopes.stride(0),
             o.stride(0), o.stride(1), o.stride(2),
             HAS_BIAS=has_bias,
-            **_attention._select_dtypes(precise, stable, o.dtype, fwd=True),
+            **_attention._select_dtypes(o.dtype, full_precision),
         )
         # fmt: on
 
         ctx.save_for_backward(q, k, v, o, logit_scale, pos_q, pos_k, slopes)
         ctx.softmax_scale = softmax_scale
-        ctx.precise = precise
-        ctx.stable = stable
+        ctx.full_precision = full_precision
         ctx.has_bias = has_bias
         return o
 
@@ -593,50 +598,33 @@ class _attention(torch.autograd.Function):
             slopes.stride(0),
             B, H, Lq, Lk, D, D_pos,
             HAS_BIAS=ctx.has_bias,
-            **_attention._select_dtypes(ctx.precise, ctx.stable, dq.dtype, fwd=False),
+            **_attention._select_dtypes(dq.dtype, ctx.full_precision),
         )
         # fmt: on
 
         return dq, dk, dv, None, None, None, None, None, None
 
     @staticmethod
-    def _select_dtypes(precise: bool, stable: bool, target: torch.dtype, fwd: bool) -> Dict[str, Any]:
-        match (fwd, target, precise, stable):
-            # For precise and stable operations, we use FP32 for all intermediates.
-            # BF16 seems to be slower in all configurations, so we use FP32 for everything in this case.
-            case (_, True, True) | (torch.bfloat16, _, _):
-                return dict(
-                    ACCUMULATOR_DTYPE=tl.float32,
-                    PROB_DTYPE=tl.float32,
-                    DOT_DTYPE=tl.float32,
+    def _select_dtypes(dtype: torch.dtype, full_precision: bool) -> Dict[str, Any]:
+        if full_precision:
+            return dict(
+                ACCUMULATOR_DTYPE=tl.float32,
+                PROB_DTYPE=tl.float32,
+                DOT_DTYPE=tl.float32,
+            )
+        else:
+            # BF16 is slower at reduced precision and it doesn't seem possible to fix.
+            # This is probably because dot products do not support BF16 accumulators so a lot of casting is required.
+            if dtype is torch.bfloat16:
+                warnings.warn(
+                    "Reducing precision for BF16 inputs is slower than full precision. "
+                    "Consider using full precision or working with FP16 inputs"
                 )
-            # For speed > stability/precision, we use FP16 for all intermediates.
-            case (torch.float16, False, False):
-                return dict(
-                    ACCUMULATOR_DTYPE=tl.float16,
-                    PROB_DTYPE=tl.bfloat16,
-                    DOT_DTYPE=tl.float16,
-                )
-            # For speed + precision > stability, we do intermediate ops in FP16 and accumulate
-            # into the same dtype as the output
-            case (torch.float16, True, False):
-                return dict(
-                    ACCUMULATOR_DTYPE=tl.float16 if target == torch.float16 else tl.bfloat16,
-                    PROB_DTYPE=tl.float16,
-                    DOT_DTYPE=tl.float16,
-                )
-            # For speed + stability > precision, we do intermediate ops in FP16 and accumulate
-            # into BF16, which is then casted to the output dtype after accumulation.
-            # Triton does not support bfloat16 dot product accumulator, so we use FP32 for dot
-            case (torch.float16, False, True):
-                return dict(
-                    ACCUMULATOR_DTYPE=tl.bfloat16,
-                    PROB_DTYPE=tl.float16,
-                    DOT_DTYPE=tl.float16,
-                )
-
-            case _:
-                raise ValueError("precise and stable must be either True or False")
+            return dict(
+                ACCUMULATOR_DTYPE=tl.float16,
+                PROB_DTYPE=tl.float16,
+                DOT_DTYPE=tl.float16,
+            )
 
 
 attention_fn = _attention.apply
@@ -650,10 +638,26 @@ def attention(
     pos_k: Tensor | None = None,
     slopes: Tensor | None = None,
     softmax_scale: float | None = None,
-    precise: bool = True,
-    stable: bool = True,
+    full_precision: bool = True,
 ) -> Tensor:
-    return cast(Tensor, attention_fn(q, k, v, pos_q, pos_k, slopes, softmax_scale, precise, stable))
+    r"""Computes scaled dot product attention using Flash Attention 2.
+
+    Supports positional encodings for queries and keys that will be constructed using the Euclidean distance.
+    This is implemented such that the memory requirement is linear.
+
+    Args:
+        q: Query tensor of shape `(B, H, Lq, D)`
+        k: Key tensor of shape `(B, H, Lk, D)`
+        v: Value tensor of shape `(B, H, Lk, D)`
+        pos_q: Query position tensor of shape `(B, H, Lq, D_pos)`. Defaults to None.
+        pos_k: Key position tensor of shape `(B, H, Lk, D_pos)`. Defaults to None.
+        slopes: ALiBi slopes tensor of shape `(B, H)`. Defaults to None.
+        softmax_scale: Scale factor for the softmax. Defaults to None, in which case it is set to `1 / sqrt(D)`.
+        full_precision: Whether to use full precision for intermediate computations. Defaults to True.
+            Setting to falsle will perform intermediate computations in FP16, yielding a speedup at the cost
+            of precision and numerical stability.
+    """
+    return cast(Tensor, attention_fn(q, k, v, pos_q, pos_k, slopes, softmax_scale, full_precision))
 
 
 def _benchmark(
@@ -712,10 +716,8 @@ def _benchmark(
                         rep=rep,
                     )
 
-        case "triton" | "triton-fast" | "triton-precise" | "triton-stable":
-            precise = provider in {"triton", "triton-precise"}
-            stable = provider in {"triton", "triton-stable"}
-            kwargs: Dict[str, Any] = dict(precise=precise, stable=stable)
+        case "triton" | "triton-fast":
+            kwargs: Dict[str, Any] = dict(full_precision=(provider != "triton-fast"))
             if mode == "fwd":
                 ms, min_ms, max_ms = triton.testing.do_bench(
                     lambda: attention(q, k, v, pos_q, pos_k, **kwargs),
@@ -764,7 +766,7 @@ def parse_args() -> Namespace:
         "--providers",
         default=["triton", "triton-fast", "flash"],
         nargs="+",
-        choices=["triton", "triton-fast", "triton-precise", "triton-stable", "torch", "flash"],
+        choices=["triton", "triton-fast", "torch", "flash"],
         help="Additional variations to benchmark",
     )
     return parser.parse_args()
@@ -774,9 +776,7 @@ def main(args: Namespace):
     test_configs = list(range(args.step, args.QK + 1, args.step))
     PROVIDER_NAMES = {
         "triton": "Triton",
-        "triton-fast": "Triton (Fast)",
-        "triton-precise": "Triton (Precise)",
-        "triton-stable": "Triton (Stable)",
+        "triton-fast": "Triton (FP16 intermediate)",
         "torch": "Torch",
         "flash": f"Flash Attention 2" + (" (no bias)" if args.bias else ""),
     }
@@ -795,7 +795,6 @@ def main(args: Namespace):
                 line_arg="provider",
                 line_vals=args.providers,
                 line_names=line_names,
-                # styles=[("green", "-"), ("blue", "-"), ("orange", "-"), ("red", "-")],
                 xlabel=xlabel,
                 ylabel=ylabel,
                 plot_name=plot_name,

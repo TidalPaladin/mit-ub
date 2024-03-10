@@ -27,8 +27,10 @@ HARD_SHAPE_PARAMS: Final = (pytest.param(4, 2 * L, 4 * L, 4 * D, 4, id=f"b=4,lq=
 
 
 DATA_TYPE_PARAMS: Final = (
-    pytest.param(torch.float16, 0.01, id="float16"),
-    pytest.param(torch.bfloat16, 0.02, id="bfloat16"),
+    pytest.param(True, torch.float16, 0.01, id="float16"),
+    pytest.param(True, torch.bfloat16, 0.02, id="bfloat16"),
+    pytest.param(False, torch.float16, 0.01, id="float16-fast"),
+    pytest.param(False, torch.bfloat16, 0.02, id="bfloat16-fast"),
 )
 
 
@@ -48,8 +50,8 @@ def autotune():
 
 
 @pytest.mark.parametrize("b, lq, lk, dhead, nhead", EASY_SHAPE_PARAMS + HARD_SHAPE_PARAMS)
-@pytest.mark.parametrize("dtype, atol", DATA_TYPE_PARAMS)
-def test_flash_attn_forward(b, lq, lk, dhead, nhead, dtype, atol):
+@pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
+def test_flash_attn_forward(b, lq, lk, dhead, nhead, full_precision, dtype, atol):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
     torch.manual_seed(0)
@@ -59,15 +61,15 @@ def test_flash_attn_forward(b, lq, lk, dhead, nhead, dtype, atol):
     v = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype)
 
     baseline_output = F.scaled_dot_product_attention(q, k, v)
-    triton_output = attention(q, k, v, softmax_scale=dhead**-0.5)
+    triton_output = attention(q, k, v, full_precision=full_precision)
     torch.testing.assert_close(baseline_output, triton_output, rtol=0, atol=atol)
 
 
 @pytest.mark.parametrize("b, lq, lk, dhead, nhead", HARD_SHAPE_PARAMS)
 @pytest.mark.parametrize("dpos", [2, 3], ids=lambda v: f"dpos={v}")
 @pytest.mark.parametrize("slope", [-1, -2], ids=lambda v: f"slope={v}")
-@pytest.mark.parametrize("dtype, atol", DATA_TYPE_PARAMS)
-def test_flash_attn_forward_bias(b, lq, lk, dhead, nhead, dpos, dtype, atol, slope):
+@pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
+def test_flash_attn_forward_bias(b, lq, lk, dhead, nhead, dpos, dtype, atol, slope, full_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
     torch.manual_seed(0)
@@ -84,45 +86,13 @@ def test_flash_attn_forward_bias(b, lq, lk, dhead, nhead, dpos, dtype, atol, slo
     )
     baseline_output = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
 
-    triton_output = attention(q, k, v, pos_q, pos_k, slopes, softmax_scale=dhead**-0.5)
-    torch.testing.assert_close(baseline_output, triton_output, rtol=0, atol=atol)
-
-
-@pytest.mark.parametrize(
-    "precise, stable, dtype, atol",
-    [
-        pytest.param(True, True, torch.float16, 0.01, id="precise=True,stable=True,dtype=float16"),
-        pytest.param(True, True, torch.bfloat16, 0.02, id="precise=True,stable=True,dtype=bfloat16"),
-        pytest.param(False, False, torch.float16, 0.01, id="precise=False,stable=False,dtype=float16"),
-        pytest.param(False, False, torch.bfloat16, 0.02, id="precise=False,stable=False,dtype=bfloat16"),
-        pytest.param(True, False, torch.float16, 0.01, id="precise=True,stable=False,dtype=float16"),
-        pytest.param(True, False, torch.bfloat16, 0.02, id="precise=True,stable=False,dtype=bfloat16"),
-        pytest.param(False, True, torch.float16, 0.01, id="precise=False,stable=True,dtype=float16"),
-        pytest.param(False, True, torch.bfloat16, 0.02, id="precise=False,stable=True,dtype=bfloat16"),
-    ],
-)
-@pytest.mark.parametrize("b, lq, lk, dhead, nhead", HARD_SHAPE_PARAMS)
-def test_flash_attn_forward_dtypes(b, lq, lk, dhead, nhead, dtype, atol, precise, stable):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
-    torch.manual_seed(0)
-
-    q = torch.randn((b, nhead, lq, dhead), device="cuda", dtype=dtype)
-    k = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype)
-    v = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype)
-
-    baseline_output = F.scaled_dot_product_attention(
-        q,
-        k,
-        v,
-    )
-    triton_output = attention(q, k, v, precise=precise, stable=stable)
+    triton_output = attention(q, k, v, pos_q, pos_k, slopes, full_precision=full_precision)
     torch.testing.assert_close(baseline_output, triton_output, rtol=0, atol=atol)
 
 
 @pytest.mark.parametrize("b, lq, lk, dhead, nhead", EASY_SHAPE_PARAMS + HARD_SHAPE_PARAMS)
-@pytest.mark.parametrize("dtype, atol", DATA_TYPE_PARAMS)
-def test_flash_attn_backward(b, lq, lk, dhead, nhead, dtype, atol):
+@pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
+def test_flash_attn_backward(b, lq, lk, dhead, nhead, dtype, atol, full_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
     torch.manual_seed(0)
@@ -140,7 +110,7 @@ def test_flash_attn_backward(b, lq, lk, dhead, nhead, dtype, atol):
 
     # Triton
     q.grad = k.grad = v.grad = None
-    o = attention(q, k, v)
+    o = attention(q, k, v, full_precision=full_precision)
     o.sum().backward()
     grad_q_triton = q.grad
     grad_k_triton = k.grad
@@ -153,8 +123,8 @@ def test_flash_attn_backward(b, lq, lk, dhead, nhead, dtype, atol):
 
 
 @pytest.mark.parametrize("b, lq, lk, dhead, nhead", HARD_SHAPE_PARAMS)
-@pytest.mark.parametrize("dtype, atol", DATA_TYPE_PARAMS)
-def test_flash_attn_backward_bias(b, lq, lk, dhead, nhead, dtype, atol):
+@pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
+def test_flash_attn_backward_bias(b, lq, lk, dhead, nhead, dtype, atol, full_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
     torch.manual_seed(0)
@@ -175,57 +145,7 @@ def test_flash_attn_backward_bias(b, lq, lk, dhead, nhead, dtype, atol):
 
     # Triton
     q.grad = k.grad = v.grad = None
-    o = attention(q, k, v, pos_q, pos_k)
-    o.sum().backward()
-    grad_q_triton = q.grad
-    grad_k_triton = k.grad
-    grad_v_triton = v.grad
-
-    # Test
-    torch.testing.assert_close(grad_v_baseline, grad_v_triton, rtol=0, atol=atol)
-    torch.testing.assert_close(grad_k_baseline, grad_k_triton, rtol=0, atol=atol)
-    torch.testing.assert_close(grad_q_baseline, grad_q_triton, rtol=0, atol=atol)
-
-
-@pytest.mark.parametrize(
-    "precise, stable, dtype, atol",
-    [
-        pytest.param(True, True, torch.float16, 0.01, id="precise=True,stable=True,dtype=float16"),
-        pytest.param(True, True, torch.bfloat16, 0.02, id="precise=True,stable=True,dtype=bfloat16"),
-        pytest.param(False, False, torch.float16, 0.01, id="precise=False,stable=False,dtype=float16"),
-        pytest.param(False, False, torch.bfloat16, 0.02, id="precise=False,stable=False,dtype=bfloat16"),
-        pytest.param(True, False, torch.float16, 0.01, id="precise=True,stable=False,dtype=float16"),
-        pytest.param(True, False, torch.bfloat16, 0.02, id="precise=True,stable=False,dtype=bfloat16"),
-        pytest.param(False, True, torch.float16, 0.02, id="precise=False,stable=True,dtype=float16"),
-        pytest.param(False, True, torch.bfloat16, 0.02, id="precise=False,stable=True,dtype=bfloat16"),
-    ],
-)
-@pytest.mark.parametrize("b, lq, lk, dhead, nhead", HARD_SHAPE_PARAMS)
-def test_flash_attn_backward_dtypes(b, lq, lk, dhead, nhead, dtype, atol, precise, stable):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
-    torch.manual_seed(0)
-
-    q = torch.randn((b, nhead, lq, dhead), device="cuda", dtype=dtype, requires_grad=True)
-    k = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype, requires_grad=True)
-    v = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype, requires_grad=True)
-    # pos_q = torch.randn((b, lq, nhead, 2), device="cuda", dtype=dtype)
-    # pos_k = torch.randn((b, lk, nhead, 2), device="cuda", dtype=dtype)
-    # mask = -1 * (
-    #    (pos_q[:, :, None, ...] - pos_k[:, None, ...]).pow(2).sum(-1).sqrt_().movedim(-1, 1).view(b, nhead, lq, lk)
-    # )
-    mask = None
-
-    # Baseline
-    o = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
-    o.sum().backward()
-    grad_q_baseline = q.grad
-    grad_k_baseline = k.grad
-    grad_v_baseline = v.grad
-
-    # Triton
-    q.grad = k.grad = v.grad = None
-    o = attention(q, k, v, precise=precise, stable=stable)
+    o = attention(q, k, v, pos_q, pos_k, full_precision=full_precision)
     o.sum().backward()
     grad_q_triton = q.grad
     grad_k_triton = k.grad

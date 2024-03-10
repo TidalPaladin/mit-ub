@@ -213,4 +213,3 @@ class PruneConfigs:
 @triton.jit
 def scalar(val: tl.constexpr, dtype: tl.dtype) -> tl.tensor:
     return tl.full((1,), val, dtype=dtype)
-

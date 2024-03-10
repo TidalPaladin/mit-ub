@@ -16,22 +16,26 @@ endif
 #		--mode bwd --providers triton triton-fast -d bf16
 
 benchmark: ## run benchmarks
-	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
-		--mode fwd --providers triton triton-fast triton-precise triton-stable flash -d fp16
 	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 16 \
-		--mode fwd --providers triton triton-fast triton-precise triton-stable flash -d fp16
+		--mode fwd --providers triton triton-fast flash -d fp16
 	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
-		--mode fwd --providers triton triton-fast triton-precise triton-stable flash -d fp16 --bias
+		--mode fwd --providers triton triton-fast flash -d fp16
+	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 64 \
+		--mode fwd --providers triton triton-fast flash -d fp16
 	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
-		--mode fwd --providers triton triton-fast triton-precise triton-stable flash -d bf16
+		--mode fwd --providers triton triton-fast flash -d fp16 --bias
 	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
-		--mode bwd --providers triton triton-fast triton-precise triton-stable flash -d fp16
+		--mode fwd --providers triton flash -d bf16
 	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 16 \
-		--mode bwd --providers triton triton-fast triton-precise triton-stable flash -d fp16
+		--mode bwd --providers triton triton-fast flash -d fp16
 	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
-		--mode bwd --providers triton triton-fast triton-precise triton-stable flash -d fp16 --bias
+		--mode bwd --providers triton triton-fast flash -d fp16
+	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 64 \
+		--mode bwd --providers triton triton-fast flash -d fp16
 	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
-		--mode bwd --providers triton triton-fast triton-precise triton-stable flash -d bf16
+		--mode bwd --providers triton triton-fast flash -d fp16 --bias
+	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
+		--mode bwd --providers triton flash -d bf16
 
 check: ## run quality checks and unit tests
 	$(MAKE) style
