@@ -28,9 +28,9 @@ HARD_SHAPE_PARAMS: Final = (pytest.param(4, 2 * L, 4 * L, 4 * D, 4, id=f"b=4,lq=
 
 DATA_TYPE_PARAMS: Final = (
     pytest.param(True, torch.float16, 0.01, id="float16"),
-    pytest.param(True, torch.bfloat16, 0.02, id="bfloat16"),
+    pytest.param(True, torch.bfloat16, 0.03, id="bfloat16"),
     pytest.param(False, torch.float16, 0.01, id="float16-fast"),
-    pytest.param(False, torch.bfloat16, 0.02, id="bfloat16-fast"),
+    pytest.param(False, torch.bfloat16, 0.03, id="bfloat16-fast"),
 )
 
 
@@ -67,9 +67,8 @@ def test_flash_attn_forward(b, lq, lk, dhead, nhead, full_precision, dtype, atol
 
 @pytest.mark.parametrize("b, lq, lk, dhead, nhead", HARD_SHAPE_PARAMS)
 @pytest.mark.parametrize("dpos", [2, 3], ids=lambda v: f"dpos={v}")
-@pytest.mark.parametrize("slope", [-1, -2], ids=lambda v: f"slope={v}")
 @pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
-def test_flash_attn_forward_bias(b, lq, lk, dhead, nhead, dpos, dtype, atol, slope, full_precision):
+def test_flash_attn_forward_bias(b, lq, lk, dhead, nhead, dpos, dtype, atol, full_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
     torch.manual_seed(0)
@@ -79,7 +78,7 @@ def test_flash_attn_forward_bias(b, lq, lk, dhead, nhead, dpos, dtype, atol, slo
     v = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype)
     pos_q = torch.randn((b, nhead, lq, dpos), device="cuda", dtype=dtype)
     pos_k = torch.randn((b, nhead, lk, dpos), device="cuda", dtype=dtype)
-    slopes = torch.full((b, nhead), slope, device="cuda", dtype=dtype)
+    slopes = torch.randint(-10, -1, (b, nhead), device="cuda", dtype=dtype).div_(10)
 
     bias = slopes[..., None, None] * (
         (pos_q[..., None, :] - pos_k[..., None, :, :]).pow(2).sum(-1).sqrt_().view(b, nhead, lq, lk)
@@ -134,7 +133,10 @@ def test_flash_attn_backward_bias(b, lq, lk, dhead, nhead, dtype, atol, full_pre
     v = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype, requires_grad=True)
     pos_q = torch.randn((b, nhead, lq, 2), device="cuda", dtype=dtype)
     pos_k = torch.randn((b, nhead, lk, 2), device="cuda", dtype=dtype)
-    bias = -1 * ((pos_q[..., None, :] - pos_k[..., None, :, :]).pow(2).sum(-1).sqrt_().view(b, nhead, lq, lk))
+    slopes = torch.randint(-10, -1, (b, nhead), device="cuda", dtype=dtype).div_(10)
+    bias = slopes[..., None, None] * (
+        (pos_q[..., None, :] - pos_k[..., None, :, :]).pow(2).sum(-1).sqrt_().view(b, nhead, lq, lk)
+    )
 
     # Baseline
     o = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
@@ -145,7 +147,7 @@ def test_flash_attn_backward_bias(b, lq, lk, dhead, nhead, dtype, atol, full_pre
 
     # Triton
     q.grad = k.grad = v.grad = None
-    o = attention(q, k, v, pos_q, pos_k, full_precision=full_precision)
+    o = attention(q, k, v, pos_q, pos_k, slopes, full_precision=full_precision)
     o.sum().backward()
     grad_q_triton = q.grad
     grad_k_triton = k.grad

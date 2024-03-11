@@ -171,7 +171,7 @@ def _euclidean_distance_matmul_inner(
     b: tl.tensor,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
-    DOT_DTYPE: tl.constexpr,
+    DOT_DTYPE: tl.constexpr = tl.float32,
 ):
     # Compute diag(a @ a.T)
     block_idx = tl.arange(0, BLOCK_SIZE_M)

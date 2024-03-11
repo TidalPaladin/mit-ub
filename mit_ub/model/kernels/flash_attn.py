@@ -42,6 +42,9 @@ LN_2_RECIP: Final = 1 / math.log(2)
     {
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
         "BLOCK_POSDIM": PowerOfTwoHeuristic("D_pos", min_val=TENSOR_CORE_K),
+        "EVEN_M": IsBlockMultiple("M", "BLOCK_M"),
+        "EVEN_N": IsBlockMultiple("N", "BLOCK_N"),
+        "EVEN_HEADDIM": IsBlockMultiple("D", "BLOCK_HEADDIM"),
         "EVEN_POSDIM": IsBlockMultiple("D_pos", "BLOCK_POSDIM"),
         "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
     }
@@ -74,7 +77,7 @@ def _fwd_kernel(
     ACCUMULATOR_DTYPE: tl.constexpr, PROB_DTYPE: tl.constexpr, DOT_DTYPE: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     # Heuristics for boundary checks
-    EVEN_POSDIM: tl.constexpr, 
+    EVEN_M, EVEN_N, EVEN_HEADDIM, EVEN_POSDIM: tl.constexpr, 
     # Block sizes
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_HEADDIM: tl.constexpr, BLOCK_POSDIM: tl.constexpr,
     # fmt: on
@@ -92,18 +95,66 @@ def _fwd_kernel(
     offset_b = offset_bh // H
     offset_h = offset_bh % H
 
-    # Initialize pointers
+    # Initialize base pointers to this batch / head
     # This program's block of queries will be loaded by this program for processing and kept there.
     # NOTE: Block pointers may contribute to register spilling due to int64 indexing. Checking the
     # compiled kernel.n_spills indiciates no spilling - is this an issue or not?
-    q_p += offset_b * stride_q_b + offset_h * stride_q_h + start_m * BLOCK_M * stride_q_m
+    q_p += offset_b * stride_q_b + offset_h * stride_q_h
     k_p += offset_b * stride_k_b + offset_h * stride_k_h
     v_p += offset_b * stride_v_b + offset_h * stride_v_h
-    pos_q_p += offset_b * stride_posq_b + offset_h * stride_posq_h + start_m * BLOCK_M * stride_posq_m
+    pos_q_p += offset_b * stride_posq_b + offset_h * stride_posq_h
     pos_k_p += offset_b * stride_posk_b + offset_h * stride_posk_h
-    pos_slopes_p += offset_b * stride_slopes_b
-    out_p += offset_b * stride_o_b + offset_h * stride_o_h + start_m * BLOCK_M * stride_o_m
-    logit_scale_p += offset_b * stride_logit_b + offset_h * stride_logit_h + start_m * BLOCK_M
+    pos_slopes_p += offset_b * stride_slopes_b + offset_h
+    out_p += offset_b * stride_o_b + offset_h * stride_o_h
+    logit_scale_p += offset_b * stride_logit_b + offset_h * stride_logit_h
+
+    # Initialize pointer blocks
+    Q_block_ptr = tl.make_block_ptr(
+        q_p,
+        (M, D),
+        (stride_q_m, 1),
+        (start_m * BLOCK_M, 0),
+        (BLOCK_M, BLOCK_HEADDIM),
+        (1, 0),
+    )
+    K_block_ptr = tl.make_block_ptr(
+        k_p,
+        (N, D),
+        (stride_k_n, 1),
+        (0, 0),
+        (BLOCK_N, BLOCK_HEADDIM),
+        (1, 0),
+    )
+    V_block_ptr = tl.make_block_ptr(
+        v_p,
+        (N, D),
+        (stride_v_n, 1),
+        (0, 0),
+        (BLOCK_N, BLOCK_HEADDIM),
+        (1, 0),
+    )
+    if HAS_BIAS:
+        Posq_block_ptr = tl.make_block_ptr(
+            pos_q_p,
+            (M, D_pos),
+            (stride_posq_m, 1),
+            (start_m * BLOCK_M, 0),
+            (BLOCK_M, BLOCK_POSDIM),
+            (1, 0),
+        )
+        # For some reason we must load this transposed. Calling `tl.trans` on the block pointer
+        # results in a compile error.
+        Posk_block_ptr = tl.make_block_ptr(
+            pos_k_p,
+            (D_pos, N),
+            (1, stride_posk_n),
+            (0, 0),
+            (BLOCK_POSDIM, BLOCK_N),
+            (0, 1),
+        )
+    else:
+        Posq_block_ptr = None
+        Posk_block_ptr = None
 
     # For each query we will track the maximum unscaled logit that we saw for that query's softmax.
     # We will use this to offset all logits for that query such that numerical overflow is avoided
@@ -133,21 +184,17 @@ def _fwd_kernel(
     query_i_maxdot = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
 
     # Q gets loaded into SRAM and stays there. Pre-apply the softmax scale
-    m_offsets = tl.arange(0, BLOCK_M)
-    d_offsets = tl.arange(0, BLOCK_HEADDIM)
-    q = tl.load(q_p + (m_offsets[:, None] * stride_q_m + d_offsets[None, :]))
+    # TODO: Specify boundary_check using a conditional tl.constexpr. This is not currently
+    # supported by triton, see https://github.com/openai/triton/issues/1946
+    # Performance tests indicate no significant loss in performance from doing unnecessary
+    # boundary checks. Also, a "-inf" padding option is needed for keys.
+    q = tl.load(Q_block_ptr)
     q *= tl.full((1,), qk_scale, dtype=q.dtype)
 
     # If we have bias, we will also load the Q positions and ALiBi slopes
-    # NOTE: Since distances are likely < D_pos we must apply masking along D_pos
+    # NOTE: Pre-apply bias scale into the ALiBi slopes
     if HAS_BIAS:
-        # Load the slopes squared
-        d_offsets = tl.arange(0, BLOCK_POSDIM)
-        if EVEN_POSDIM:
-            pos_q = tl.load(pos_q_p + (m_offsets[:, None] * stride_posq_m + d_offsets[None, :]))
-        else:
-            pos_q_mask = (d_offsets < D_pos)[None, :]
-            pos_q = tl.load(pos_q_p + (m_offsets[:, None] * stride_posq_m + d_offsets[None, :]), mask=pos_q_mask)
+        pos_q = tl.load(Posq_block_ptr, boundary_check=(1,))
         pos_slope = (tl.load(pos_slopes_p) * bias_scale).to(DOT_DTYPE)
     else:
         pos_slope = None
@@ -156,20 +203,14 @@ def _fwd_kernel(
     # Iterate over KV blocks
     for _ in range(0, N, BLOCK_N):
         # Load K block and compute QK
-        k = tl.load(k_p + (tl.arange(0, BLOCK_N)[None, :] * stride_k_n + tl.arange(0, BLOCK_HEADDIM)[:, None]))
-        qk = tl.dot(q, k, allow_tf32=True)
+        k = tl.load(K_block_ptr)
+        qk = tl.dot(q, tl.trans(k), allow_tf32=True)
 
         # Compute the bias
         if HAS_BIAS:
-            n_offsets = tl.arange(0, BLOCK_N)
-            d_offsets = tl.arange(0, BLOCK_POSDIM)
-            if EVEN_POSDIM:
-                pos_k = tl.load(pos_k_p + (n_offsets[None, :] * stride_posk_n + d_offsets[:, None]))
-            else:
-                pos_k_mask = (d_offsets < D_pos)[:, None]
-                pos_k = tl.load(pos_k_p + (n_offsets[None, :] * stride_posk_n + d_offsets[:, None]), mask=pos_k_mask)
-            bias = _euclidean_distance_matmul_inner(pos_q, pos_k, BLOCK_M, BLOCK_N, DOT_DTYPE)
-            bias = tl.sqrt(bias.to(tl.float32)).to(DOT_DTYPE)
+            pos_k = tl.load(Posk_block_ptr, boundary_check=(0,))
+            bias = _euclidean_distance_matmul_inner(pos_q, pos_k, BLOCK_M, BLOCK_N, tl.float32)
+            bias = tl.sqrt(bias)
             qk = bias * pos_slope + qk
 
         # Determine the maximum logit seen for each query
@@ -186,31 +227,38 @@ def _fwd_kernel(
         softmax_denominator = softmax_denominator * alpha + tl.sum(p, 1).to(ACCUMULATOR_DTYPE)
 
         # Accumulate the weighted values for this block of V
-        v = tl.load(v_p + (tl.arange(0, BLOCK_N)[:, None] * stride_v_n + tl.arange(0, BLOCK_HEADDIM)[None, :]))
+        v = tl.load(V_block_ptr)
         value_accumulator = value_accumulator * alpha[:, None] + tl.dot(
             p.to(v.dtype), v, allow_tf32=True, out_dtype=cast(tl.dtype, DOT_DTYPE)
         ).to(ACCUMULATOR_DTYPE)
 
         # Advance pointers
-        k_p += BLOCK_N * stride_k_n
-        v_p += BLOCK_N * stride_v_n
+        K_block_ptr = tl.advance(K_block_ptr, (BLOCK_N, 0))
+        V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
         if HAS_BIAS:
-            pos_k_p += BLOCK_N * stride_posk_n
+            Posk_block_ptr = tl.advance(Posk_block_ptr, (0, BLOCK_N))
 
     # Compute the final softmax values
     value_accumulator = value_accumulator / softmax_denominator.to(ACCUMULATOR_DTYPE)[:, None]
 
     # Per Flash Attention 2, we store only logsumexp for the backward pass
+    start_m = tl.program_id(0)
+    Logit_block_ptr = tl.make_block_ptr(logit_scale_p, (M,), (1,), (start_m * BLOCK_M,), (BLOCK_M,), (0,))
     tl.store(
-        logit_scale_p + tl.arange(0, BLOCK_M),
+        Logit_block_ptr,
         (query_i_maxdot + tl.math.log2(softmax_denominator.to(tl.float32))),
     )
 
     # Write output
-    tl.store(
-        out_p + (tl.arange(0, BLOCK_M)[:, None] * stride_o_m + tl.arange(0, BLOCK_HEADDIM)[None, :]),
-        value_accumulator.to(out_p.dtype.element_ty),
+    O_block_ptr = tl.make_block_ptr(
+        out_p,
+        (M, D),
+        (stride_o_m, 1),
+        (start_m * BLOCK_M, 0),
+        (BLOCK_M, BLOCK_HEADDIM),
+        (1, 0),
     )
+    tl.store(O_block_ptr, value_accumulator.to(out_p.dtype.element_ty))
 
 
 @triton.autotune(
@@ -241,13 +289,13 @@ def _bwd_preprocess_do_o_dot(
     # Strides
     stride_o_b: tl.constexpr, stride_o_h: tl.constexpr, stride_o_m: tl.constexpr,
     stride_do_b: tl.constexpr, stride_do_h: tl.constexpr, stride_do_m: tl.constexpr,
-    stride_delta_b: tl.constexpr, stride_delta_h: tl.constexpr,
+    stride_delta_b: tl.constexpr, stride_delta_h: tl.constexpr, stride_delta_m: tl.constexpr,
     # Sizes
     H: tl.constexpr, D: tl.constexpr, M: tl.constexpr,
     # Blocks
     BLOCK_M: tl.constexpr, BLOCK_HEADDIM: tl.constexpr,
     # Derived values
-    BHM: tl.constexpr, EVEN_D: tl.constexpr,
+    EVEN_D: tl.constexpr,
     # fmt: on
 ):
     # Initialize offsets
@@ -256,10 +304,15 @@ def _bwd_preprocess_do_o_dot(
     offset_b = offset_bh // H
     offset_h = offset_bh % H
 
+    # Seek pointers
+    Out += offset_b * stride_o_b + offset_h * stride_o_h
+    DO += offset_b * stride_do_b + offset_h * stride_do_h
+    Delta += offset_bh * M
+
     # Load O
     o_block_ptr = tl.make_block_ptr(
-        Out + offset_b * stride_o_b + offset_h * stride_o_h,
-        (BHM, D),
+        Out,
+        (M, D),
         (stride_o_m, 1),
         (start_m * BLOCK_M, 0),
         (BLOCK_M, BLOCK_HEADDIM),
@@ -269,8 +322,8 @@ def _bwd_preprocess_do_o_dot(
 
     # Load DO
     do_block_ptr = tl.make_block_ptr(
-        DO + offset_b * stride_do_b + offset_h * stride_do_h,
-        (BHM, D),
+        DO,
+        (M, D),
         (stride_do_m, 1),
         (start_m * BLOCK_M, 0),
         (BLOCK_M, BLOCK_HEADDIM),
@@ -282,9 +335,15 @@ def _bwd_preprocess_do_o_dot(
     delta = tl.sum(o * do, axis=1)
 
     # Write output
-    delta_offset = Delta + offset_b * stride_delta_b + offset_h * stride_delta_h + start_m * BLOCK_M
-    delta_ptrs = delta_offset + tl.arange(0, BLOCK_M)
-    tl.store(delta_ptrs, delta)
+    delta_block_ptr = tl.make_block_ptr(
+        Delta,
+        (M,),
+        (1,),
+        (start_m * BLOCK_M,),
+        (BLOCK_M,),
+        (0,),
+    )
+    tl.store(delta_block_ptr, delta.to(Delta.dtype.element_ty))
 
 
 @triton.autotune(
@@ -293,6 +352,7 @@ def _bwd_preprocess_do_o_dot(
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, num_stages=2),
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_stages=1),
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_stages=2),
+        triton.Config({"BLOCK_M": 32, "BLOCK_N": 64}),
         triton.Config({"BLOCK_M": 32, "BLOCK_N": 32}),
     ],
     key=["D", "M", "N", "ACCUMULATOR_DTYPE", "DOT_DTYPE"],
@@ -358,18 +418,96 @@ def _bwd_kernel(
     dv_p += offset_b * stride_v_b + offset_h * stride_v_h
     pos_q_p += offset_b * stride_posq_b + offset_h * stride_posq_h
     pos_k_p += offset_b * stride_posk_b + offset_h * stride_posk_h
-    pos_slopes_p += offset_b * stride_slopes_b
+    pos_slopes_p += offset_b * stride_slopes_b + offset_h
     delta_p += offset_bh * M
     logit_scale_p += offset_bh * M
     lock_p += offset_bh * tl.cdiv(M, BLOCK_M)
 
+    # Initialize pointer blocks
+    Q_block_ptr = tl.make_block_ptr(
+        q_p,
+        (M, D),
+        (stride_q_m, 1),
+        (0, 0),
+        (BLOCK_M, BLOCK_HEADDIM),
+        (1, 0),
+    )
+    K_block_ptr = tl.make_block_ptr(
+        k_p,
+        (N, D),
+        (stride_k_n, 1),
+        (start_n * BLOCK_N, 0),
+        (BLOCK_N, BLOCK_HEADDIM),
+        (1, 0),
+    )
+    V_block_ptr = tl.make_block_ptr(
+        v_p,
+        (N, D),
+        (stride_v_n, 1),
+        (start_n * BLOCK_N, 0),
+        (BLOCK_N, BLOCK_HEADDIM),
+        (1, 0),
+    )
+    DQ_block_ptr = tl.make_block_ptr(
+        dq_p,
+        (M, D),
+        (stride_q_m, 1),
+        (0, 0),
+        (BLOCK_M, BLOCK_HEADDIM),
+        (1, 0),
+    )
+    DK_block_ptr = tl.make_block_ptr(
+        dk_p,
+        (N, D),
+        (stride_k_n, 1),
+        (start_n * BLOCK_N, 0),
+        (BLOCK_N, BLOCK_HEADDIM),
+        (1, 0),
+    )
+    DV_block_ptr = tl.make_block_ptr(
+        dv_p,
+        (N, D),
+        (stride_v_n, 1),
+        (start_n * BLOCK_N, 0),
+        (BLOCK_N, BLOCK_HEADDIM),
+        (1, 0),
+    )
+    DO_block_ptr = tl.make_block_ptr(
+        do_p,
+        (M, D),
+        (stride_q_m, 1),
+        (0, 0),
+        (BLOCK_M, BLOCK_HEADDIM),
+        (1, 0),
+    )
+    Delta_block_ptr = tl.make_block_ptr(delta_p, (M,), (1,), (0,), (BLOCK_M,), (0,))
+    Logit_block_ptr = tl.make_block_ptr(logit_scale_p, (M,), (1,), (0,), (BLOCK_M,), (0,))
+    if HAS_BIAS:
+        Posq_block_ptr = tl.make_block_ptr(
+            pos_q_p,
+            (M, D_pos),
+            (stride_posq_m, 1),
+            (0, 0),
+            (BLOCK_M, BLOCK_POSDIM),
+            (1, 0),
+        )
+        # For some reason we must load this transposed. Calling `tl.trans` on the block pointer
+        # results in a compile error.
+        Posk_block_ptr = tl.make_block_ptr(
+            pos_k_p,
+            (D_pos, N),
+            (1, stride_posk_n),
+            (0, start_n * BLOCK_N),
+            (BLOCK_POSDIM, BLOCK_N),
+            (0, 1),
+        )
+    else:
+        Posq_block_ptr = None
+        Posk_block_ptr = None
+
     # Load K and V - stay in SRAM for the entire kernel
-    n_offsets = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    d_offsets = tl.arange(0, BLOCK_HEADDIM)
-    k_ptrs = k_p + (n_offsets[:, None] * stride_k_n + d_offsets[None, :])
-    k = tl.load(k_ptrs)
-    v_ptrs = v_p + (n_offsets[:, None] * stride_v_n + d_offsets[None, :])
-    v = tl.load(v_ptrs)
+    k = tl.load(K_block_ptr)
+    v = tl.load(V_block_ptr)
 
     # Init dv and dk
     # These will be accumulated at the same precision as their destination.
@@ -379,14 +517,8 @@ def _bwd_kernel(
 
     # Init pos_k
     if HAS_BIAS:
-        # Load the slopes squared
-        pos_d_offsets = tl.arange(0, BLOCK_POSDIM)
-        if EVEN_POSDIM:
-            pos_k = tl.load(pos_k_p + (n_offsets[None, :] * stride_posk_n + pos_d_offsets[:, None]))
-        else:
-            pos_k_mask = (pos_d_offsets < D_pos)[:, None]
-            pos_k = tl.load(pos_k_p + (n_offsets[None, :] * stride_posk_n + pos_d_offsets[:, None]), mask=pos_k_mask)
-        pos_slope = (tl.load(pos_slopes_p) * bias_scale).to(DOT_DTYPE)
+        pos_k = tl.load(Posk_block_ptr, boundary_check=(0,))
+        pos_slope = tl.load(pos_slopes_p) * bias_scale
     else:
         pos_slope = None
         pos_k = None
@@ -395,25 +527,16 @@ def _bwd_kernel(
     # * dC/dA = B.T
     # * dC/dB = A.T
     for _ in range(0, M, BLOCK_M):
-        m_offsets = tl.arange(0, BLOCK_M) * stride_q_m
-        d_offsets = tl.arange(0, BLOCK_HEADDIM)
-
         # Recompute p = softmax(qk), p is (MxN)
         # NOTE: Keep qk in fp32 to avoid overflow and because exponentiation requires FP32
-        q = tl.load(q_p + (m_offsets[:, None] + d_offsets[None, :]))
-        logit_scale = tl.load(logit_scale_p + tl.arange(0, BLOCK_M))
+        q = tl.load(Q_block_ptr)
+        logit_scale = tl.load(Logit_block_ptr)
         qk = tl.dot(q, tl.trans(k))
         if HAS_BIAS:
-            pos_m_offsets = tl.arange(0, BLOCK_M) * stride_posq_m
-            pos_d_offsets = tl.arange(0, BLOCK_POSDIM)
-            if EVEN_POSDIM:
-                pos_q = tl.load(pos_q_p + (pos_m_offsets[:, None] + pos_d_offsets[None, :]))
-            else:
-                pos_q_mask = (pos_d_offsets < D_pos)[None, :]
-                pos_q = tl.load(pos_q_p + (pos_m_offsets[:, None] + pos_d_offsets[None, :]), mask=pos_q_mask)
             # NOTE: Compute this in FP32, it's overflow prone
+            pos_q = tl.load(Posq_block_ptr, boundary_check=(1,))
             bias = _euclidean_distance_matmul_inner(pos_q, pos_k, BLOCK_M, BLOCK_N, tl.float32)
-            bias = pos_slope * tl.sqrt(bias.to(tl.float32)).to(DOT_DTYPE)
+            bias = pos_slope * tl.sqrt(bias)
             qk = qk * qk_scale + bias
             p = tl.math.exp2(qk - logit_scale[:, None]).to(do_p.dtype.element_ty)
         else:
@@ -422,7 +545,7 @@ def _bwd_kernel(
         # compute dL/dv = dL/do * do/dv = dL/do * p
         # Shape do = (MxD)
         # NOTE: `do` is pre-divided by `l`; no normalization here
-        do = tl.load(do_p + (m_offsets[:, None] + d_offsets[None, :]))  # (MxD)
+        do = tl.load(DO_block_ptr)
         dv += tl.dot(tl.trans(p), do, allow_tf32=True, out_dtype=cast(tl.dtype, DOT_DTYPE)).to(ACCUMULATOR_DTYPE)
 
         # compute dL/dp = dL/do * do/dp = dL/do * v
@@ -431,11 +554,11 @@ def _bwd_kernel(
 
         # compute dL/ds = dL/dp * dp/ds = p * (dp - delta[:, None])
         # Shape ds = (MxN)
-        delta = tl.load(delta_p + tl.arange(0, BLOCK_M))
+        delta = tl.load(Delta_block_ptr)
         ds = ((p * (dp - delta[:, None])) * softmax_scale).to(q_p.dtype.element_ty)
 
         # compute dL/dk = dL/ds * ds/dk = dot(ds.T, q)
-        q = tl.load(q_p + (m_offsets[:, None] + d_offsets[None, :]))
+        q = tl.load(Q_block_ptr)
         dk += tl.dot(tl.trans(ds), q, allow_tf32=True, out_dtype=cast(tl.dtype, DOT_DTYPE)).to(ACCUMULATOR_DTYPE)
 
         # compute dL/dq = dL/ds * ds/dq = dot(ds, k)
@@ -447,24 +570,22 @@ def _bwd_kernel(
         # tl.atomic_add(dq_p + (m_offsets[:, None] + d_offsets[None, :]), dq)
         while tl.atomic_cas(lock_p, 0, 1) == 1:
             pass
-        dq += tl.load(dq_p + (m_offsets[:, None] + d_offsets[None, :]), eviction_policy="evict_last")
-        tl.store(dq_p + (m_offsets[:, None] + d_offsets[None, :]), dq, eviction_policy="evict_last")
+        dq += tl.load(DQ_block_ptr, eviction_policy="evict_last")
+        tl.store(DQ_block_ptr, dq, eviction_policy="evict_last")
         tl.atomic_xchg(lock_p, 0)
 
         # advance pointers
-        q_p += BLOCK_M * stride_q_m
-        dq_p += BLOCK_M * stride_q_m
-        do_p += BLOCK_M * stride_q_m
-        delta_p += BLOCK_M
-        logit_scale_p += BLOCK_M
+        Q_block_ptr = tl.advance(Q_block_ptr, (BLOCK_M, 0))
+        DQ_block_ptr = tl.advance(DQ_block_ptr, (BLOCK_M, 0))
+        DO_block_ptr = tl.advance(DO_block_ptr, (BLOCK_M, 0))
+        Delta_block_ptr = tl.advance(Delta_block_ptr, BLOCK_M)
+        Logit_block_ptr = tl.advance(Logit_block_ptr, BLOCK_M)
         lock_p += 1
+        if HAS_BIAS:
+            Posq_block_ptr = tl.advance(Posq_block_ptr, (BLOCK_M, 0))
 
-    # write-back
-    start_n = tl.program_id(0)
-    n_offsets = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    d_offsets = tl.arange(0, BLOCK_HEADDIM)
-    tl.store(dk_p + (n_offsets[:, None] * stride_k_n + d_offsets[None, :]), dk.to(dk_p.dtype.element_ty))
-    tl.store(dv_p + (n_offsets[:, None] * stride_v_n + d_offsets[None, :]), dv.to(dv_p.dtype.element_ty))
+    tl.store(DK_block_ptr, dk.to(dk_p.dtype.element_ty))
+    tl.store(DV_block_ptr, dv.to(dv_p.dtype.element_ty))
 
 
 class _attention(torch.autograd.Function):
@@ -567,6 +688,8 @@ class _attention(torch.autograd.Function):
         MIN_AUTOTUNER_N = 32
         locks = torch.zeros(B * H * triton.cdiv(Lq, MIN_AUTOTUNER_N), dtype=torch.int32, device=q.device)
 
+        full_precision = ctx.full_precision if D < 64 else True
+
         def pre_grid(META):
             return (triton.cdiv(Lq, META["BLOCK_M"]), B * H)
 
@@ -575,9 +698,8 @@ class _attention(torch.autograd.Function):
             o, do, delta,
             o.stride(0), o.stride(1), o.stride(2),
             do.stride(0), do.stride(1), do.stride(2),
-            delta.stride(0), delta.stride(1),
+            delta.stride(0), delta.stride(1), delta.stride(2),
             H, D, Lq,
-            BHM=B*H*Lq,
         )
         # fmt: on
 
@@ -598,7 +720,7 @@ class _attention(torch.autograd.Function):
             slopes.stride(0),
             B, H, Lq, Lk, D, D_pos,
             HAS_BIAS=ctx.has_bias,
-            **_attention._select_dtypes(dq.dtype, ctx.full_precision),
+            **_attention._select_dtypes(dq.dtype, full_precision),
         )
         # fmt: on
 
