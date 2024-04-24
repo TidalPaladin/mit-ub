@@ -1,7 +1,4 @@
 import math
-from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
-from functools import partial
-from pathlib import Path
 from typing import Any, cast
 
 import torch
@@ -9,9 +6,8 @@ import triton
 import triton.language as tl
 from torch import Tensor
 from torch.autograd import Function
-from tqdm import tqdm
-
-from .helpers import TENSOR_CORE_K, IsBlockMultiple, PowerOfTwoHeuristic
+from triton_helpers import TENSOR_CORE_K
+from triton_helpers.heuristics import IsBlockMultiple, PowerOfTwoHeuristic
 
 
 ROOT_2 = math.sqrt(2)
@@ -32,31 +28,23 @@ ROOT_2 = math.sqrt(2)
 )
 @triton.jit
 def _euclidean_distance_kernel_fwd_pointwise(
+    # fmt: off
     # Pointers to matrices
-    a_ptr,
-    b_ptr,
-    c_ptr,
-    w_ptr,
+    a_ptr, b_ptr, c_ptr, w_ptr,
     # Matrix dimensions
-    M: int,
-    N: int,
-    K: int,
-    stride_am: int,
-    stride_ak: int,
-    stride_bn: int,
-    stride_bk: int,
-    stride_cm: int,
-    stride_cn: int,
+    M: int, N: int, K: int,
+    # Stride
+    stride_am: int, stride_ak: int, 
+    stride_bn: int, stride_bk: int,
+    stride_cm: int, stride_cn: int,
     stride_w: int,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-    HAS_WEIGHTS: tl.constexpr,
-    EVEN_M: tl.constexpr,
-    EVEN_N: tl.constexpr,
-    EVEN_K: tl.constexpr,
+    # Block sizes
+    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr, GROUP_SIZE_M: tl.constexpr,
+    # Heuristics
+    HAS_WEIGHTS: tl.constexpr, EVEN_M: tl.constexpr, EVEN_N: tl.constexpr, EVEN_K: tl.constexpr,
+    # Hparams
     INIT_ACCUMULATOR: tl.constexpr,
+    # fmt: on
 ):
     # Map program ids `pid` to the block of C it should compute.
     pid = tl.program_id(axis=0)
@@ -209,31 +197,22 @@ def _euclidean_distance_matmul_inner(
 )
 @triton.jit
 def _euclidean_distance_kernel_fwd_matmul(
+    # fmt: off
     # Pointers to matrices
-    a_ptr,
-    b_ptr,
-    c_ptr,
-    w_ptr,
+    a_ptr, b_ptr, c_ptr, w_ptr,
     # Matrix dimensions
-    M: int,
-    N: int,
-    K: int,
-    stride_am: int,
-    stride_ak: int,
-    stride_bn: int,
-    stride_bk: int,
-    stride_cm: int,
-    stride_cn: int,
+    M: int, N: int, K: int,
+    # Strides
+    stride_am: int, stride_ak: int,
+    stride_bn: int, stride_bk: int,
+    stride_cm: int, stride_cn: int,
     stride_w: int,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-    HAS_WEIGHTS: tl.constexpr,
-    EVEN_M: tl.constexpr,
-    EVEN_N: tl.constexpr,
-    EVEN_K: tl.constexpr,
+    # Block sizes
+    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr, GROUP_SIZE_M: tl.constexpr,
+    # Heuristics
+    HAS_WEIGHTS: tl.constexpr, EVEN_M: tl.constexpr, EVEN_N: tl.constexpr, EVEN_K: tl.constexpr,
     INIT_ACCUMULATOR: tl.constexpr,
+    # fmt: on
 ):
     # Map program ids `pid` to the block of C it should compute.
     pid = tl.program_id(axis=0)
@@ -333,7 +312,7 @@ def _euclidean_distance_kernel_fwd_matmul(
     )
 
 
-class _EuclideanDistance(Function):
+class EuclideanDistance(Function):
 
     @staticmethod
     def forward(
@@ -381,24 +360,17 @@ class _EuclideanDistance(Function):
 
         fn = _euclidean_distance_kernel_fwd_matmul if matmul else _euclidean_distance_kernel_fwd_pointwise
         cast(Any, fn)[grid](
-            a,
-            b,
-            c,
-            w,
-            M,
-            N,
-            K,
-            a.stride(0),
-            a.stride(1),
-            b.stride(0),
-            b.stride(1),
-            c.stride(0),
-            c.stride(1),
+            # fmt: off
+            a, b, c, w,
+            M, N, K,
+            a.stride(0), a.stride(1),
+            b.stride(0), b.stride(1),
+            c.stride(0), c.stride(1),
             w.stride(0),
             HAS_WEIGHTS=has_weights,
             INIT_ACCUMULATOR=has_accumulator,
+            # fmt: on
         )
-        # ctx.save_for_backward(a, b, c)
 
         return c
 
@@ -431,132 +403,4 @@ def euclidean_distance(
         * ``c`` - :math:`(M, N)`
         * Output - :math:`(M, N)`
     """
-    return cast(Tensor, _EuclideanDistance.apply(a, b, w, c, matmul))
-
-
-def _reference_forward(a: Tensor, b: Tensor, w: Tensor | None = None, c: Tensor | None = None) -> Tensor:
-    assert a.shape[-1] == b.shape[-1]
-    M, K = a.shape
-    N, K = b.shape
-    has_c = c is not None
-    c = c if has_c else torch.empty((M, N), device=a.device, dtype=a.dtype)
-    if w is not None:
-        assert w.shape == (K,)
-        result = (a.view(-1, 1, K) - b.view(1, -1, K)).pow(2).mul(w.view(1, 1, K)).sum(-1).sqrt_()
-    else:
-        result = (a.view(-1, 1, K) - b.view(1, -1, K)).pow(2).sum(-1).sqrt_()
-    if has_c:
-        result.add_(c)
-    return result
-
-
-def _benchmark(
-    M: int,
-    N: int,
-    K: int,
-    provider: str,
-    warmup: int = 25,
-    rep: int = 100,
-    bar: tqdm | None = None,
-    verbose: bool = False,
-    weighted: bool = False,
-):
-    if verbose:
-        with tqdm.external_write_mode():
-            print(f"Running benchmark for M={M}, N={N}, K={K}, provider={provider}")
-    a = torch.randn((M, K), device="cuda", dtype=torch.float16)
-    b = torch.randn((N, K), device="cuda", dtype=torch.float16)
-    w = torch.randn((K,), device="cuda", dtype=torch.float16).abs() if weighted else None
-    quantiles = [0.5, 0.2, 0.8]
-
-    match provider:
-        case "cublas":
-            ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: _reference_forward(a, b, w),
-                quantiles=quantiles,
-                warmup=warmup,
-                rep=rep,
-            )
-        case "triton" | "triton-matmul":
-            ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: euclidean_distance(a, b, w, matmul="matmul" in provider),
-                quantiles=quantiles,
-                warmup=warmup,
-                rep=rep,
-            )
-        case _:
-            raise ValueError(f"Unknown provider: {provider}")
-
-    def perf(_ms):
-        return (3 * M * N * K + M * N) * 1e-12 / (_ms * 1e-3)
-
-    if bar is not None:
-        bar.update(1)
-
-    return perf(ms), perf(max_ms), perf(min_ms)
-
-
-def parse_args() -> Namespace:
-    parser = ArgumentParser(
-        description="Benchmark performance of euclidean distance kernel for f((M, K), (N, K)) -> (M, N)",
-        formatter_class=ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument("-MN", type=int, default=8192, help="Max M and N dimension")
-    parser.add_argument("-K", type=int, default=[2], nargs="+", help="Fixed size of K dimension")
-    parser.add_argument("-s", "--step", type=int, default=128, help="Step size for M and N dimensions")
-    parser.add_argument("-o", "--output", type=Path, default=None, help="Output path to save benchmark results")
-    parser.add_argument("--warmup", type=int, default=25, help="`warmup` arg for `triton.testing.do_bench`")
-    parser.add_argument("--rep", type=int, default=100, help="`rep` arg for `triton.testing.do_bench`")
-    parser.add_argument("-v", "--verbose", default=False, action="store_true", help="Print each benchmark result")
-    parser.add_argument(
-        "-w", "--weighted", default=False, action="store_true", help="Compute weighted euclidean distance"
-    )
-    return parser.parse_args()
-
-
-def main(args: Namespace):
-    test_configs = list(range(args.step, args.MN + 1, args.step))
-    providers = ["cublas", "triton", "triton-matmul"]
-    total_tests = len(providers) * len(test_configs) * len(args.K)
-    bar = tqdm(total=total_tests, desc="Benchmarking")
-
-    for k in args.K:
-        plot_name = f"euclidean-kernel-k={k}" + ("-weighted" if args.weighted else "")
-        xlabel = f"Input size (Mx{k}, Mx{k})" + (", (weighted)" if args.weighted else "")
-        benchmark = triton.testing.perf_report(
-            triton.testing.Benchmark(
-                x_names=["M", "N"],
-                x_vals=test_configs,
-                line_arg="provider",
-                line_vals=providers,
-                line_names=["cuBLAS", "Triton", "Triton (Matmul)"],
-                styles=[("green", "-"), ("blue", "-"), ("orange", "-")],
-                xlabel=xlabel,
-                ylabel="TFLOPS",
-                plot_name=plot_name,
-                args={},
-            )
-        )(
-            partial(
-                _benchmark,
-                warmup=args.warmup,
-                rep=args.rep,
-                bar=bar,
-                verbose=args.verbose,
-                weighted=args.weighted,
-            )
-        )
-        df: Any = benchmark.run(
-            show_plots=False,
-            print_data=False,
-            return_df=True,
-            save_path=args.output,
-            K=k,
-        )
-        with tqdm.external_write_mode():
-            print(df.to_string(index=False))
-    bar.close()
-
-
-if __name__ == "__main__":
-    main(parse_args())
+    return cast(Tensor, EuclideanDistance.apply(a, b, w, c, matmul))

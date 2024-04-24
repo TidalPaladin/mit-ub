@@ -1,16 +1,8 @@
-from .benchmark import CLI, DimConfig, KernelExecutor
-from .distance import euclidean_distance
-from .flash_attn import attention
-from .helpers import TENSOR_CORE_K, IsBlockMultiple, PowerOfTwoHeuristic
+from .attention.kernel import attention
+from .distance.kernel import euclidean_distance
 
 
 __all__ = [
     "euclidean_distance",
-    "IsBlockMultiple",
-    "PowerOfTwoHeuristic",
-    "TENSOR_CORE_K",
     "attention",
-    "DimConfig",
-    "KernelExecutor",
-    "CLI",
 ]

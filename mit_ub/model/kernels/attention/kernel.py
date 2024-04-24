@@ -1,20 +1,17 @@
 import math
 import warnings
-from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
-from functools import partial
-from pathlib import Path
 from typing import Any, Dict, Final, Tuple, cast
 
 import torch
-import torch.nn.functional as F
 import triton
 import triton.language as tl
 from torch import Tensor
-from tqdm import tqdm
 from triton import JITFunction
+from triton_helpers import TENSOR_CORE_K
+from triton_helpers.autotune import PruneConfigs
+from triton_helpers.heuristics import IsBlockMultiple, PowerOfTwoHeuristic
 
-from .distance import _euclidean_distance_matmul_inner
-from .helpers import TENSOR_CORE_K, IsBlockMultiple, PowerOfTwoHeuristic, PruneConfigs, spill_warning
+from ..distance.kernel import _euclidean_distance_matmul_inner
 
 
 LN_2_RECIP: Final = 1 / math.log(2)
@@ -588,7 +585,7 @@ def _bwd_kernel(
     tl.store(DV_block_ptr, dv.to(dv_p.dtype.element_ty))
 
 
-class _attention(torch.autograd.Function):
+class SDPA(torch.autograd.Function):
 
     @staticmethod
     def forward(
@@ -644,7 +641,7 @@ class _attention(torch.autograd.Function):
             return (triton.cdiv(Lq, META["BLOCK_M"]), B * H)
 
         # fmt: off
-        spill_warning()(cast(JITFunction, _fwd_kernel)[grid])(
+        cast(JITFunction, _fwd_kernel)[grid](
             q, k, v, logit_scale, pos_q, pos_k, slopes, o,
             softmax_scale, softmax_scale * LN_2_RECIP, LN_2_RECIP,
             B, H, Lq, Lk, D, D_pos,
@@ -657,7 +654,7 @@ class _attention(torch.autograd.Function):
             slopes.stride(0),
             o.stride(0), o.stride(1), o.stride(2),
             HAS_BIAS=has_bias,
-            **_attention._select_dtypes(o.dtype, full_precision),
+            **SDPA._select_dtypes(o.dtype, full_precision),
         )
         # fmt: on
 
@@ -694,7 +691,7 @@ class _attention(torch.autograd.Function):
             return (triton.cdiv(Lq, META["BLOCK_M"]), B * H)
 
         # fmt: off
-        spill_warning()(cast(JITFunction, _bwd_preprocess_do_o_dot)[pre_grid])(
+        cast(JITFunction, _bwd_preprocess_do_o_dot)[pre_grid](
             o, do, delta,
             o.stride(0), o.stride(1), o.stride(2),
             do.stride(0), do.stride(1), do.stride(2),
@@ -707,7 +704,7 @@ class _attention(torch.autograd.Function):
             return (triton.cdiv(Lk, META["BLOCK_N"]), B * H)
 
         # fmt: off
-        spill_warning()(cast(JITFunction, _bwd_kernel)[grid])(
+        cast(JITFunction, _bwd_kernel)[grid](
             q, k, v, logit_scale, pos_q, pos_k, slopes,
             do, dq, dk, dv, delta,
             ctx.softmax_scale, ctx.softmax_scale * LN_2_RECIP, LN_2_RECIP,
@@ -720,7 +717,7 @@ class _attention(torch.autograd.Function):
             slopes.stride(0),
             B, H, Lq, Lk, D, D_pos,
             HAS_BIAS=ctx.has_bias,
-            **_attention._select_dtypes(dq.dtype, full_precision),
+            **SDPA._select_dtypes(dq.dtype, full_precision),
         )
         # fmt: on
 
@@ -747,9 +744,6 @@ class _attention(torch.autograd.Function):
                 PROB_DTYPE=tl.float16,
                 DOT_DTYPE=tl.float16,
             )
-
-
-attention_fn = _attention.apply
 
 
 def attention(
@@ -779,172 +773,4 @@ def attention(
             Setting to falsle will perform intermediate computations in FP16, yielding a speedup at the cost
             of precision and numerical stability.
     """
-    return cast(Tensor, attention_fn(q, k, v, pos_q, pos_k, slopes, softmax_scale, full_precision))
-
-
-def _benchmark(
-    Q: int,
-    K: int,
-    D: int,
-    provider: str,
-    warmup: int = 25,
-    rep: int = 100,
-    bar: tqdm | None = None,
-    verbose: bool = False,
-    bias: bool = False,
-    mode: str = "fwd",
-    dtype: str = "fp16",
-):
-    if verbose:
-        with tqdm.external_write_mode():
-            print(f"Running benchmark for Lq={Q}, Lk={K}, D={D}, provider={provider}")
-    B = 4
-    H = 12
-    D_pos = 2
-    torch_dtype = torch.float16 if dtype == "fp16" else torch.bfloat16
-
-    q = torch.randn((B, H, Q, D), device="cuda", dtype=torch_dtype, requires_grad=mode != "fwd")
-    k = torch.randn((B, H, K, D), device="cuda", dtype=torch_dtype, requires_grad=mode != "fwd")
-    v = torch.randn((B, H, K, D), device="cuda", dtype=torch_dtype, requires_grad=mode != "fwd")
-    quantiles = [0.5, 0.2, 0.8]
-
-    if bias and provider not in ["flash", "mem-eff"]:
-        pos_q = torch.randn((B, H, Q, D_pos), device="cuda", dtype=torch_dtype)
-        pos_k = torch.randn((B, H, K, D_pos), device="cuda", dtype=torch_dtype)
-        attn_mask = -1 * ((pos_q[..., None, :] - pos_k[..., None, :, :]).pow(2).sum(-1).sqrt_().view(B, H, Q, K))
-    else:
-        pos_q = pos_k = attn_mask = None
-
-    match provider:
-        case "torch" | "flash" | "mem-eff":
-            with torch.backends.cuda.sdp_kernel(
-                enable_flash=provider == "flash",
-                enable_math=provider == "torch",
-                enable_mem_efficient=provider == "mem-eff",
-            ):
-                if mode == "fwd":
-                    ms, min_ms, max_ms = triton.testing.do_bench(
-                        lambda: F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask),
-                        quantiles=quantiles,
-                        warmup=warmup,
-                        rep=rep,
-                    )
-                else:
-                    o = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask).mul(2).sum()
-                    ms, min_ms, max_ms = triton.testing.do_bench(
-                        lambda: o.backward(retain_graph=True),
-                        quantiles=quantiles,
-                        warmup=warmup,
-                        rep=rep,
-                    )
-
-        case "triton" | "triton-fast":
-            kwargs: Dict[str, Any] = dict(full_precision=(provider != "triton-fast"))
-            if mode == "fwd":
-                ms, min_ms, max_ms = triton.testing.do_bench(
-                    lambda: attention(q, k, v, pos_q, pos_k, **kwargs),
-                    quantiles=quantiles,
-                    warmup=warmup,
-                    rep=rep,
-                )
-            else:
-                o = attention(q, k, v, pos_q, pos_k, **kwargs).mul(2).sum()
-                ms, min_ms, max_ms = triton.testing.do_bench(
-                    lambda: o.backward(retain_graph=True),
-                    quantiles=quantiles,
-                    warmup=warmup,
-                    rep=rep,
-                )
-        case _:
-            raise ValueError(f"Unknown provider: {provider}")
-
-    def perf(_ms):
-        return _ms
-
-    if bar is not None:
-        bar.update(1)
-
-    return perf(ms), perf(max_ms), perf(min_ms)
-
-
-def parse_args() -> Namespace:
-    parser = ArgumentParser(
-        description="",
-        formatter_class=ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument("-QK", type=int, default=8192, help="Max Q and K length")
-    parser.add_argument("-D", type=int, default=[32], nargs="+", help="Fixed size of D dimension")
-    parser.add_argument("-s", "--step", type=int, default=128, help="Step size for Q and K dimensions")
-    parser.add_argument("-o", "--output", type=Path, default=None, help="Output path to save benchmark results")
-    parser.add_argument("--warmup", type=int, default=25, help="`warmup` arg for `triton.testing.do_bench`")
-    parser.add_argument("--rep", type=int, default=100, help="`rep` arg for `triton.testing.do_bench`")
-    parser.add_argument("-v", "--verbose", default=False, action="store_true", help="Print each benchmark result")
-    parser.add_argument("-b", "--bias", default=False, action="store_true", help="Benchmark with ALiBi style bias")
-    parser.add_argument("--mode", default="fwd", choices=["fwd", "bwd"], help="Mode to benchmark")
-    parser.add_argument("-d", "--dtype", default="fp16", choices=["fp16", "bf16"], help="Data type to test")
-    parser.add_argument("-t", "--torch", default=False, action="store_true", help="Benchmark Torch (slow)")
-    parser.add_argument(
-        "-p",
-        "--providers",
-        default=["triton", "triton-fast", "flash"],
-        nargs="+",
-        choices=["triton", "triton-fast", "torch", "flash"],
-        help="Additional variations to benchmark",
-    )
-    return parser.parse_args()
-
-
-def main(args: Namespace):
-    test_configs = list(range(args.step, args.QK + 1, args.step))
-    PROVIDER_NAMES = {
-        "triton": "Triton",
-        "triton-fast": "Triton (FP16 intermediate)",
-        "torch": "Torch",
-        "flash": f"Flash Attention 2" + (" (no bias)" if args.bias else ""),
-    }
-    line_names = [PROVIDER_NAMES[p] for p in args.providers]
-
-    total_tests = len(args.providers) * len(test_configs) * len(args.D)
-    bar = tqdm(total=total_tests, desc="Benchmarking")
-    for d in args.D:
-        plot_name = f"flash-attn-d={d}-{args.mode}-{args.dtype}" + ("-bias" if args.bias else "")
-        xlabel = f"Input size (Lx{d}, Lx{d})"
-        ylabel = f"{'Forward' if args.mode == 'fwd' else 'Backward'} Pass Latency @ {args.dtype.upper()} (ms)"
-        benchmark = triton.testing.perf_report(
-            triton.testing.Benchmark(
-                x_names=["Q", "K"],
-                x_vals=test_configs,
-                line_arg="provider",
-                line_vals=args.providers,
-                line_names=line_names,
-                xlabel=xlabel,
-                ylabel=ylabel,
-                plot_name=plot_name,
-                args={},
-            )
-        )(
-            partial(
-                _benchmark,
-                warmup=args.warmup,
-                rep=args.rep,
-                bar=bar,
-                verbose=args.verbose,
-                bias=args.bias,
-                mode=args.mode,
-                dtype=args.dtype,
-            )
-        )
-        df: Any = benchmark.run(
-            show_plots=False,
-            print_data=False,
-            return_df=True,
-            save_path=args.output,
-            D=d,
-        )
-        with tqdm.external_write_mode():
-            print(df.to_string(index=False))
-    bar.close()
-
-
-if __name__ == "__main__":
-    main(parse_args())
+    return cast(Tensor, SDPA.apply(q, k, v, pos_q, pos_k, slopes, softmax_scale, full_precision))

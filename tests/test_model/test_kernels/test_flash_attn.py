@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from mit_ub.model.kernels.flash_attn import attention
+from mit_ub.model.kernels.attention.kernel import attention
 
 
 L: int = 32
@@ -35,15 +35,8 @@ DATA_TYPE_PARAMS: Final = (
 
 
 @pytest.fixture(autouse=True)
-def warn_spills():
-    import mit_ub.model.kernels.helpers as helpers
-
-    helpers.WARN_SPILLS = True
-
-
-@pytest.fixture(autouse=True)
 def autotune():
-    from mit_ub.model.kernels.flash_attn import _bwd_kernel, _bwd_preprocess_do_o_dot, _fwd_kernel
+    from mit_ub.model.kernels.attention.kernel import _bwd_kernel, _bwd_preprocess_do_o_dot, _fwd_kernel
 
     for kernel in [_fwd_kernel, _bwd_kernel, _bwd_preprocess_do_o_dot]:
         kernel.rep = 1

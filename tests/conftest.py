@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 from pytorch_lightning.loggers import WandbLogger
-from torch_dicom.testing import MammogramTestFactory
 from torch_dicom.preprocessing.datamodule import PreprocessedPNGDataModule
+from torch_dicom.testing import MammogramTestFactory
 
 
 @pytest.fixture(scope="session")

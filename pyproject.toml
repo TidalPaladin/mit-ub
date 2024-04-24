@@ -25,6 +25,7 @@ dependencies = [
     "registry @ git+https://github.com/TidalPaladin/callable-registry.git",
     "dicom-utils @ git+https://github.com/medcognetics/dicom-utils.git",
     "torch-dicom[datamodule] @ git+https://github.com/medcognetics/torch-dicom.git",
+    "triton-helpers @ git+https://github.com/TidalPaladin/triton-helpers.git",
     "jsonargparse[signatures]",
     "triton>=2.0",
 ]
