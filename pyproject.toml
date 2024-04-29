@@ -29,6 +29,8 @@ dependencies = [
     "triton-helpers @ git+https://github.com/TidalPaladin/triton-helpers.git",
     "jsonargparse[signatures]",
     "triton>=2.0",
+    "pip>=24.0",
+    "ipykernel>=6.29.4",
 ]
 readme = "README.md"
 license = {text = "Apache"}
@@ -80,6 +82,7 @@ test = [
   "pytest",
   "pytest-mock",
   "pytest-cov",
+  "pytest-env",
   "coverage",
   "pdbpp",
 ]
@@ -99,6 +102,9 @@ markers = [
 filterwarnings = [
   "ignore:.*Reducing precision for BF16 inputs is slower than full precision.*:UserWarning",
 ]
+
+[tool.pytest_env]
+TRITON_DEBUG = "1"
 
 # Sample script config
 #[project.scripts]
