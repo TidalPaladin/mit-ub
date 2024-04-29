@@ -1,5 +1,4 @@
 import math
-import warnings
 from typing import Any, Dict, Final, Tuple, cast
 
 import torch
@@ -38,13 +37,18 @@ LN_2_RECIP: Final = 1 / math.log(2)
 @triton.heuristics(
     {
         "BLOCK_M": SMHeuristic("q_p", ("B", "H", "M"), min_size=TENSOR_CORE_K, max_size=128),
-        "BLOCK_N": lambda args: max(args["BLOCK_M"], TENSOR_CORE_K),
+        "BLOCK_N": lambda args: max(
+            # FP16 beats flash when BLOCK_M == BLOCK_N at max 128
+            # BF16 seems to benefit from half BLOCK_N size
+            args["BLOCK_M"] // (2 if args["q_p"].dtype == torch.bfloat16 else 1),
+            TENSOR_CORE_K,
+        ),
         "BLOCK_HEADDIM": PowerOfTwoHeuristic("D", min_val=TENSOR_CORE_K),
         "BLOCK_POSDIM": PowerOfTwoHeuristic("D_pos", min_val=TENSOR_CORE_K),
         "BOUND_CHECK_Q": BoundaryCheckHeuristic(["M", "D"], ["BLOCK_M", "BLOCK_HEADDIM"]),
         "BOUND_CHECK_K": BoundaryCheckHeuristic(["N", "D"], ["BLOCK_N", "BLOCK_HEADDIM"]),
         "BOUND_CHECK_POSQ": BoundaryCheckHeuristic(["M", "D_pos"], ["BLOCK_M", "BLOCK_POSDIM"]),
-        "BOUND_CHECK_POSK": BoundaryCheckHeuristic(["D_pos", "N"], ["BLOCK_POSDIM", "BLOCK_N"]),
+        "BOUND_CHECK_POSK": BoundaryCheckHeuristic(["N", "D_pos"], ["BLOCK_N", "BLOCK_POSDIM"]),
         "BOUND_CHECK_LOGIT": BoundaryCheckHeuristic("M", "BLOCK_M"),
         "EVEN_K": IsBlockMultiple("N", "BLOCK_N"),
         "num_warps": lambda args: 4 if args["D"] <= 64 else 8,
@@ -207,7 +211,7 @@ def _fwd_kernel(
     for i in range(0, N, BLOCK_N):
         # Load K block and compute QK
         k = tl.load(K_block_ptr, boundary_check=BOUND_CHECK_K.value)
-        qk = tl.dot(q, tl.trans(k), allow_tf32=True, out_dtype=cast(tl.dtype, DOT_DTYPE))
+        qk = tl.dot(q, tl.trans(k), out_dtype=cast(tl.dtype, DOT_DTYPE))
 
         # Compute the bias
         if HAS_BIAS:
@@ -216,7 +220,9 @@ def _fwd_kernel(
             # Apply mask if threshold given
             if HAS_MASK_THRESH:
                 bias = tl.where(bias <= MASK_THRESH, bias, to_tensor(float("inf"), bias.dtype))
-            qk += bias * pos_slope
+            bias *= pos_slope
+            tl.device_assert(bias <= 0, "ALiBi bias must be negative")
+            qk += bias
 
         # Key masking to avoid including garbage in the max logit calculation
         if not EVEN_K:
@@ -229,19 +235,27 @@ def _fwd_kernel(
 
         # Compute scaling constant alpha and rescale the previous contributions, updating the maximum logit
         alpha = tl.math.exp2(query_i_maxdot - query_i_maxdot_new).to(ACCUMULATOR_DTYPE)
+        if HAS_MASK_THRESH:
+            alpha = tl.where(tl.math.isnan(alpha), to_tensor(1, alpha.dtype), alpha)
+        tl.device_assert((alpha >= 0) & (alpha <= 1), "alpha must be in [0, 1]")
         query_i_maxdot = query_i_maxdot_new
 
         # Compute the softmax numerator for each key, applying the maximum logit offset to avoid numerical overflow
-        p = tl.math.exp2(qk - query_i_maxdot_new[:, None]).to(PROB_DTYPE)
+        p = tl.math.exp2(qk - query_i_maxdot_new[:, None])
+        if HAS_MASK_THRESH:
+            p = tl.where(tl.math.isnan(p), to_tensor(0, p.dtype), p)
+        p = p.to(PROB_DTYPE)
+        tl.device_assert((p >= 0) & (p <= 1), "p must be in [0, 1]")
 
         # Compute the softmax denominator for each query, applying the maximum logit offset to the existing denominator
         softmax_denominator = softmax_denominator * alpha + tl.sum(p, 1).to(ACCUMULATOR_DTYPE)
 
         # Accumulate the weighted values for this block of V
         v = tl.load(V_block_ptr, boundary_check=BOUND_CHECK_K.value)
-        value_accumulator = value_accumulator * alpha[:, None] + tl.dot(
-            p.to(v.dtype), v, allow_tf32=True, out_dtype=cast(tl.dtype, DOT_DTYPE)
-        ).to(ACCUMULATOR_DTYPE)
+        p = p.to(v_p.dtype.element_ty)
+        value_accumulator = value_accumulator * alpha[:, None] + tl.dot(p, v, out_dtype=cast(tl.dtype, DOT_DTYPE)).to(
+            ACCUMULATOR_DTYPE
+        )
 
         # Advance pointers
         K_block_ptr = tl.advance(K_block_ptr, (BLOCK_N, 0))
@@ -315,7 +329,6 @@ def _bwd_do_o_dot(
     # fmt: on
 ):
     # Initialize offsets
-    tl.static_print("C")
     offset_b = tl.program_id(0)
     offset_h = tl.program_id(1)
     start_m = tl.program_id(2)
@@ -381,7 +394,7 @@ def _bwd_do_o_dot(
         "BOUND_CHECK_Q": BoundaryCheckHeuristic(["M", "D"], ["BLOCK_M", "BLOCK_HEADDIM"]),
         "BOUND_CHECK_K": BoundaryCheckHeuristic(["N", "D"], ["BLOCK_N", "BLOCK_HEADDIM"]),
         "BOUND_CHECK_POSQ": BoundaryCheckHeuristic(["M", "D_pos"], ["BLOCK_M", "BLOCK_POSDIM"]),
-        "BOUND_CHECK_POSK": BoundaryCheckHeuristic(["D_pos", "N"], ["BLOCK_POSDIM", "BLOCK_N"]),
+        "BOUND_CHECK_POSK": BoundaryCheckHeuristic(["N", "D_pos"], ["BLOCK_N", "BLOCK_POSDIM"]),
         "BOUND_CHECK_LOGIT": BoundaryCheckHeuristic("M", "BLOCK_M"),
         "EVEN_Q": IsBlockMultiple("M", "BLOCK_M"),
         "EVEN_K": IsBlockMultiple("N", "BLOCK_N"),
@@ -417,7 +430,7 @@ def _bwd_kernel(
     EVEN_Q: tl.constexpr, EVEN_K: tl.constexpr,
     BOUND_CHECK_Q: tl.constexpr, BOUND_CHECK_K: tl.constexpr, BOUND_CHECK_POSQ: tl.constexpr, BOUND_CHECK_POSK: tl.constexpr, BOUND_CHECK_LOGIT: tl.constexpr,
     # Hparams
-    ATOMIC_ADD: tl.constexpr = True,
+    ATOMIC_ADD: tl.constexpr = False,
     # fmt: on
 ):
     QK_SCALE: tl.constexpr = SOFTMAX_SCALE * tl.constexpr(LN_2_RECIP)
@@ -530,14 +543,17 @@ def _bwd_kernel(
         q = tl.load(Q_block_ptr, boundary_check=BOUND_CHECK_Q.value)
         do = tl.load(DO_block_ptr, boundary_check=BOUND_CHECK_Q.value)
         logit_scale = tl.load(Logit_block_ptr, boundary_check=BOUND_CHECK_LOGIT.value)
+        if HAS_BIAS:
+            pos_q = tl.load(Posq_block_ptr, boundary_check=BOUND_CHECK_POSQ.value)
+        else:
+            pos_q = None
 
         # Recompute p = softmax(qk), p is (MxN)
         # NOTE: Keep qk in fp32 to avoid overflow and because exponentiation requires FP32
         qk = tl.dot(q, tl.trans(k))
         if HAS_BIAS:
             # NOTE: Compute this in FP32, it's overflow prone
-            pos_q = tl.load(Posq_block_ptr, boundary_check=BOUND_CHECK_POSQ.value)
-            bias = euclidean_distance_inner(pos_q, pos_k, BLOCK_M, BLOCK_N, SQRT=True)
+            bias = euclidean_distance_inner(pos_q, pos_k, BLOCK_M, BLOCK_N, METHOD="matmul-nodiag", SQRT=True)
             # Apply mask if threshold given
             if HAS_MASK_THRESH:
                 bias = tl.where(bias <= MASK_THRESH, bias, to_tensor(float("inf"), bias.dtype))
@@ -545,7 +561,11 @@ def _bwd_kernel(
             qk = qk * QK_SCALE + bias
             p = tl.math.exp2(qk - logit_scale[:, None]).to(do_p.dtype.element_ty)
         else:
-            p = tl.math.exp2(tl.math.fma(qk, QK_SCALE, -1 * logit_scale[:, None])).to(do_p.dtype.element_ty)
+            p = tl.math.exp2(qk * QK_SCALE - logit_scale[:, None]).to(do_p.dtype.element_ty)
+
+        if HAS_MASK_THRESH:
+            p = tl.where(p <= MASK_THRESH, to_tensor(0, p.dtype), p)
+        tl.device_assert((p >= 0) & (p <= 1), "p must be in [0, 1]")
 
         # compute dL/dv = dL/do * do/dv = dL/do * p
         # Shape do = (MxD)
@@ -569,9 +589,9 @@ def _bwd_kernel(
         # For some reason tl.atomic_add is much slower than what we have here.
         # Using a counter to avoid initializing dq to 0 results in register spilling, so we just start with
         # zero initialization and add at each step
-        offs_m = tl.arange(0, BLOCK_M)
-        offs_d = tl.arange(0, BLOCK_HEADDIM)
-        q_grid = dq_p + offs_m[:, None] * stride_q_m + offs_d[None, :]
+        offs_m = tl.arange(0, BLOCK_M) * stride_q_m
+        offs_d = tl.max_contiguous(tl.arange(0, BLOCK_HEADDIM), BLOCK_HEADDIM)
+        q_grid = dq_p + offs_m[:, None] + offs_d[None, :]
 
         dq = tl.dot(ds, k, out_dtype=cast(tl.dtype, DOT_DTYPE)).to(dq_p.dtype.element_ty)
         if ATOMIC_ADD:
@@ -587,8 +607,8 @@ def _bwd_kernel(
                 dq += tl.load(q_grid)
                 tl.store(q_grid, dq)
             else:
-                dq += tl.load(q_grid, mask=q_mask)
                 q_mask = (tl.arange(0, BLOCK_M)[:, None] < M) & (tl.arange(0, BLOCK_HEADDIM)[None, :] < D)
+                dq += tl.load(q_grid, mask=q_mask)
                 tl.store(q_grid, dq, mask=q_mask)
             tl.atomic_xchg(lock_p, 0)
 
@@ -629,6 +649,7 @@ def _bwd_kernel(
 
 class SDPA(torch.autograd.Function):
 
+    @torch.cuda.amp.custom_fwd()
     @staticmethod
     def forward(
         # fmt: off
@@ -637,7 +658,7 @@ class SDPA(torch.autograd.Function):
         pos_q=None, pos_k=None, slopes=None,
         softmax_scale=None,
         full_precision: bool = True,
-        mask_thresh: float | None = None,
+        mask_threshold: float | None = None,
         # fmt: on
     ) -> Tensor:
         # shape constraints
@@ -692,7 +713,7 @@ class SDPA(torch.autograd.Function):
             pos_k.stride(0), pos_k.stride(1), pos_k.stride(2),
             slopes.stride(0),
             o.stride(0), o.stride(1), o.stride(2),
-            HAS_BIAS=has_bias, HAS_MASK_THRESH=mask_thresh is not None, MASK_THRESH=mask_thresh,
+            HAS_BIAS=has_bias, HAS_MASK_THRESH=has_bias and mask_threshold is not None, MASK_THRESH=mask_threshold,
             **SDPA._select_dtypes(o.dtype, full_precision),
         )
         # fmt: on
@@ -701,17 +722,19 @@ class SDPA(torch.autograd.Function):
         ctx.softmax_scale = softmax_scale
         ctx.full_precision = full_precision
         ctx.has_bias = has_bias
-        ctx.mask_thresh = mask_thresh
+        ctx.mask_threshold = mask_threshold if has_bias else None
         return o
 
-    @staticmethod
+    @torch.cuda.amp.custom_bwd
     @torch.no_grad()
+    @staticmethod
     def backward(ctx, do: Tensor):
         q, k, v, o, logit_scale, pos_q, pos_k, slopes = cast(Tuple[Tensor, ...], ctx.saved_tensors)
         B, H, Lk, D = k.shape
         _, _, Lq, _ = q.shape
-        pos_q.shape[-1] if ctx.has_bias else 0
+        D_pos = pos_q.shape[-1] if ctx.has_bias else 0
         assert logit_scale.shape == (B, H, Lq)
+        ATOMIC_ADD = False
 
         # NOTE: Using a leading dimension and reducing with sum is faster than atomic_add
         # NOTE: We get away with using an empty dq because all dimensions are multiples of their block sizes
@@ -722,8 +745,10 @@ class SDPA(torch.autograd.Function):
         delta = torch.empty_like(logit_scale, dtype=q.dtype)
         # TODO: We don't know how many locks we need until the autotuner chooses a config.
         # The best we can do is to allocate enough for the worst case. Can this be improved?
-        # locks = torch.zeros(B, H, Lq, dtype=torch.int32, device=q.device)
-        # locks = torch.empty(1, dtype=torch.int32, device=q.device)
+        if ATOMIC_ADD:
+            locks = torch.empty(1, dtype=torch.int32, device=q.device)
+        else:
+            locks = torch.zeros(B, H, Lq, dtype=torch.int32, device=q.device)
 
         ctx.full_precision if D < 64 else True
 
@@ -744,49 +769,42 @@ class SDPA(torch.autograd.Function):
             return (B, H, triton.cdiv(Lk, META["BLOCK_N"]))
 
         # fmt: off
-        # cast(JITFunction, _bwd_kernel)[grid](
-        #    q, k, v, logit_scale, pos_q, pos_k, slopes,
-        #    do, dq, dk, dv, delta,
-        #    ctx.softmax_scale,
-        #    locks,
-        #    q.stride(0), q.stride(1), q.stride(2),
-        #    k.stride(0), k.stride(1), k.stride(2),
-        #    v.stride(0), v.stride(1), v.stride(2),
-        #    pos_q.stride(0), pos_q.stride(1), pos_q.stride(2),
-        #    pos_k.stride(0), pos_k.stride(1), pos_k.stride(2),
-        #    slopes.stride(0),
-        #    do.stride(0), do.stride(1), do.stride(2), do.stride(3),
-        #    logit_scale.stride(0), logit_scale.stride(1),
-        #    B, H, Lq, Lk, D, D_pos,
-        #    HAS_BIAS=ctx.has_bias, HAS_MASK_THRESH=ctx.mask_thresh is not None, MASK_THRESH=ctx.mask_thresh,
-        #    #**SDPA._select_dtypes(dq.dtype, full_precision),
-        #    ACCUMULATOR_DTYPE=tl.float32,
-        #    PROB_DTYPE=tl.float32,
-        #    DOT_DTYPE=tl.float32,
-        # )
-        # print(kernel.asm["ptx"])
+        cast(JITFunction, _bwd_kernel)[grid](
+           q, k, v, logit_scale, pos_q, pos_k, slopes,
+           do, dq, dk, dv, delta,
+           ctx.softmax_scale,
+           locks,
+           q.stride(0), q.stride(1), q.stride(2),
+           k.stride(0), k.stride(1), k.stride(2),
+           v.stride(0), v.stride(1), v.stride(2),
+           pos_q.stride(0), pos_q.stride(1), pos_q.stride(2),
+           pos_k.stride(0), pos_k.stride(1), pos_k.stride(2),
+           slopes.stride(0),
+           do.stride(0), do.stride(1), do.stride(2), do.stride(3),
+           logit_scale.stride(0), logit_scale.stride(1),
+           B, H, Lq, Lk, D, D_pos,
+           HAS_BIAS=ctx.has_bias, HAS_MASK_THRESH=ctx.mask_threshold is not None, MASK_THRESH=ctx.mask_threshold,
+           **SDPA._select_dtypes(dq.dtype, ctx.full_precision),
+           ATOMIC_ADD=ATOMIC_ADD,
+        )
         # fmt: on
 
         return dq, dk, dv, None, None, None, None, None, None
 
     @staticmethod
     def _select_dtypes(dtype: torch.dtype, full_precision: bool) -> Dict[str, Any]:
-        if full_precision:
+        # BF16 is slower at reduced precision and it doesn't seem possible to fix.
+        # This is probably because dot products do not support BF16 accumulators so a lot of casting is required.
+        if full_precision or dtype is torch.bfloat16:
             return dict(
                 ACCUMULATOR_DTYPE=tl.float32,
                 PROB_DTYPE=tl.float32,
                 DOT_DTYPE=tl.float32,
             )
         else:
-            # BF16 is slower at reduced precision and it doesn't seem possible to fix.
-            # This is probably because dot products do not support BF16 accumulators so a lot of casting is required.
-            if dtype is torch.bfloat16:
-                warnings.warn(
-                    "Reducing precision for BF16 inputs is slower than full precision. "
-                    "Consider using full precision or working with FP16 inputs"
-                )
             return dict(
-                ACCUMULATOR_DTYPE=tl.float16,
+                # No performance hit from accumulating in FP32
+                ACCUMULATOR_DTYPE=tl.float32,
                 PROB_DTYPE=tl.float16,
                 DOT_DTYPE=tl.float16,
             )
@@ -801,12 +819,15 @@ def attention(
     slopes: Tensor | None = None,
     softmax_scale: float | None = None,
     full_precision: bool = True,
-    mask_thresh: float | None = None,
+    mask_threshold: float | None = None,
 ) -> Tensor:
     r"""Computes scaled dot product attention using Flash Attention 2.
 
     Supports positional encodings for queries and keys that will be constructed using the Euclidean distance.
     This is implemented such that the memory requirement is linear.
+
+    .. note::
+        This implementation has been optimized on a RTX 3090 and may not be optimal on other GPUs.
 
     Args:
         q: Query tensor of shape `(B, H, Lq, D)`
@@ -817,7 +838,11 @@ def attention(
         slopes: ALiBi slopes tensor of shape `(B, H)`. Defaults to None.
         softmax_scale: Scale factor for the softmax. Defaults to None, in which case it is set to `1 / sqrt(D)`.
         full_precision: Whether to use full precision for intermediate computations. Defaults to True.
-            Setting to falsle will perform intermediate computations in FP16, yielding a speedup at the cost
+            Setting to false will perform intermediate computations in FP16, yielding a speedup at the cost
             of precision and numerical stability.
+        mask_threshold: Threshold for masking. If set, the attention weights will be set to 0 for all query key
+            pairs with positional encodings that are further apart than this threshold. By shifting positional encodings
+            for all tokens in an attention group, this can be used to implement attention masking while still retaining
+            positional encodings
     """
-    return cast(Tensor, SDPA.apply(q, k, v, pos_q, pos_k, slopes, softmax_scale, full_precision, mask_thresh))
+    return cast(Tensor, SDPA.apply(q, k, v, pos_q, pos_k, slopes, softmax_scale, full_precision, mask_threshold))

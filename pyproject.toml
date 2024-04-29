@@ -82,6 +82,7 @@ test = [
   "pytest",
   "pytest-mock",
   "pytest-cov",
+  "pytest-env",
   "coverage",
   "pdbpp",
 ]
@@ -101,6 +102,9 @@ markers = [
 filterwarnings = [
   "ignore:.*Reducing precision for BF16 inputs is slower than full precision.*:UserWarning",
 ]
+
+[tool.pytest_env]
+TRITON_DEBUG = "1"
 
 # Sample script config
 #[project.scripts]

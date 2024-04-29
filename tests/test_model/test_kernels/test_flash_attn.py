@@ -39,18 +39,10 @@ HARD_SHAPE_PARAMS: Final = (
 
 DATA_TYPE_PARAMS: Final = (
     pytest.param(True, torch.float16, 0.01, id="float16"),
-    # pytest.param(True, torch.bfloat16, 0.03, id="bfloat16"),
+    pytest.param(True, torch.bfloat16, 0.05, id="bfloat16"),
     pytest.param(False, torch.float16, 0.01, id="float16-fast"),
-    # pytest.param(False, torch.bfloat16, 0.03, id="bfloat16-fast"),
+    pytest.param(False, torch.bfloat16, 0.05, id="bfloat16-fast"),
 )
-
-
-# @pytest.fixture(autouse=True)
-# def autotune():
-#    from mit_ub.model.kernels.attention.kernel import _bwd_kernel, _bwd_preprocess_do_o_dot, _fwd_kernel
-#
-#    for kernel in [_fwd_kernel, _bwd_kernel, _bwd_preprocess_do_o_dot]:
-#        kernel.rep = 1
 
 
 @pytest.mark.parametrize("b, lq, lk, dhead, nhead", EASY_SHAPE_PARAMS + HARD_SHAPE_PARAMS)
@@ -152,6 +144,82 @@ def test_flash_attn_backward_bias(b, lq, lk, dhead, nhead, dtype, atol, full_pre
     # Triton
     q.grad = k.grad = v.grad = None
     o = attention(q, k, v, pos_q, pos_k, slopes, full_precision=full_precision)
+    o.sum().backward()
+    grad_q_triton = q.grad
+    grad_k_triton = k.grad
+    grad_v_triton = v.grad
+
+    # Test
+    torch.testing.assert_close(grad_v_baseline, grad_v_triton, rtol=0, atol=atol)
+    torch.testing.assert_close(grad_k_baseline, grad_k_triton, rtol=0, atol=atol)
+    torch.testing.assert_close(grad_q_baseline, grad_q_triton, rtol=0, atol=atol)
+
+
+@pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
+def test_mask_threshold(full_precision, dtype, atol):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    torch.manual_seed(0)
+
+    b, nhead, dhead, dpos = 2, 2, 16, 3
+    l = lq = lk = 32
+    q = torch.randn((b, nhead, lq, dhead), device="cuda", dtype=dtype, requires_grad=True)
+    k = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype, requires_grad=True)
+    v = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype, requires_grad=True)
+    pos_q = torch.rand((b, nhead, lq, dpos), device="cuda", dtype=dtype)
+    pos_k = torch.rand((b, nhead, lk, dpos), device="cuda", dtype=dtype)
+    slopes = torch.full((b, nhead), -1, device="cuda", dtype=dtype)
+
+    # Q and K positions are on [0, 1]. Generate a mask and apply a shift to positions based on the mask
+    threshold = 3
+    mask = torch.randint(0, 10, (b, nhead, l, 1), device="cuda", dtype=dtype)
+    pos_q += mask * threshold
+    pos_k += mask * threshold
+
+    baseline_mask = mask == mask.swapdims(-1, -2)
+    bias = slopes[..., None, None] * (
+        (pos_q[..., None, :] - pos_k[..., None, :, :]).pow(2).sum(-1).sqrt_().view(b, nhead, lq, lk)
+    )
+    baseline_mask = torch.where(baseline_mask, bias, torch.tensor(float("-inf"), device="cuda", dtype=dtype))
+    baseline_output = F.scaled_dot_product_attention(q, k, v, attn_mask=baseline_mask)
+
+    triton_output = attention(q, k, v, pos_q, pos_k, slopes, full_precision=full_precision, mask_threshold=threshold)
+    torch.testing.assert_close(baseline_output, triton_output, rtol=0, atol=atol)
+
+    # Trigger the backward but we won't check it in full
+    triton_output.sum().backward()
+
+
+@pytest.mark.parametrize("b, lq, lk, dhead, nhead", HARD_SHAPE_PARAMS)
+@pytest.mark.parametrize("full_precision", [True, False])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_autocast(b, lq, lk, dhead, nhead, full_precision, dtype):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    torch.manual_seed(0)
+    atol = 0.05
+
+    q = torch.randn((b, nhead, lq, dhead), device="cuda", dtype=dtype, requires_grad=True)
+    k = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype, requires_grad=True)
+    v = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype, requires_grad=True)
+    pos_q = torch.randn((b, nhead, lq, 2), device="cuda", dtype=dtype)
+    pos_k = torch.randn((b, nhead, lk, 2), device="cuda", dtype=dtype)
+    slopes = torch.randint(-10, -1, (b, nhead), device="cuda", dtype=dtype).div_(10)
+    bias = slopes[..., None, None] * (
+        (pos_q[..., None, :] - pos_k[..., None, :, :]).pow(2).sum(-1).sqrt_().view(b, nhead, lq, lk)
+    )
+
+    # Baseline
+    o = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
+    o.sum().backward()
+    grad_q_baseline = q.grad
+    grad_k_baseline = k.grad
+    grad_v_baseline = v.grad
+
+    # Triton
+    q.grad = k.grad = v.grad = None
+    with torch.autocast(device_type="cuda", dtype=dtype):
+        o = attention(q, k, v, pos_q, pos_k, slopes, full_precision=full_precision)
     o.sum().backward()
     grad_q_triton = q.grad
     grad_k_triton = k.grad

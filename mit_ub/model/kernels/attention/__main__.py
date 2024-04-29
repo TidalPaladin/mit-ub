@@ -44,6 +44,7 @@ class MemEffAttention(Baseline):
 class Triton(Baseline):
     pos_enc: bool = False
     full_precision: bool = True
+    mask_thresh: bool = False
 
     def prepare_inputs(self, H: int, QK: int, D: int, D_pos: int, **kwargs) -> Dict[str, Tensor | None]:
         B = 1
@@ -58,7 +59,8 @@ class Triton(Baseline):
         return result
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor, pos_q: Tensor | None, pos_k: Tensor | None) -> Tensor:
-        return attention(q, k, v, pos_q, pos_k, full_precision=self.full_precision)
+        mask_threshold = 1.0 if self.mask_thresh else None
+        return attention(q, k, v, pos_q, pos_k, full_precision=self.full_precision, mask_threshold=mask_threshold)
 
 
 if __name__ == "__main__":
@@ -69,9 +71,11 @@ if __name__ == "__main__":
             # MemEffAttention("mem-eff"),
             FlashAttention("flash"),
             Triton("triton"),
-            # Triton("triton-fast", full_precision=False),
+            Triton("triton-fast", full_precision=False),
             Triton("triton-pos", pos_enc=True),
-            # Triton("triton-pos-fast", pos_enc=True, full_precision=False),
+            Triton("triton-pos-mask", pos_enc=True, mask_thresh=True),
+            Triton("triton-pos-fast", pos_enc=True, full_precision=False),
+            Triton("triton-pos-mask-fast", pos_enc=True, mask_thresh=True, full_precision=False),
         ],
         dims={
             "QK": ((128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768), "values"),
