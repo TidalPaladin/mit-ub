@@ -5,18 +5,30 @@ build-backend = "pdm.pep517.api"
 [project]
 name = "mit-ub"
 description = ""
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.12"
 authors = [
     {name = "Scott Chase Waggener", email = "tidalpaladin@protonmail.com"},
 ]
 dependencies = [
-    "torch-dicom @ git+https://github.com/medcognetics/torch-dicom.git",
-    "gpvit @ git+https://github.com/TidalPaladin/gpvit.git",
-    "torch>=2.1.0",
-    "torchvision>=0.16.0",
-    "einops>=0.7.0",
-    "pydicom>=2.4.3",
+    "setuptools",
+    "numpy",
+    "pydicom",
+    "torch",
+    "torchvision",
+    "torchmetrics",
+    "pytorch-lightning",
+    "lightning-bolts",
+    "timm>=0.5.4",
+    "einops",
+    "pandas",
+    "Pillow",
     "deep-helpers @ git+https://github.com/TidalPaladin/deep-helpers.git",
+    "registry @ git+https://github.com/TidalPaladin/callable-registry.git",
+    "dicom-utils @ git+https://github.com/medcognetics/dicom-utils.git",
+    "torch-dicom[datamodule] @ git+https://github.com/medcognetics/torch-dicom.git",
+    "triton-helpers @ git+https://github.com/TidalPaladin/triton-helpers.git",
+    "jsonargparse[signatures]",
+    "triton>=2.0",
 ]
 readme = "README.md"
 license = {text = "Apache"}
@@ -50,6 +62,16 @@ lines_after_imports = 2
 multi_line_output = 3
 use_parentheses = false
 
+[tool.pyright]
+include = ["mit_ub", "tests"]
+exclude = [
+  "**/node_modules",
+  "**/__pycache__",
+  "**/.pytest_cache",
+]
+pythonVersion = "3.11"
+pythonPlatform = "Linux"
+
 [tool.pdm]
 version = { source = "scm" }
 
@@ -72,8 +94,11 @@ quality = [
 [tool.pytest.ini_options]
 markers = [
   "ci_skip",
+  "slow",
 ]
-filterwarnings = []
+filterwarnings = [
+  "ignore:.*Reducing precision for BF16 inputs is slower than full precision.*:UserWarning",
+]
 
 # Sample script config
 #[project.scripts]

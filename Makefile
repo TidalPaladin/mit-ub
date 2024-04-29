@@ -1,14 +1,41 @@
-.PHONY: clean clean-env check quality style tag-version test env upload upload-test
+.PHONY: benchmark clean clean-env check quality style tag-version test env upload upload-test
 
 PROJECT=mit_ub
 QUALITY_DIRS=$(PROJECT) tests
 CLEAN_DIRS=$(PROJECT) tests
 PYTHON=pdm run python
+BENCHMARK_DIR = ./benchmarks
 
 CONFIG_FILE := config.mk
 ifneq ($(wildcard $(CONFIG_FILE)),)
 include $(CONFIG_FILE)
 endif
+
+#benchmark-one: ## run benchmarks
+#	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 16 \
+#		--mode bwd --providers triton triton-fast -d bf16
+
+benchmark: ## run benchmarks
+	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 16 \
+		--mode fwd --providers triton triton-fast flash -d fp16
+	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
+		--mode fwd --providers triton triton-fast flash -d fp16
+	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 64 \
+		--mode fwd --providers triton triton-fast flash -d fp16
+	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
+		--mode fwd --providers triton triton-fast flash -d fp16 --bias
+	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
+		--mode fwd --providers triton flash -d bf16
+	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 16 \
+		--mode bwd --providers triton triton-fast flash -d fp16
+	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
+		--mode bwd --providers triton triton-fast flash -d fp16
+	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 64 \
+		--mode bwd --providers triton triton-fast flash -d fp16
+	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
+		--mode bwd --providers triton triton-fast flash -d fp16 --bias
+	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
+		--mode bwd --providers triton flash -d bf16
 
 check: ## run quality checks and unit tests
 	$(MAKE) style
@@ -67,7 +94,7 @@ test: ## run unit tests
 		./tests/
 
 test-%: ## run unit tests matching a pattern
-	$(PYTHON) -m pytest -rs -k $* -v ./tests/ 
+	$(PYTHON) -m pytest -s -r fE -k $* ./tests/ --tb=no
 
 test-pdb-%: ## run unit tests matching a pattern with PDB fallback
 	$(PYTHON) -m pytest -rs --pdb -k $* -v ./tests/ 
