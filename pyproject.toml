@@ -5,11 +5,12 @@ build-backend = "pdm.pep517.api"
 [project]
 name = "mit-ub"
 description = ""
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.12"
 authors = [
     {name = "Scott Chase Waggener", email = "tidalpaladin@protonmail.com"},
 ]
 dependencies = [
+    "setuptools",
     "numpy",
     "pydicom",
     "torch",
@@ -36,9 +37,6 @@ dynamic = ["version"]
 [project.optional-dependencies]
 train = [
     "ssl-tasks @ git+https://github.com/TidalPaladin/ssl-tasks.git",
-]
-benchmark = [
-    "flash-attn>=2.5.6",
 ]
 
 [tool.autoflake]
