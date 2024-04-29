@@ -11,7 +11,7 @@ from triton_helpers import TENSOR_CORE_K
 from triton_helpers.autotune import PruneConfigs
 from triton_helpers.heuristics import IsBlockMultiple, PowerOfTwoHeuristic
 
-from ..distance.kernel import _euclidean_distance_matmul_inner
+from ..distance.kernel import euclidean_distance_inner
 
 
 LN_2_RECIP: Final = 1 / math.log(2)
@@ -143,11 +143,11 @@ def _fwd_kernel(
         # results in a compile error.
         Posk_block_ptr = tl.make_block_ptr(
             pos_k_p,
-            (D_pos, N),
-            (1, stride_posk_n),
+            (N, D_pos),
+            (stride_posk_n, 1),
             (0, 0),
-            (BLOCK_POSDIM, BLOCK_N),
-            (0, 1),
+            (BLOCK_N, BLOCK_POSDIM),
+            (1, 0),
         )
     else:
         Posq_block_ptr = None
@@ -205,9 +205,8 @@ def _fwd_kernel(
 
         # Compute the bias
         if HAS_BIAS:
-            pos_k = tl.load(Posk_block_ptr, boundary_check=(0,))
-            bias = _euclidean_distance_matmul_inner(pos_q, pos_k, BLOCK_M, BLOCK_N, tl.float32)
-            bias = tl.sqrt(bias)
+            pos_k = tl.load(Posk_block_ptr, boundary_check=(1,))
+            bias = euclidean_distance_inner(pos_q, pos_k, BLOCK_M, BLOCK_N)
             qk = bias * pos_slope + qk
 
         # Determine the maximum logit seen for each query
@@ -233,7 +232,7 @@ def _fwd_kernel(
         K_block_ptr = tl.advance(K_block_ptr, (BLOCK_N, 0))
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
         if HAS_BIAS:
-            Posk_block_ptr = tl.advance(Posk_block_ptr, (0, BLOCK_N))
+            Posk_block_ptr = tl.advance(Posk_block_ptr, (BLOCK_N, 0))
 
     # Compute the final softmax values
     value_accumulator = value_accumulator / softmax_denominator.to(ACCUMULATOR_DTYPE)[:, None]
@@ -492,11 +491,11 @@ def _bwd_kernel(
         # results in a compile error.
         Posk_block_ptr = tl.make_block_ptr(
             pos_k_p,
-            (D_pos, N),
-            (1, stride_posk_n),
-            (0, start_n * BLOCK_N),
-            (BLOCK_POSDIM, BLOCK_N),
-            (0, 1),
+            (N, D_pos),
+            (stride_posk_n, 1),
+            (start_n * BLOCK_N, 0),
+            (BLOCK_N, BLOCK_POSDIM),
+            (1, 0),
         )
     else:
         Posq_block_ptr = None
@@ -514,7 +513,7 @@ def _bwd_kernel(
 
     # Init pos_k
     if HAS_BIAS:
-        pos_k = tl.load(Posk_block_ptr, boundary_check=(0,))
+        pos_k = tl.load(Posk_block_ptr, boundary_check=(1,))
         pos_slope = tl.load(pos_slopes_p) * bias_scale
     else:
         pos_slope = None
@@ -532,8 +531,7 @@ def _bwd_kernel(
         if HAS_BIAS:
             # NOTE: Compute this in FP32, it's overflow prone
             pos_q = tl.load(Posq_block_ptr, boundary_check=(1,))
-            bias = _euclidean_distance_matmul_inner(pos_q, pos_k, BLOCK_M, BLOCK_N, tl.float32)
-            bias = pos_slope * tl.sqrt(bias)
+            bias = pos_slope * euclidean_distance_inner(pos_q, pos_k, BLOCK_M, BLOCK_N)
             qk = qk * qk_scale + bias
             p = tl.math.exp2(qk - logit_scale[:, None]).to(do_p.dtype.element_ty)
         else:
