@@ -15,7 +15,7 @@ def euclidean_distance_inner(
     b: tl.tensor,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    METHOD: tl.constexpr = "matmul",
+    METHOD: tl.constexpr = "matmul-nodiag",
     SQRT: tl.constexpr = True,
 ):
     tl.static_assert(
