@@ -29,6 +29,8 @@ dependencies = [
     "triton-helpers @ git+https://github.com/TidalPaladin/triton-helpers.git",
     "jsonargparse[signatures]",
     "triton>=2.0",
+    "pip>=24.0",
+    "ipykernel>=6.29.4",
 ]
 readme = "README.md"
 license = {text = "Apache"}

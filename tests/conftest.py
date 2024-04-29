@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -19,3 +20,25 @@ def logger(tmp_path, mocker):
     logger = WandbLogger(name="test", save_dir=tmp_path, offline=True, anonymous=True)
     logger.experiment.log = mocker.spy(logger.experiment, "log")
     return logger
+
+
+@pytest.fixture(scope="session", autouse=True)
+def triton_cache(tmpdir_factory):
+    # Uses a fresh temporary cache directory for each test
+    root = Path(tmpdir_factory.mktemp("triton"))
+    path = root / ".triton"
+    path.mkdir()
+    os.environ["TRITON_CACHE_DIR"] = str(path)
+    return path
+
+
+@pytest.fixture(autouse=True, scope="session")
+def triton_debug():
+    os.environ["TRITON_DEBUG"] = str(1)
+
+
+# @pytest.fixture(autouse=True, scope="session")
+# def no_autotune():
+#    from triton.runtime import Autotuner
+#
+#    Autotuner.prune_configs = lambda self, *args, **kwargs: [self.configs[0]]

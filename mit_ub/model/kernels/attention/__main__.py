@@ -4,6 +4,7 @@ from typing import Dict
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from triton_helpers.benchmark import CLI, KernelExecutor
 
 from .kernel import attention
@@ -21,21 +22,21 @@ class Baseline(KernelExecutor):
         return {"q": q, "k": k, "v": v}
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
-        with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+        with sdpa_kernel([SDPBackend.MATH]):
             return F.scaled_dot_product_attention(q, k, v)
 
 
 @dataclass
 class FlashAttention(Baseline):
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
-        with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False):
+        with sdpa_kernel([SDPBackend.FLASH_ATTENTION]):
             return F.scaled_dot_product_attention(q, k, v)
 
 
 @dataclass
 class MemEffAttention(Baseline):
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
-        with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=False, enable_mem_efficient=True):
+        with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
             return F.scaled_dot_product_attention(q, k, v)
 
 
@@ -45,11 +46,12 @@ class Triton(Baseline):
     full_precision: bool = True
 
     def prepare_inputs(self, H: int, QK: int, D: int, D_pos: int, **kwargs) -> Dict[str, Tensor | None]:
+        B = 1
         Q = K = QK
         result = super().prepare_inputs(H, QK, D, D_pos, **kwargs)
         if self.pos_enc:
-            pos_q = torch.randn((1, H, Q, D_pos), **kwargs)
-            pos_k = torch.randn((1, H, K, D_pos), **kwargs)
+            pos_q = torch.randn((B, H, Q, D_pos), **kwargs)
+            pos_k = torch.randn((B, H, K, D_pos), **kwargs)
         else:
             pos_q = pos_k = None
         result.update({"pos_q": pos_q, "pos_k": pos_k})
@@ -63,16 +65,16 @@ if __name__ == "__main__":
     CLI.entrypoint(
         "EuclideanDistance",
         [
-            Baseline("baseline"),
+            # Baseline("baseline"),
+            # MemEffAttention("mem-eff"),
             FlashAttention("flash"),
-            MemEffAttention("mem-eff"),
             Triton("triton"),
-            Triton("triton-fast", full_precision=False),
+            # Triton("triton-fast", full_precision=False),
             Triton("triton-pos", pos_enc=True),
-            Triton("triton-pos-fast", pos_enc=True, full_precision=False),
+            # Triton("triton-pos-fast", pos_enc=True, full_precision=False),
         ],
         dims={
-            "QK": ((128, 256, 512, 1024, 2048, 4096, 8192), "values"),
+            "QK": ((128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768), "values"),
             "D": ((32,), "values"),
             "D_pos": ((2,), "values"),
             "H": ((12,), "values"),

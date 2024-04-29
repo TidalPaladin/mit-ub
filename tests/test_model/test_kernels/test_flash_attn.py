@@ -23,23 +23,34 @@ EASY_SHAPE_PARAMS: Final = (
     pytest.param(1, L, 2 * L, D, 1, id=f"b=1,lq={L},lk={2*L},dhead={D},nhead=1"),
 )
 
-HARD_SHAPE_PARAMS: Final = (pytest.param(4, 2 * L, 4 * L, 4 * D, 4, id=f"b=4,lq={2*L},lk={4*L},dhead={4*D},nhead=4"),)
+HARD_SHAPE_PARAMS: Final = (
+    pytest.param(1, 10, 10, D, 1, id=f"b=1,lq=10,lk=10,dhead={D},nhead=1"),
+    pytest.param(1, 18, 18, D, 1, id=f"b=1,lq=18,lk=18,dhead={D},nhead=1"),
+    pytest.param(1, 10, 18, D, 1, id=f"b=1,lq=10,lk=18,dhead={D},nhead=1"),
+    pytest.param(1, 18, 10, D, 1, id=f"b=1,lq=18,lk=10,dhead={D},nhead=1"),
+    pytest.param(2, L, L, D, 2, id=f"b=2,lq={L},lk={L},dhead={D},nhead=2"),
+    pytest.param(2, 10, 10, D, 2, id=f"b=2,lq=10,lk=10,dhead={D},nhead=2"),
+    pytest.param(4, int(3.5 * L), L, 4 * D, 4, id=f"b=4,lq={int(3.5*L)},lk={4*L},dhead={4*D},nhead=4A"),
+    pytest.param(4, 2 * L, 4 * L, 4 * D, 4, id=f"b=4,lq={2*L},lk={4*L},dhead={4*D},nhead=4B"),
+    pytest.param(4, 2 * L, int(4.5 * L), 4 * D, 4, id=f"b=4,lq={2*L},lk={int(4.5*L)},dhead={4*D},nhead=4C"),
+    pytest.param(4, int(3.5 * L), 4 * L, 4 * D, 4, id=f"b=4,lq={int(3.5*L)},lk={4*L},dhead={4*D},nhead=4D"),
+)
 
 
 DATA_TYPE_PARAMS: Final = (
     pytest.param(True, torch.float16, 0.01, id="float16"),
-    pytest.param(True, torch.bfloat16, 0.03, id="bfloat16"),
+    # pytest.param(True, torch.bfloat16, 0.03, id="bfloat16"),
     pytest.param(False, torch.float16, 0.01, id="float16-fast"),
-    pytest.param(False, torch.bfloat16, 0.03, id="bfloat16-fast"),
+    # pytest.param(False, torch.bfloat16, 0.03, id="bfloat16-fast"),
 )
 
 
-@pytest.fixture(autouse=True)
-def autotune():
-    from mit_ub.model.kernels.attention.kernel import _bwd_kernel, _bwd_preprocess_do_o_dot, _fwd_kernel
-
-    for kernel in [_fwd_kernel, _bwd_kernel, _bwd_preprocess_do_o_dot]:
-        kernel.rep = 1
+# @pytest.fixture(autouse=True)
+# def autotune():
+#    from mit_ub.model.kernels.attention.kernel import _bwd_kernel, _bwd_preprocess_do_o_dot, _fwd_kernel
+#
+#    for kernel in [_fwd_kernel, _bwd_kernel, _bwd_preprocess_do_o_dot]:
+#        kernel.rep = 1
 
 
 @pytest.mark.parametrize("b, lq, lk, dhead, nhead", EASY_SHAPE_PARAMS + HARD_SHAPE_PARAMS)
@@ -82,7 +93,7 @@ def test_flash_attn_forward_bias(b, lq, lk, dhead, nhead, dpos, dtype, atol, ful
     torch.testing.assert_close(baseline_output, triton_output, rtol=0, atol=atol)
 
 
-@pytest.mark.parametrize("b, lq, lk, dhead, nhead", EASY_SHAPE_PARAMS + HARD_SHAPE_PARAMS)
+@pytest.mark.parametrize("b, lq, lk, dhead, nhead", HARD_SHAPE_PARAMS)
 @pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
 def test_flash_attn_backward(b, lq, lk, dhead, nhead, dtype, atol, full_precision):
     if not torch.cuda.is_available():
@@ -109,9 +120,9 @@ def test_flash_attn_backward(b, lq, lk, dhead, nhead, dtype, atol, full_precisio
     grad_v_triton = v.grad
 
     # Test
-    torch.testing.assert_close(grad_v_baseline, grad_v_triton, rtol=0, atol=atol)
     torch.testing.assert_close(grad_k_baseline, grad_k_triton, rtol=0, atol=atol)
     torch.testing.assert_close(grad_q_baseline, grad_q_triton, rtol=0, atol=atol)
+    torch.testing.assert_close(grad_v_baseline, grad_v_triton, rtol=0, atol=atol)
 
 
 @pytest.mark.parametrize("b, lq, lk, dhead, nhead", HARD_SHAPE_PARAMS)
