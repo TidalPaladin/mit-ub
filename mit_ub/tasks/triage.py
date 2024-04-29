@@ -11,8 +11,10 @@ from gpvit.layers import MLPMixerPooling
 from torch import Tensor
 from torchvision.ops import sigmoid_focal_loss
 
+
 # from gpvit.train import BACKBONES
-from ..model import BACKBONES
+# Placeholder
+BACKBONES: Any = None
 
 
 UNKNOWN_INT: Final = -1
