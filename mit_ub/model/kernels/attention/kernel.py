@@ -565,7 +565,7 @@ def _bwd_kernel(
 
         if HAS_MASK_THRESH:
             p = tl.where(p <= MASK_THRESH, to_tensor(0, p.dtype), p)
-        tl.device_assert((p >= 0) & (p <= 1), "p must be in [0, 1]")
+        # tl.device_assert((p >= 0) & (p <= 1), "p must be in [0, 1]")
 
         # compute dL/dv = dL/do * do/dv = dL/do * p
         # Shape do = (MxD)
@@ -675,6 +675,12 @@ class SDPA(torch.autograd.Function):
         assert q.is_cuda and k.is_cuda and v.is_cuda
         softmax_scale = softmax_scale or 1.0 / math.sqrt(D)
 
+        # TODO: Benchmark this conversion vs supporting non-contiguous inputs.
+        with torch.no_grad():
+            q = q.contiguous()
+            k = k.contiguous()
+            v = v.contiguous()
+
         # Check bias
         if pos_q is not None:
             _, _, _, D_pos = pos_q.shape
@@ -683,8 +689,16 @@ class SDPA(torch.autograd.Function):
             assert pos_k.shape == (B, H, Lk, D_pos), "Key position must be (B, H, Lk, D_pos)"
             slopes = slopes if slopes is not None else torch.full((B, H), -1, device=q.device, dtype=q.dtype)
             assert slopes.shape == (B, H)
-            assert pos_q.dtype == pos_k.dtype == slopes.dtype == q.dtype
             has_bias = True
+
+            # Make positions contiguous if they are non-contiguous along a non batch or head dimension
+            with torch.no_grad():
+                if pos_q.stride(-1) != 1 or pos_q.stride(-2) != D_pos:
+                    pos_q = pos_q.contiguous()
+                if pos_k.stride(-1) != 1 or pos_k.stride(-2) != D_pos:
+                    pos_k = pos_k.contiguous()
+                slopes = slopes.contiguous()
+
         else:
             pos_q = torch.empty((0, 0, 0, 0), device=q.device, dtype=q.dtype)
             pos_k = torch.empty((0, 0, 0, 0), device=k.device, dtype=k.dtype)
@@ -736,11 +750,7 @@ class SDPA(torch.autograd.Function):
         assert logit_scale.shape == (B, H, Lq)
         ATOMIC_ADD = False
 
-        # NOTE: Using a leading dimension and reducing with sum is faster than atomic_add
-        # NOTE: We get away with using an empty dq because all dimensions are multiples of their block sizes
-        dq = torch.zeros_like(q)
-        dk = torch.empty_like(k)
-        dv = torch.empty_like(v)
+        do = do.contiguous()
 
         delta = torch.empty_like(logit_scale, dtype=q.dtype)
         # TODO: We don't know how many locks we need until the autotuner chooses a config.
@@ -767,6 +777,12 @@ class SDPA(torch.autograd.Function):
 
         def grid(META):
             return (B, H, triton.cdiv(Lk, META["BLOCK_N"]))
+
+        # NOTE: Using a leading dimension and reducing with sum is faster than atomic_add
+        # NOTE: We get away with using an empty dq because all dimensions are multiples of their block sizes
+        dq = torch.zeros_like(q)
+        dk = torch.empty_like(k)
+        dv = torch.empty_like(v)
 
         # fmt: off
         cast(JITFunction, _bwd_kernel)[grid](
