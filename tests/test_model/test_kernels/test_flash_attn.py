@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from mit_ub.model.kernels.attention.kernel import attention
-from mit_ub.model.kernels.attention.module import MultiheadSelfAttention
+from mit_ub.model.kernels.attention.module import MultiheadAttention
 
 
 L: int = 32
@@ -267,17 +267,62 @@ def test_autocast(b, lq, lk, dhead, nhead, full_precision, dtype):
     torch.testing.assert_close(grad_q_baseline, grad_q_triton, rtol=0, atol=atol)
 
 
-def test_multihead_self_attention():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
-    torch.manual_seed(0)
+class TestModule:
 
-    B, H, L, D = 2, 8, 32, 16
-    x = torch.rand((B, L, D * H), device="cuda")
-    pos = torch.rand((B, H, L, 2), device="cuda")
-    slopes = -1 * torch.rand((B, H), device="cuda")
+    def test_self_attention(self):
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA is not available")
+        torch.manual_seed(0)
 
-    attn = MultiheadSelfAttention(D * H, H).to("cuda")
-    with torch.autocast(device_type="cuda", dtype=torch.float16):
-        o = attn(x, pos, slopes)
-    assert o.shape == x.shape
+        B, H, L, D = 2, 8, 32, 16
+        x = torch.randn((B, L, D * H), device="cuda", requires_grad=True)
+        pos = torch.randn((B, H, L, 2), device="cuda")
+        slopes = -1 * torch.rand((B, H), device="cuda")
+
+        attn = MultiheadAttention(D * H, H, batch_first=True).to("cuda")
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            o = attn(x, x, x, pos, pos, slopes)
+        assert o.shape == x.shape
+
+        x.sum().backward()
+
+    def test_cross_attention(self):
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA is not available")
+        torch.manual_seed(0)
+
+        B, H, L, D = 2, 8, 32, 16
+        q = torch.randn((B, L, D * H), device="cuda", requires_grad=True)
+        kv = torch.randn((B, L, D * H), device="cuda", requires_grad=True)
+        pos_q = torch.randn((B, H, L, 2), device="cuda")
+        pos_kv = torch.randn((B, H, L, 2), device="cuda")
+        slopes = -1 * torch.rand((B, H), device="cuda")
+
+        attn = MultiheadAttention(D * H, H, batch_first=True).to("cuda")
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            o = attn(q, kv, kv, pos_q, pos_kv, slopes)
+        assert o.shape == q.shape
+
+        o.sum().backward()
+
+    def test_cross_attention_qkv_dim_diff(self):
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA is not available")
+        torch.manual_seed(0)
+
+        B, H, L, D = 2, 8, 32, 16
+        Dk = 12
+        Dv = 14
+        q = torch.randn((B, L, D * H), device="cuda", requires_grad=True)
+        k = torch.randn((B, L, Dk * H), device="cuda", requires_grad=True)
+        v = torch.randn((B, L, Dv * H), device="cuda", requires_grad=True)
+        pos_q = torch.randn((B, H, L, 2), device="cuda")
+        pos_kv = torch.randn((B, H, L, 2), device="cuda")
+        slopes = -1 * torch.rand((B, H), device="cuda")
+
+        attn = MultiheadAttention(D * H, H, kdim=Dk * H, vdim=Dv * H, batch_first=True).to("cuda")
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            o = attn(q, k, v, pos_q, pos_kv, slopes)
+        assert o.shape == q.shape
+
+        o.sum().backward()

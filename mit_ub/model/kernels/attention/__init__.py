@@ -1,5 +1,5 @@
 from .kernel import attention
-from .module import MultiheadSelfAttention
+from .module import MultiheadAttention
 
 
-__all__ = ["attention", "MultiheadSelfAttention"]
+__all__ = ["attention", "MultiheadAttention"]
