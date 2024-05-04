@@ -424,7 +424,7 @@ files = [
 
 [[package]]
 name = "deep-helpers"
-version = "0.1.dev56"
+version = "0.1.dev56+g85ab3ac"
 requires_python = ">=3.8"
 git = "https://github.com/TidalPaladin/deep-helpers.git"
 revision = "85ab3ac3051ba440c4a85e43dc3a86318adb1dd8"
@@ -754,7 +754,7 @@ files = [
 [[package]]
 name = "intel-openmp"
 version = "2021.4.0"
-summary = "Intel® OpenMP* Runtime Library"
+summary = "Intel速 OpenMP* Runtime Library"
 files = [
     {file = "intel_openmp-2021.4.0-py2.py3-none-macosx_10_15_x86_64.macosx_11_0_x86_64.whl", hash = "sha256:41c01e266a7fdb631a7609191709322da2bbf24b252ba763f125dd651bcc7675"},
     {file = "intel_openmp-2021.4.0-py2.py3-none-manylinux1_i686.whl", hash = "sha256:3b921236a38384e2016f0f3d65af6732cf2c12918087128a9163225451e776f2"},
@@ -1194,7 +1194,7 @@ files = [
 [[package]]
 name = "mkl"
 version = "2021.4.0"
-summary = "Intel® oneAPI Math Kernel Library"
+summary = "Intel速 oneAPI Math Kernel Library"
 dependencies = [
     "intel-openmp==2021.*",
     "tbb==2021.*",
@@ -1932,7 +1932,7 @@ files = [
 
 [[package]]
 name = "pytorch-lightning"
-version = "2.2.3"
+version = "2.2.4"
 requires_python = ">=3.8"
 summary = "PyTorch Lightning is the lightweight PyTorch wrapper for ML researchers. Scale your models. Write less boilerplate."
 dependencies = [
@@ -1947,8 +1947,8 @@ dependencies = [
     "typing-extensions>=4.4.0",
 ]
 files = [
-    {file = "pytorch-lightning-2.2.3.tar.gz", hash = "sha256:8bc606c3719b4546f122023ff47a146faf82a96a56cdfb79ac8a70b0ec905783"},
-    {file = "pytorch_lightning-2.2.3-py3-none-any.whl", hash = "sha256:7b80992367b95e9625457231b25c335d6b8a1f647c6bff10d09cc8a70050a7c5"},
+    {file = "pytorch-lightning-2.2.4.tar.gz", hash = "sha256:525b04ebad9900c3e3c2a12b3b462fe4f61ebe11fdb694716c3209f05b9b0fa8"},
+    {file = "pytorch_lightning-2.2.4-py3-none-any.whl", hash = "sha256:fd91d47e983a2cd743c5c8c3c3795bbd0f3b69d24be2172a2f9012d930701ff2"},
 ]
 
 [[package]]
@@ -2048,7 +2048,7 @@ files = [
 
 [[package]]
 name = "registry"
-version = "0.1.1.dev15"
+version = "0.1.1.dev15+g9eed0e5"
 requires_python = ">=3.7"
 git = "https://github.com/TidalPaladin/callable-registry.git"
 revision = "9eed0e5bd25711e905e5f166c7093b01fbc7143d"
@@ -2300,7 +2300,7 @@ files = [
 
 [[package]]
 name = "ssl-tasks"
-version = "0.1.dev8"
+version = "0.1.dev8+g55344ac"
 requires_python = ">=3.8"
 git = "https://github.com/TidalPaladin/ssl-tasks.git"
 revision = "55344ac4f0f08d7b4e65872ac63b17f7964ae76b"
@@ -2437,7 +2437,7 @@ dependencies = [
 
 [[package]]
 name = "torch-dicom"
-version = "0.1.dev67"
+version = "0.1.dev67+g10ed235"
 extras = ["datamodule"]
 requires_python = ">=3.11"
 git = "https://github.com/medcognetics/torch-dicom.git"
@@ -2548,7 +2548,7 @@ files = [
 
 [[package]]
 name = "triton-helpers"
-version = "0.1.dev15"
+version = "0.1.dev15+g7e07046"
 requires_python = ">=3.11"
 git = "https://github.com/TidalPaladin/triton-helpers.git"
 revision = "7e070460d39c7f94efbb36548f2ea67c1019b5e7"

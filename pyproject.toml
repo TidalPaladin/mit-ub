@@ -107,5 +107,5 @@ filterwarnings = [
 TRITON_DEBUG = "1"
 
 # Sample script config
-#[project.scripts]
-#foo = "project.cli.__main__:main"
+[project.scripts]
+train = "deep_helpers.cli:main"

@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from mit_ub.model.kernels.attention.kernel import attention
+from mit_ub.model.kernels.attention.module import MultiheadSelfAttention
 
 
 L: int = 32
@@ -30,10 +31,10 @@ HARD_SHAPE_PARAMS: Final = (
     pytest.param(1, 18, 10, D, 1, id=f"b=1,lq=18,lk=10,dhead={D},nhead=1"),
     pytest.param(2, L, L, D, 2, id=f"b=2,lq={L},lk={L},dhead={D},nhead=2"),
     pytest.param(2, 10, 10, D, 2, id=f"b=2,lq=10,lk=10,dhead={D},nhead=2"),
-    pytest.param(4, int(3.5 * L), L, 4 * D, 4, id=f"b=4,lq={int(3.5*L)},lk={4*L},dhead={4*D},nhead=4A"),
-    pytest.param(4, 2 * L, 4 * L, 4 * D, 4, id=f"b=4,lq={2*L},lk={4*L},dhead={4*D},nhead=4B"),
-    pytest.param(4, 2 * L, int(4.5 * L), 4 * D, 4, id=f"b=4,lq={2*L},lk={int(4.5*L)},dhead={4*D},nhead=4C"),
-    pytest.param(4, int(3.5 * L), 4 * L, 4 * D, 4, id=f"b=4,lq={int(3.5*L)},lk={4*L},dhead={4*D},nhead=4D"),
+    pytest.param(4, int(3.5 * L), L, 4 * D, 4, id=f"b=4,lq={int(3.5*L)},lk={4*L},dhead={4*D},nhead=4"),
+    pytest.param(4, 2 * L, 4 * L, 4 * D, 4, id=f"b=4,lq={2*L},lk={4*L},dhead={4*D},nhead=4"),
+    pytest.param(4, 2 * L, int(4.5 * L), 4 * D, 4, id=f"b=4,lq={2*L},lk={int(4.5*L)},dhead={4*D},nhead=4"),
+    pytest.param(4, int(3.5 * L), 4 * L, 4 * D, 4, id=f"b=4,lq={int(3.5*L)},lk={4*L},dhead={4*D},nhead=4"),
 )
 
 
@@ -64,16 +65,31 @@ def test_flash_attn_forward(b, lq, lk, dhead, nhead, full_precision, dtype, atol
 @pytest.mark.parametrize("b, lq, lk, dhead, nhead", HARD_SHAPE_PARAMS)
 @pytest.mark.parametrize("dpos", [2, 3], ids=lambda v: f"dpos={v}")
 @pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
-def test_flash_attn_forward_bias(b, lq, lk, dhead, nhead, dpos, dtype, atol, full_precision):
+@pytest.mark.parametrize("contiguous", [False], ids=lambda v: f"contiguous={v}")
+def test_flash_attn_forward_bias(b, lq, lk, dhead, nhead, dpos, dtype, atol, full_precision, contiguous):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
     torch.manual_seed(0)
 
-    q = torch.randn((b, nhead, lq, dhead), device="cuda", dtype=dtype)
-    k = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype)
-    v = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype)
-    pos_q = torch.randn((b, nhead, lq, dpos), device="cuda", dtype=dtype)
-    pos_k = torch.randn((b, nhead, lk, dpos), device="cuda", dtype=dtype)
+    def reshape_qkv(x):
+        return x.view(b, -1, nhead, dhead).movedim(-2, 1)
+
+    def reshape_pos(x):
+        return x.view(1, 1, -1, dpos).expand(b, nhead, -1, -1)
+
+    q = reshape_qkv(torch.randn((b, lq, dhead * nhead), device="cuda", dtype=dtype))
+    k = reshape_qkv(torch.randn((b, lk, dhead * nhead), device="cuda", dtype=dtype))
+    v = reshape_qkv(torch.randn((b, lk, dhead * nhead), device="cuda", dtype=dtype))
+    pos_q = reshape_pos(torch.randn((lq, dpos), device="cuda", dtype=dtype))
+    pos_k = reshape_pos(torch.randn((lk, dpos), device="cuda", dtype=dtype))
+
+    if contiguous:
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+        pos_q = pos_q.contiguous()
+        pos_k = pos_k.contiguous()
+
     slopes = torch.randint(-10, -1, (b, nhead), device="cuda", dtype=dtype).div_(10)
 
     bias = slopes[..., None, None] * (
@@ -119,16 +135,36 @@ def test_flash_attn_backward(b, lq, lk, dhead, nhead, dtype, atol, full_precisio
 
 @pytest.mark.parametrize("b, lq, lk, dhead, nhead", HARD_SHAPE_PARAMS)
 @pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
-def test_flash_attn_backward_bias(b, lq, lk, dhead, nhead, dtype, atol, full_precision):
+@pytest.mark.parametrize("contiguous", [False], ids=lambda v: f"contiguous={v}")
+def test_flash_attn_backward_bias(b, lq, lk, dhead, nhead, dtype, atol, full_precision, contiguous):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
     torch.manual_seed(0)
+    dpos = 2
 
-    q = torch.randn((b, nhead, lq, dhead), device="cuda", dtype=dtype, requires_grad=True)
-    k = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype, requires_grad=True)
-    v = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype, requires_grad=True)
-    pos_q = torch.randn((b, nhead, lq, 2), device="cuda", dtype=dtype)
-    pos_k = torch.randn((b, nhead, lk, 2), device="cuda", dtype=dtype)
+    def reshape_qkv(x):
+        return x.view(b, -1, nhead, dhead).movedim(-2, 1)
+
+    def reshape_pos(x):
+        return x.view(1, 1, -1, dpos).expand(b, nhead, -1, -1)
+
+    q = reshape_qkv(torch.randn((b, lq, dhead * nhead), device="cuda", dtype=dtype))
+    k = reshape_qkv(torch.randn((b, lk, dhead * nhead), device="cuda", dtype=dtype))
+    v = reshape_qkv(torch.randn((b, lk, dhead * nhead), device="cuda", dtype=dtype))
+    pos_q = reshape_pos(torch.randn((lq, dpos), device="cuda", dtype=dtype))
+    pos_k = reshape_pos(torch.randn((lk, dpos), device="cuda", dtype=dtype))
+
+    if contiguous:
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+        pos_q = pos_q.contiguous()
+        pos_k = pos_k.contiguous()
+
+    q.requires_grad = True
+    k.requires_grad = True
+    v.requires_grad = True
+
     slopes = torch.randint(-10, -1, (b, nhead), device="cuda", dtype=dtype).div_(10)
     bias = slopes[..., None, None] * (
         (pos_q[..., None, :] - pos_k[..., None, :, :]).pow(2).sum(-1).sqrt_().view(b, nhead, lq, lk)
@@ -229,3 +265,19 @@ def test_autocast(b, lq, lk, dhead, nhead, full_precision, dtype):
     torch.testing.assert_close(grad_v_baseline, grad_v_triton, rtol=0, atol=atol)
     torch.testing.assert_close(grad_k_baseline, grad_k_triton, rtol=0, atol=atol)
     torch.testing.assert_close(grad_q_baseline, grad_q_triton, rtol=0, atol=atol)
+
+
+def test_multihead_self_attention():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    torch.manual_seed(0)
+
+    B, H, L, D = 2, 8, 32, 16
+    x = torch.rand((B, L, D * H), device="cuda")
+    pos = torch.rand((B, H, L, 2), device="cuda")
+    slopes = -1 * torch.rand((B, H), device="cuda")
+
+    attn = MultiheadSelfAttention(D * H, H).to("cuda")
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        o = attn(x, pos, slopes)
+    assert o.shape == x.shape
