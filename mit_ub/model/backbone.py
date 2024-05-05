@@ -8,7 +8,7 @@ from einops.layers.torch import Rearrange
 from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 
-from .kernels.attention import MultiheadSelfAttention
+from .kernels.attention import MultiheadAttention
 from .pos_enc import RelativeFactorizedPosition
 
 
@@ -28,7 +28,7 @@ class TransformerBlock(nn.Module):
         self.nhead = nhead
 
         # Cross attention 1
-        self.self_attn = MultiheadSelfAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
@@ -51,7 +51,7 @@ class TransformerBlock(nn.Module):
         y = self.norm1(x)
         B, H = x.shape[0], self.nhead
         slopes = self.alibi.view(1, H).expand(B, -1).contiguous()
-        y = self.self_attn(y, pos, slopes, full_precision=full_precision, mask_threshold=mask_threshold)
+        y = self.self_attn(y, y, y, pos, pos, slopes, full_precision=full_precision, mask_threshold=mask_threshold)
         x += y
 
         # MLP
@@ -143,10 +143,10 @@ class ViT(nn.Module):
         # Patch embedding and positional encoding
         if is_3d := x.ndim == 5:
             x = self.patch_embed_3d(x)
-            # x += self.pos_enc_3d.from_grid(tokenized_size, B, proto=x, normalize=True)
+            x += self.pos_enc_3d.from_grid(tokenized_size, B, proto=x, normalize=True)
         else:
             x = self.patch_embed_2d(x)
-            # x += self.pos_enc_2d.from_grid(tokenized_size, B, proto=x, normalize=True)
+            x += self.pos_enc_2d.from_grid(tokenized_size, B, proto=x, normalize=True)
 
         # Position values for ALiBi
         # Either pos_enc_3d or pos_enc_2d can be used here
