@@ -31,7 +31,7 @@ fit:
           name: input
           modes:
             - "TRAIN"
-          queue_size: 4
+          queue_size: 8
           flush_interval: 1000
 
       - class_path: mit_ub.callbacks.LogInputCallback
@@ -40,28 +40,7 @@ fit:
           modes:
             - "VAL"
             - "TEST"
-          queue_size: 4
-
-      - class_path: mit_ub.callbacks.LogMAECallback
-        init_args:
-          name: input
-          modes:
-            - "TRAIN"
-          queue_size: 4
-          flush_interval: 1000
-
-      #- class_path: deep_helpers.callbacks.MultiTaskCallbackWrapper
-      #  init_args:
-      #    wrapped:
-      #      class_path: mit_ub.callbacks.LogMAECallback
-      #      init_args:
-      #        name: input
-      #        modes:
-      #          - "TRAIN"
-      #        queue_size: 4
-      #        flush_interval: 50
-      #    tasks:
-      #      - "mae"
+          queue_size: 8
 
     logger:
       class_path: pytorch_lightning.loggers.wandb.WandbLogger
@@ -70,12 +49,9 @@ fit:
         project: mit-ub
 
   model:
-    class_path: mit_ub.tasks.MAE
+    class_path: mit_ub.tasks.BreastTriage
     init_args:
       backbone: "vit-i1-p16-d512"
-      loss_includes_unmasked: false
-      mask_scale: 2
-      mask_ratio: 0.5
       optimizer_init:
         class_path: torch.optim.AdamW
         init_args:
@@ -95,22 +71,27 @@ fit:
           pct_start: 0.05
           three_phase: false
           total_steps: 250000
-      #checkpoint: /mnt/iscsi/rsna_final.ckpt
-      #strict_checkpoint: false
+      checkpoint: /mnt/storage/users/chase/models/mitub_vit.ckpt
+      strict_checkpoint: false
 
   data:
-    class_path: torch_dicom.preprocessing.datamodule.PreprocessedPNGDataModule
+    class_path: mit_ub.data.triage.PreprocessedPNGDataModule
     init_args:
       train_inputs: 
         - "/mnt/active_1/chase/data/optimam"
         - "/mnt/active_1/chase/data/medcog"
       val_inputs: /mnt/active_1/chase/data/val
       #train_sopuid_exclusions: /mnt/active_1/chase/data/train_density_exclude.csv
-      val_sopuid_exclusions: /mnt/active_1/chase/data/test_density_exclude.csv
+      #val_sopuid_exclusions: /mnt/active_1/chase/data/test_density_exclude.csv
       metadata_filenames:
         manifest: "manifest.csv"
-        #annotation: "autoannotation.csv"
+        annotation: "annotation.csv"
+      boxes_filename: "traces.csv"
+      boxes_extra_keys:
+        - "trait"
+        - "types"
       batch_size: 32
+      malign_weight: 0.25
       num_workers: 23
 
       train_transforms:

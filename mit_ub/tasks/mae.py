@@ -1,7 +1,6 @@
 from functools import partial
 from typing import Any, Dict, Optional, Tuple, cast
 
-import torch
 import torch.nn as nn
 from einops import rearrange
 from ssl_tasks.mae.task import MAE as MAEBase
@@ -49,10 +48,13 @@ class MAE(MAEBase):
         outputs_per_token = out_dim * patch_h * patch_w
         return nn.Conv2d(dim, outputs_per_token, kernel_size=1)
 
-    def create_token_mask(self, batch_size: int, device: torch.device = torch.device("cpu")) -> TokenMask:
+    def create_token_mask(self, x: Tensor) -> TokenMask:
+        size = x.shape[2:]
+        batch_size = x.shape[0]
+        device = x.device
         return TokenMask.create(
-            self.img_size,
-            cast(Any, self.backbone).patch_size_2d,
+            size,
+            self.backbone.patch_size[-len(size) :],
             batch_size,
             device=device,
             mask_ratio=self.mask_ratio,
@@ -63,7 +65,7 @@ class MAE(MAEBase):
         mask_hook = (
             self.backbone.register_mask_hook(partial(mask_fn, mask=mask), prepend=True) if mask is not None else None
         )
-        y = self.backbone(x)
+        y = self.backbone(x, mask_threshold=5.8)
         y = self.mae_head(y).contiguous()
 
         Hp, Wp = self.backbone.patch_size_2d

@@ -81,12 +81,11 @@ version = { source = "scm" }
 
 [tool.pdm.dev-dependencies]
 test = [
-  "pytest",
-  "pytest-mock",
-  "pytest-cov",
-  "pytest-env",
-  "coverage",
-  "pdbpp",
+    "pytest",
+    "pytest-mock",
+    "pytest-cov",
+    "pytest-env",
+    "coverage",
 ]
 quality = [
   "autoflake",

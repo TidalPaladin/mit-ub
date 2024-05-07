@@ -1,4 +1,5 @@
 from .mae import MAE
+from .triage import BreastTriage
 
 
-__all__ = ["MAE"]
+__all__ = ["MAE", "BreastTriage"]

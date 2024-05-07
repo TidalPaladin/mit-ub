@@ -45,7 +45,11 @@ class TransformerBlock(nn.Module):
         return torch.logspace(0, upper, self.nhead, base=2).reciprocal_().neg_()
 
     def forward(
-        self, x: Tensor, pos: Tensor | None = None, full_precision: bool = True, mask_threshold: float | None = None
+        self,
+        x: Tensor,
+        pos: Tensor | None = None,
+        full_precision: bool = True,
+        mask_threshold: float | None = None,
     ) -> Tensor:
         # Self attention
         y = self.norm1(x)
@@ -136,7 +140,7 @@ class ViT(nn.Module):
         patch_size = self.patch_size[-len(size) :]
         return tuple(s // p for s, p in zip(size, patch_size))
 
-    def forward(self, x: Tensor, reshape: bool = True) -> Tensor:
+    def forward(self, x: Tensor, reshape: bool = True, mask_threshold: float | None = None) -> Tensor:
         B, C, *original_size = x.shape
         tokenized_size = self.tokenized_size(*original_size)
 
@@ -160,7 +164,7 @@ class ViT(nn.Module):
 
         # Transformer blocks
         for block in self.blocks:
-            x = block(x, position)
+            x = block(x, position, mask_threshold=mask_threshold)
 
         if reshape and is_3d:
             x = rearrange(x, "b (d h w) c -> b c d h w", d=tokenized_size[0], h=tokenized_size[1], w=tokenized_size[2])
