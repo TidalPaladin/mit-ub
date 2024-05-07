@@ -191,24 +191,35 @@ def test_flash_attn_backward_bias(b, lq, lk, dhead, nhead, dtype, atol, full_pre
     torch.testing.assert_close(grad_q_baseline, grad_q_triton, rtol=0, atol=atol)
 
 
+@pytest.mark.parametrize(
+    "b, l, dhead, nhead",
+    [
+        pytest.param(1, 10, D, 1, id=f"b=1,l=10,dhead={D},nhead=1"),
+        pytest.param(1, 18, D, 1, id=f"b=1,l=18,dhead={D},nhead=1"),
+        pytest.param(2, L, D, 2, id=f"b=2,l={L},dhead={D},nhead=2"),
+        pytest.param(2, 10, D, 2, id=f"b=2,l=10,dhead={D},nhead=2"),
+    ],
+)
 @pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
-def test_mask_threshold(full_precision, dtype, atol):
+def test_mask_threshold_forward(b, l, dhead, nhead, dtype, atol, full_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
     torch.manual_seed(0)
 
-    b, nhead, dhead, dpos = 2, 2, 16, 3
-    l = lq = lk = 32
+    dpos = 2
+    lq = lk = l
     q = torch.randn((b, nhead, lq, dhead), device="cuda", dtype=dtype, requires_grad=True)
     k = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype, requires_grad=True)
     v = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype, requires_grad=True)
-    pos_q = torch.rand((b, nhead, lq, dpos), device="cuda", dtype=dtype)
-    pos_k = torch.rand((b, nhead, lk, dpos), device="cuda", dtype=dtype)
+    pos_q = torch.rand(*(b, nhead, lq, dpos), device="cuda", dtype=dtype)
+    pos_k = torch.rand(*(b, nhead, lk, dpos), device="cuda", dtype=dtype)
     slopes = torch.full((b, nhead), -1, device="cuda", dtype=dtype)
 
     # Q and K positions are on [0, 1]. Generate a mask and apply a shift to positions based on the mask
     threshold = 3
-    mask = torch.randint(0, 10, (b, nhead, l, 1), device="cuda", dtype=dtype)
+    groups = 5
+    atol *= groups
+    mask = torch.randint(0, groups, (b, nhead, l, 1), device="cuda", dtype=dtype)
     pos_q += mask * threshold
     pos_k += mask * threshold
 
@@ -222,8 +233,64 @@ def test_mask_threshold(full_precision, dtype, atol):
     triton_output = attention(q, k, v, pos_q, pos_k, slopes, full_precision=full_precision, mask_threshold=threshold)
     torch.testing.assert_close(baseline_output, triton_output, rtol=0, atol=atol)
 
-    # Trigger the backward but we won't check it in full
-    triton_output.sum().backward()
+
+@pytest.mark.parametrize(
+    "b, l, dhead, nhead",
+    [
+        pytest.param(1, 10, D, 1, id=f"b=1,l=10,dhead={D},nhead=1"),
+        pytest.param(1, 18, D, 1, id=f"b=1,l=18,dhead={D},nhead=1"),
+        pytest.param(2, L, D, 2, id=f"b=2,l={L},dhead={D},nhead=2"),
+        pytest.param(2, 10, D, 2, id=f"b=2,l=10,dhead={D},nhead=2"),
+    ],
+)
+@pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
+def test_mask_threshold_backward(b, l, dhead, nhead, dtype, atol, full_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    torch.manual_seed(0)
+
+    lq = lk = l
+    dpos = 2
+    q = torch.randn((b, nhead, lq, dhead), device="cuda", dtype=dtype, requires_grad=True)
+    k = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype, requires_grad=True)
+    v = torch.randn((b, nhead, lk, dhead), device="cuda", dtype=dtype, requires_grad=True)
+    pos_q = torch.rand((b, nhead, lq, dpos), device="cuda", dtype=dtype)
+    pos_k = torch.rand((b, nhead, lk, dpos), device="cuda", dtype=dtype)
+    slopes = torch.full((b, nhead), -1, device="cuda", dtype=dtype)
+
+    # Q and K positions are on [0, 1]. Generate a mask and apply a shift to positions based on the mask
+    threshold = 3
+    groups = 5
+    atol *= groups
+    mask = torch.randint(0, groups, (b, nhead, l, 1), device="cuda", dtype=dtype)
+    pos_q += mask * threshold
+    pos_k += mask * threshold
+
+    baseline_mask = mask == mask.swapdims(-1, -2)
+    bias = slopes[..., None, None] * (
+        (pos_q[..., None, :] - pos_k[..., None, :, :]).pow(2).sum(-1).sqrt_().view(b, nhead, lq, lk)
+    )
+    baseline_mask = torch.where(baseline_mask, bias, torch.tensor(float("-inf"), device="cuda", dtype=dtype))
+
+    # Baseline
+    o = F.scaled_dot_product_attention(q, k, v, attn_mask=baseline_mask)
+    o.sum().backward()
+    grad_q_baseline = q.grad
+    grad_k_baseline = k.grad
+    grad_v_baseline = v.grad
+
+    # Triton
+    q.grad = k.grad = v.grad = None
+    o = attention(q, k, v, pos_q, pos_k, slopes, full_precision=full_precision, mask_threshold=threshold)
+    o.sum().backward()
+    grad_q_triton = q.grad
+    grad_k_triton = k.grad
+    grad_v_triton = v.grad
+
+    # Test
+    torch.testing.assert_close(grad_v_baseline, grad_v_triton, rtol=0, atol=atol)
+    torch.testing.assert_close(grad_k_baseline, grad_k_triton, rtol=0, atol=atol)
+    torch.testing.assert_close(grad_q_baseline, grad_q_triton, rtol=0, atol=atol)
 
 
 @pytest.mark.parametrize("b, lq, lk, dhead, nhead", HARD_SHAPE_PARAMS)
