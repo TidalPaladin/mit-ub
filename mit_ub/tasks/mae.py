@@ -37,10 +37,6 @@ class MAE(MAEBase):
     def prepare_backbone(self, name: str) -> nn.Module:
         return BACKBONES.get(name).instantiate_with_metadata().fn
 
-    @property
-    def img_size(self) -> Tuple[int, int]:
-        return (512, 384)
-
     def create_head(self) -> nn.Module:
         dim = cast(Any, self.backbone).dim
         out_dim = cast(Any, self.backbone).in_channels
@@ -65,7 +61,7 @@ class MAE(MAEBase):
         mask_hook = (
             self.backbone.register_mask_hook(partial(mask_fn, mask=mask), prepend=True) if mask is not None else None
         )
-        y = self.backbone(x, mask_threshold=5.8)
+        y = self.backbone(x)
         y = self.mae_head(y).contiguous()
 
         Hp, Wp = self.backbone.patch_size_2d

@@ -7,6 +7,7 @@ from einops import rearrange
 from einops.layers.torch import Rearrange
 from torch import Tensor
 from torch.utils.hooks import RemovableHandle
+from ssl_tasks.tokens import TokenMask
 
 from .kernels.attention import MultiheadAttention
 from .pos_enc import RelativeFactorizedPosition
@@ -55,7 +56,7 @@ class TransformerBlock(nn.Module):
         y = self.norm1(x)
         B, H = x.shape[0], self.nhead
         slopes = self.alibi.view(1, H).expand(B, -1).contiguous()
-        y = self.self_attn(y, y, y, pos, pos, slopes, full_precision=full_precision, mask_threshold=mask_threshold)
+        y = self.self_attn(y, y, y, pos, pos, slopes, mask_threshold=mask_threshold)
         x += y
 
         # MLP
@@ -140,7 +141,15 @@ class ViT(nn.Module):
         patch_size = self.patch_size[-len(size) :]
         return tuple(s // p for s, p in zip(size, patch_size))
 
-    def forward(self, x: Tensor, reshape: bool = True, mask_threshold: float | None = None) -> Tensor:
+    def forward(
+        self, 
+        x: Tensor, 
+        reshape: bool = True, 
+        mask: TokenMask | None = None,
+        mask_fill_value: float | Tensor | None = None,
+        pos_mask_threshold: float | None = None,
+        full_precision: bool = True,
+    ) -> Tensor:
         B, C, *original_size = x.shape
         tokenized_size = self.tokenized_size(*original_size)
 
@@ -151,6 +160,8 @@ class ViT(nn.Module):
         else:
             x = self.patch_embed_2d(x)
             x += self.pos_enc_2d.from_grid(tokenized_size, B, proto=x, normalize=True)
+        if mask is not None:
+            x = mask.apply_to_tokens(x, fill_value=mask_fill_value)
 
         # Position values for ALiBi
         # Either pos_enc_3d or pos_enc_2d can be used here
@@ -160,11 +171,21 @@ class ViT(nn.Module):
             normalize=False,
             requires_grad=False,
         )
-        position = position.contiguous().view(1, 1, -1, len(tokenized_size)).expand(B, self.nhead, -1, -1)
+        if mask is not None:
+            position = position.view(1, -1, len(tokenized_size)).expand(B, -1, -1)
+            position = mask.apply_to_tokens(position, fill_value=mask_fill_value)
+            position = position.contiguous().view(B, 1, -1, len(tokenized_size)).expand(B, self.nhead, -1, -1)
+        else:
+            position = position.contiguous().view(1, 1, -1, len(tokenized_size)).expand(B, self.nhead, -1, -1)
 
         # Transformer blocks
         for block in self.blocks:
-            x = block(x, position, mask_threshold=mask_threshold)
+            x = block(x, position, mask_threshold=pos_mask_threshold, full_precision=full_precision)
+
+        if reshape and mask is not None and mask_fill_value is None:
+            raise ValueError(
+                "Cannot reshape with mask and no fill value. Either specify `reshape=False` or provide a `mask_fill_value`"
+            )
 
         if reshape and is_3d:
             x = rearrange(x, "b (d h w) c -> b c d h w", d=tokenized_size[0], h=tokenized_size[1], w=tokenized_size[2])

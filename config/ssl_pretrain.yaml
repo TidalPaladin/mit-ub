@@ -3,8 +3,8 @@ fit:
   float32_matmul_precision: medium
   trainer:
     accelerator: gpu
-    devices: 2
-    strategy: "ddp_find_unused_parameters_true"
+    devices: 1
+    #strategy: "ddp_find_unused_parameters_true"
     #precision: "bf16-mixed"
     precision: "16-mixed"
     max_steps: 250000
@@ -70,12 +70,12 @@ fit:
         project: mit-ub
 
   model:
-    class_path: mit_ub.tasks.MAE
+    class_path: mit_ub.tasks.JEPA
     init_args:
       backbone: "vit-i1-p16-d512"
-      loss_includes_unmasked: false
-      mask_scale: 2
-      mask_ratio: 0.5
+      #loss_includes_unmasked: false
+      #mask_scale: 2
+      #mask_ratio: 0.5
       optimizer_init:
         class_path: torch.optim.AdamW
         init_args:
