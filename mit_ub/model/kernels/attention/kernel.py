@@ -563,10 +563,6 @@ def _bwd_kernel(
         else:
             p = tl.math.exp2(qk * QK_SCALE - logit_scale[:, None]).to(do_p.dtype.element_ty)
 
-        if HAS_MASK_THRESH:
-            p = tl.where(p <= MASK_THRESH, to_tensor(0, p.dtype), p)
-        # tl.device_assert((p >= 0) & (p <= 1), "p must be in [0, 1]")
-
         # compute dL/dv = dL/do * do/dv = dL/do * p
         # Shape do = (MxD)
         # NOTE: `do` is pre-divided by `l`; no normalization here
