@@ -2,6 +2,7 @@ import math
 from typing import Any, Dict, Final, Tuple, cast
 
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 from torch import Tensor
@@ -836,7 +837,9 @@ def attention(
     r"""Computes scaled dot product attention using Flash Attention 2.
 
     Supports positional encodings for queries and keys that will be constructed using the Euclidean distance.
-    This is implemented such that the memory requirement is linear.
+    This is implemented such that the memory requirement is linear. When inputs are non-CUDA tensors, the function
+    will fallback to the baseline flash attention implementation in PyTorch. In this case there will be a quadratic memory
+    requirement to store the ALiBi mask.
 
     .. note::
         This implementation has been optimized on a RTX 3090 and may not be optimal on other GPUs.
@@ -857,4 +860,16 @@ def attention(
             for all tokens in an attention group, this can be used to implement attention masking while still retaining
             positional encodings
     """
-    return cast(Tensor, SDPA.apply(q, k, v, pos_q, pos_k, slopes, softmax_scale, full_precision, mask_threshold))
+    if q.is_cuda:
+        return cast(Tensor, SDPA.apply(q, k, v, pos_q, pos_k, slopes, softmax_scale, full_precision, mask_threshold))
+    else:
+        B, H, Lq, D = q.shape
+        _, _, Lk, _ = k.shape
+        if pos_q is not None and pos_k is not None and slopes is not None:
+            distance = (pos_q[..., None, :] - pos_k[..., None, :, :]).pow(2).sum(-1).sqrt_().view(B, H, Lq, Lk)
+            bias = slopes[..., None, None] * distance
+            if mask_threshold is not None:
+                bias = torch.where(distance > mask_threshold, bias, bias.new_tensor(float("-inf")))
+        else:
+            bias = None
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
