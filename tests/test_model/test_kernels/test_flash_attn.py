@@ -393,3 +393,63 @@ class TestModule:
         assert o.shape == q.shape
 
         o.sum().backward()
+
+
+def test_flash_attn_cpu():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    torch.manual_seed(0)
+    dtype = torch.float16
+    full_precision = True
+    contiguous = True
+    atol = 1e-2
+    dpos = 2
+    b, nhead, lq, lk, dhead = 2, 8, 32, 32, 16
+
+    def reshape_qkv(x):
+        return x.view(b, -1, nhead, dhead).movedim(-2, 1)
+
+    def reshape_pos(x):
+        return x.view(1, 1, -1, dpos).expand(b, nhead, -1, -1)
+
+    q = reshape_qkv(torch.randn((b, lq, dhead * nhead), dtype=dtype))
+    k = reshape_qkv(torch.randn((b, lk, dhead * nhead), dtype=dtype))
+    v = reshape_qkv(torch.randn((b, lk, dhead * nhead), dtype=dtype))
+    pos_q = reshape_pos(torch.randn((lq, dpos), dtype=dtype))
+    pos_k = reshape_pos(torch.randn((lk, dpos), dtype=dtype))
+
+    if contiguous:
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+        pos_q = pos_q.contiguous()
+        pos_k = pos_k.contiguous()
+
+    q.requires_grad = True
+    k.requires_grad = True
+    v.requires_grad = True
+
+    slopes = torch.randint(-10, -1, (b, nhead), dtype=dtype).div_(10)
+    bias = slopes[..., None, None] * (
+        (pos_q[..., None, :] - pos_k[..., None, :, :]).pow(2).sum(-1).sqrt_().view(b, nhead, lq, lk)
+    )
+
+    # Baseline
+    o = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
+    o.sum().backward()
+    grad_q_baseline = q.grad
+    grad_k_baseline = k.grad
+    grad_v_baseline = v.grad
+
+    # Triton
+    q.grad = k.grad = v.grad = None
+    o = attention(q, k, v, pos_q, pos_k, slopes, full_precision=full_precision)
+    o.sum().backward()
+    grad_q_triton = q.grad
+    grad_k_triton = k.grad
+    grad_v_triton = v.grad
+
+    # Test
+    torch.testing.assert_close(grad_v_baseline, grad_v_triton, rtol=0, atol=atol)
+    torch.testing.assert_close(grad_k_baseline, grad_k_triton, rtol=0, atol=atol)
+    torch.testing.assert_close(grad_q_baseline, grad_q_triton, rtol=0, atol=atol)
