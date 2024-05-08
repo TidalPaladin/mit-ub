@@ -1,16 +1,6 @@
 import pytest
 from torch import Tensor
 from mit_ub.model import BACKBONES, ViT
-from mit_ub.model.kernels.attention import attention
-
-
-@pytest.fixture
-def mock_attention(mocker):
-    def new_attention(q: Tensor, *args, **kwargs):
-        return q.clone()
-    m = mocker.Mock()
-    mocker.patch("mit_ub.model.kernel.attention", new=attention)
-    mocker.patch("mit_ub.model.module.attention", new=attention)
 
 
 @pytest.fixture
@@ -21,7 +11,7 @@ def optimizer_init():
     }
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def backbone():
     dim = 128
     BACKBONES(

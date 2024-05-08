@@ -2406,10 +2406,10 @@ files = [
 
 [[package]]
 name = "ssl-tasks"
-version = "0.1.dev9+gef2f140"
+version = "0.1.dev12+g660d43a"
 requires_python = ">=3.10,<3.12"
 git = "https://github.com/TidalPaladin/ssl-tasks.git"
-revision = "ef2f140715c2f8e1cb3220ba385e9ee18224176c"
+revision = "660d43a8130696f97c6dac6eeab86595082d685e"
 summary = ""
 dependencies = [
     "deep-helpers @ git+https://github.com/TidalPaladin/deep-helpers.git",

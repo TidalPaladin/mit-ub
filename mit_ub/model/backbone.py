@@ -42,6 +42,7 @@ class TransformerBlock(nn.Module):
 
         self.register_buffer("alibi", self.init_alibi(alibi_upper))
 
+    @torch.no_grad()
     def init_alibi(self, upper: int) -> Tensor:
         return torch.logspace(0, upper, self.nhead, base=2).reciprocal_().neg_()
 
@@ -57,7 +58,7 @@ class TransformerBlock(nn.Module):
         B, H = x.shape[0], self.nhead
         slopes = self.alibi.view(1, H).expand(B, -1).contiguous()
         y = self.self_attn(y, y, y, pos, pos, slopes, mask_threshold=mask_threshold)
-        x += y
+        x = x + y
 
         # MLP
         y = self.norm2(x)
@@ -65,7 +66,7 @@ class TransformerBlock(nn.Module):
         y = self.activation(y)
         y = self.dropout(y)
         y = self.linear2(y)
-        x += y
+        x = x + y
 
         return x
 
@@ -163,20 +164,8 @@ class ViT(nn.Module):
         if mask is not None:
             x = mask.apply_to_tokens(x, fill_value=mask_fill_value)
 
-        # Position values for ALiBi
-        # Either pos_enc_3d or pos_enc_2d can be used here
-        position = self.pos_enc_3d.create_grid(
-            tokenized_size,
-            proto=x,
-            normalize=False,
-            requires_grad=False,
-        )
-        if mask is not None:
-            position = position.view(1, -1, len(tokenized_size)).expand(B, -1, -1)
-            position = mask.apply_to_tokens(position, fill_value=mask_fill_value)
-            position = position.contiguous().view(B, 1, -1, len(tokenized_size)).expand(B, self.nhead, -1, -1)
-        else:
-            position = position.contiguous().view(1, 1, -1, len(tokenized_size)).expand(B, self.nhead, -1, -1)
+        position = self.create_alibi_positions(x, tokenized_size, mask, mask_fill_value, normalize=True)
+        position = position.expand(-1, self.nhead, -1, -1)
 
         # Transformer blocks
         for block in self.blocks:
@@ -193,6 +182,51 @@ class ViT(nn.Module):
             x = rearrange(x, "b (h w) c -> b c h w", h=tokenized_size[0], w=tokenized_size[1])
 
         return x
+
+    @torch.no_grad()
+    def create_alibi_positions(
+        self, 
+        tokens: Tensor, 
+        tokenized_size: Sequence[int],
+        mask: TokenMask | None = None,
+        mask_fill_value: float | Tensor | None = None,
+        normalize: bool = False,
+    ) -> Tensor:
+        r"""Create position values for ALiBi
+
+        Args:
+            tokens: Input tokens. Used only as a proto to extract device info from
+            tokenized_size: Tokenized size of the input
+            mask: Optional token mask
+            mask_fill_value: Fill value for the mask, or ``None`` to drop masked tokens.
+            normalize: Whether to normalize the position values to the range :math:`[-1, 1]`
+
+        Shapes:
+            - Output: :math:`(B, 1, L, C)` where
+                - B: Batch size
+                - L: Number of tokens
+                - C: Number of spatial dimensions
+
+        Returns:
+            ALiBi position values
+        """
+        # Position values for ALiBi
+        # Either pos_enc_3d or pos_enc_2d can be used here
+        B = tokens.shape[0]
+        position = self.pos_enc_3d.create_grid(
+            tokenized_size,
+            proto=tokens,
+            normalize=normalize,
+            requires_grad=False,
+        )
+        if mask is not None:
+            position = position.view(1, -1, len(tokenized_size)).expand(B, -1, -1)
+            position = mask.apply_to_tokens(position, fill_value=mask_fill_value)
+            position = position.contiguous().view(B, 1, -1, len(tokenized_size))
+        else:
+            position = position.contiguous().view(1, 1, -1, len(tokenized_size)).expand(B, -1, -1, -1)
+
+        return position
 
     def register_mask_hook(self, func: Callable, *args, **kwargs) -> RemovableHandle:
         r"""Register a token masking hook to be applied after the patch embedding step.

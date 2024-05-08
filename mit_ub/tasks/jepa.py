@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set, cast, Tuple
 from copy import deepcopy
 
 import torch
@@ -9,7 +9,7 @@ from deep_helpers.structs import State
 from deep_helpers.tasks import Task
 from torch import Tensor
 from functools import partial
-from ..model import BACKBONES
+from ..model import BACKBONES, TransformerBlock, ViT
 
 from ssl_tasks.tokens import TokenMask
 
@@ -60,10 +60,26 @@ class JEPA(Task):
         assert self.target_ratio > 0
         self.ema_alpha = ema_alpha
 
-        self.backbone = self.prepare_backbone(backbone)
+        self.backbone = cast(ViT, self.prepare_backbone(backbone))
         self.ema_backbone = deepcopy(self.backbone)
         self.jepa_loss = nn.MSELoss()
         self.jepa_query = nn.Parameter(torch.randn(1, 1, self.backbone.dim))
+
+        predictor_depth = 4
+        predictor_dim_ff = self.backbone.dim
+        self.jepa_predictor = nn.ModuleList(
+            [
+                TransformerBlock(
+                    self.backbone.dim, 
+                    self.backbone.nhead, 
+                    predictor_dim_ff, 
+                    dropout=0.1, 
+                    activation=nn.GELU(), 
+                    alibi_upper=i,
+                ) 
+                for i in range(predictor_depth)
+            ]
+        )
 
     def prepare_backbone(self, name: str) -> nn.Module:
         return BACKBONES.get(name).instantiate_with_metadata().fn
@@ -100,13 +116,56 @@ class JEPA(Task):
         r"""Gets a MetricCollection for a given state"""
         return tm.MetricCollection({})
 
-    def forward(
-        self,
-        x: Tensor,
-        mask: Optional[TokenMask] = None,
-    ) -> Dict[str, Tensor]:
-        x = self.backbone(x, mask=mask, mask_fill_value=None, reshape=False)
-        return {"jepa": x}
+    def forward(self, x: Tensor, context_mask: TokenMask, target_mask: TokenMask) -> Dict[str, Tensor]:
+        # Run encoder on context and broadcast back to full size with 0 padding
+        context: Tensor = self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
+        context = context_mask.restore_tokens(context, 0)
+
+        # Create empty queries w/ position encoding that forms the initial predictor input
+        B, _, D = context.shape
+        tokenized_size = self.backbone.tokenized_size(*x.shape[2:])
+        if is_3d := x.ndim == 5:
+            query = self.backbone.pos_enc_3d.from_grid(tokenized_size, B, proto=context, normalize=True, requires_grad=False)
+        else:
+            query = self.backbone.pos_enc_2d.from_grid(tokenized_size, B, proto=context, normalize=True, requires_grad=False)
+        query = query.contiguous()
+        query += self.jepa_query.type_as(query)
+
+        # Generate full size ALiBi position encodings for the queries
+        positions = self.backbone.create_alibi_positions(query, tokenized_size, normalize=False).view(B, -1, len(tokenized_size))
+
+        # Use xor mask to inject encoder context into queries that aren't part of the target mask.
+        # Query now contains context only at locations that are not part of the target.
+        with torch.no_grad():
+            xor_mask = (context_mask.mask ^ target_mask.mask).unsqueeze_(-1)
+        query = torch.where(xor_mask, query, context)
+
+        # Create a context or target mask. 
+        # Since context and target may overlap, we may end up with an inconsistent number of tokens 
+        # for each example in the batch. To resolve this we will pad to match the largest number 
+        # of tokens in an example, and adjust the ALiBi positions such that these padding tokens 
+        # are masked in the predictor.
+        mask = (context_mask.mask | target_mask.mask)
+        mask = TokenMask(mask, context_mask.size, context_mask.patch_size)
+        query = mask.apply_to_tokens(query, fill_value=None)
+        assert False
+
+        # Do the same to the ALiBi position encodings
+        positions = mask.apply_to_tokens(positions, fill_value=None)
+        assert query.shape[:2] == positions.shape[:2]
+
+        # Run the queries and ALiBi positions through the predictor
+        B, L = query.shape[:2]
+        position = positions.view(B, 1, L, -1).expand(-1, self.backbone.nhead, -1, -1)
+        for block in self.jepa_predictor:
+            block = cast(TransformerBlock, block)
+            query = block(query, position)
+
+        # Extract only the target queries from the full set of queries
+        query = mask.restore_tokens(query, 0)
+        query = target_mask.apply_to_tokens(query, fill_value=None)
+
+        return {"jepa": query}
 
     @torch.no_grad()
     def update_ema(self):
@@ -122,6 +181,7 @@ class JEPA(Task):
         metrics: Optional[tm.MetricCollection] = None,
     ) -> Dict[str, Any]:
         x: Tensor = batch["img"]
+        torch.autograd.set_detect_anomaly(True)
 
         # generate context and target masks
         context_mask = self.create_context_mask(x)
@@ -132,51 +192,20 @@ class JEPA(Task):
             target: Tensor = self.ema_backbone(x, reshape=False)
             target = target_mask.apply_to_tokens(target, fill_value=None)
 
-        predictor_in = self.prepare_predictor_input(x, context_mask, target_mask)
+        # generate predictions by encoding the context and then running the encoded context
+        # plus the positional target queries through the predictor
+        pred: Tensor = self(x, context_mask, target_mask)["jepa"]
 
-
-        loss = self.jepa_loss(...)
-
-
-
+        assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
+        loss = self.jepa_loss(pred, target)
 
         output = {
-            "masked": masked_img,
-            "jepa_pred": jepa_pred,
-            "jepa_true": jepa_true,
             "log": {
                 "loss_jepa": loss,
             },
         }
 
         return output
-
-    def prepare_predictor_input(self, x: Tensor, context_mask: TokenMask, target_mask: TokenMask) -> Tensor:
-        # Run encoder on context
-        context: Tensor = self(x, context_mask)["jepa"]
-
-        # Create positional embeddings and apply target mask
-        B, _, D = context.shape
-        tokenized_size = self.backbone.tokenized_size(*x.shape[2:])
-        if is_3d := x.ndim == 5:
-            pos_emb = self.backbone.pos_enc_3d.from_grid(tokenized_size, B, proto=context, normalize=True)
-        else:
-            pos_emb = self.backbone.pos_enc_2d.from_grid(tokenized_size, B, proto=context, normalize=True)
-        query = target_mask.apply_to_tokens(pos_emb, fill_value=None) + self.jepa_query.type_as(pos_emb)
-
-        # Update queries that intersect the context with the encoded context
-        xor_mask = (context_mask.mask ^ target_mask.mask).unsqueeze_(-1)
-        xor_mask = context_mask.apply_to_tokens(xor_mask, fill_value=None).squeeze_(-1)
-        import pdb; pdb.set_trace()
-        query[intersection_mask_target] = context[intersection_mask_context]
-
-        # Combine queries with the difference of the target and context
-        diff_mask = (context_mask.mask & (~target_mask.mask))
-        diff_mask = context_mask.apply_to_tokens(diff_mask.unsqueeze_(-1), fill_value=None).squeeze_(-1)
-        diff_mask = TokenMask(diff_mask, context_mask.size, context_mask.patch_size)
-        query[diff_mask] = target[diff_mask]
-
-        return x
 
     @torch.no_grad()
     def predict_step(self, batch: Any, *args, **kwargs) -> Dict[str, Any]:

@@ -21,14 +21,8 @@ class TestJEPA:
 
     def test_fit(self, task, datamodule, logger):
         trainer = pl.Trainer(
+            accelerator="cpu",
             fast_dev_run=True,
             logger=logger,
         )
         trainer.fit(task, datamodule=datamodule)
-
-    def test_predict(self, task, datamodule, logger):
-        trainer = pl.Trainer(
-            fast_dev_run=True,
-            logger=logger,
-        )
-        trainer.predict(task, datamodule=datamodule)

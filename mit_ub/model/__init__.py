@@ -1,6 +1,6 @@
 from registry import Registry
 
-from .backbone import ViT
+from .backbone import ViT, TransformerBlock
 
 
 BACKBONES = Registry("backbones")
@@ -16,4 +16,4 @@ BACKBONES(
     dropout=0.1,
 )
 
-__all__ = ["BACKBONES", "ViT"]
+__all__ = ["BACKBONES", "ViT", "TransformerBlock"]
