@@ -68,6 +68,14 @@ def euclidean_distance_inner(
 
         # Update accumulator -> diag(a @ a.T) - 2 * a @ b + diag(b @ b.T)
         result = diag_a[:, None] - 2 * ab + diag_b[None, :]
+
+        # Sometimes inf -> nan happens, so fix that
+        result = tl.where(
+            tl.math.isnan(result),
+            tl.full((BLOCK_M, BLOCK_N), float("inf"), result.dtype),
+            result,
+        )
+        # Sometimes small negative values are returned, so fix that
         result = tl.maximum(result, 0.0)
 
     if SQRT:

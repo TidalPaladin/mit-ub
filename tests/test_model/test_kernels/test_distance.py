@@ -10,6 +10,7 @@ def reference_forward(a, b, c=None):
     return func.forward(a, b, c)
 
 
+@pytest.mark.cuda
 @pytest.mark.slow
 @pytest.mark.parametrize("method", ["matmul", "matmul-nodiag"])
 @pytest.mark.parametrize("with_self", [False, True], ids=["cross", "self"])
@@ -34,8 +35,6 @@ def reference_forward(a, b, c=None):
 def test_euclidean_distance_forward(
     dtype: torch.dtype, tol: float, k: int, method: str, with_self: bool, L1: int, L2: int
 ):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
     torch.manual_seed(0)
 
     a = torch.randn((L1, k), device="cuda", dtype=dtype)
@@ -47,11 +46,10 @@ def test_euclidean_distance_forward(
     torch.testing.assert_close(triton_output, torch_output, rtol=0, atol=tol)
 
 
+@pytest.mark.cuda
 @pytest.mark.slow
 @pytest.mark.parametrize("method", ["matmul", "matmul-nodiag"])
 def test_euclidean_distance_init_accumulator(method: str):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
     torch.manual_seed(0)
 
     k = 3
@@ -65,3 +63,14 @@ def test_euclidean_distance_init_accumulator(method: str):
     triton_output = euclidean_distance(a, b, c, method=method)
     assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0)
     assert triton_output[0, 0] == float("inf")
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("method", ["matmul", "matmul-nodiag"])
+def test_euclidean_distance_infinity(method):
+    torch.manual_seed(0)
+
+    a = torch.full((2, 2), float("inf"), device="cuda", dtype=torch.float16)
+    b = torch.randn((2, 2), device="cuda", dtype=torch.float16)
+    o = euclidean_distance(a, b, method=method)
+    assert o.isinf().all()

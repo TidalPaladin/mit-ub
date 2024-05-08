@@ -98,6 +98,7 @@ quality = [
 markers = [
   "ci_skip",
   "slow",
+  "cuda",
 ]
 filterwarnings = [
   "ignore:.*Reducing precision for BF16 inputs is slower than full precision.*:UserWarning",
