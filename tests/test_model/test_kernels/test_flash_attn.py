@@ -46,6 +46,7 @@ DATA_TYPE_PARAMS: Final = (
 )
 
 
+@pytest.mark.cuda
 @pytest.mark.parametrize("b, lq, lk, dhead, nhead", EASY_SHAPE_PARAMS + HARD_SHAPE_PARAMS)
 @pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
 def test_flash_attn_forward(b, lq, lk, dhead, nhead, full_precision, dtype, atol):
@@ -62,13 +63,12 @@ def test_flash_attn_forward(b, lq, lk, dhead, nhead, full_precision, dtype, atol
     torch.testing.assert_close(baseline_output, triton_output, rtol=0, atol=atol)
 
 
+@pytest.mark.cuda
 @pytest.mark.parametrize("b, lq, lk, dhead, nhead", HARD_SHAPE_PARAMS)
 @pytest.mark.parametrize("dpos", [2, 3], ids=lambda v: f"dpos={v}")
 @pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
 @pytest.mark.parametrize("contiguous", [False], ids=lambda v: f"contiguous={v}")
 def test_flash_attn_forward_bias(b, lq, lk, dhead, nhead, dpos, dtype, atol, full_precision, contiguous):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
     torch.manual_seed(0)
 
     def reshape_qkv(x):
@@ -101,11 +101,10 @@ def test_flash_attn_forward_bias(b, lq, lk, dhead, nhead, dpos, dtype, atol, ful
     torch.testing.assert_close(baseline_output, triton_output, rtol=0, atol=atol)
 
 
+@pytest.mark.cuda
 @pytest.mark.parametrize("b, lq, lk, dhead, nhead", HARD_SHAPE_PARAMS)
 @pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
 def test_flash_attn_backward(b, lq, lk, dhead, nhead, dtype, atol, full_precision):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
     torch.manual_seed(0)
 
     q = torch.randn((b, nhead, lq, dhead), device="cuda", dtype=dtype, requires_grad=True)
@@ -133,12 +132,11 @@ def test_flash_attn_backward(b, lq, lk, dhead, nhead, dtype, atol, full_precisio
     torch.testing.assert_close(grad_v_baseline, grad_v_triton, rtol=0, atol=atol)
 
 
+@pytest.mark.cuda
 @pytest.mark.parametrize("b, lq, lk, dhead, nhead", HARD_SHAPE_PARAMS)
 @pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
 @pytest.mark.parametrize("contiguous", [False], ids=lambda v: f"contiguous={v}")
 def test_flash_attn_backward_bias(b, lq, lk, dhead, nhead, dtype, atol, full_precision, contiguous):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
     torch.manual_seed(0)
     dpos = 2
 
@@ -191,6 +189,7 @@ def test_flash_attn_backward_bias(b, lq, lk, dhead, nhead, dtype, atol, full_pre
     torch.testing.assert_close(grad_q_baseline, grad_q_triton, rtol=0, atol=atol)
 
 
+@pytest.mark.cuda
 @pytest.mark.parametrize(
     "b, l, dhead, nhead",
     [
@@ -202,8 +201,6 @@ def test_flash_attn_backward_bias(b, lq, lk, dhead, nhead, dtype, atol, full_pre
 )
 @pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
 def test_mask_threshold_forward(b, l, dhead, nhead, dtype, atol, full_precision):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
     torch.manual_seed(0)
 
     dpos = 2
@@ -234,6 +231,7 @@ def test_mask_threshold_forward(b, l, dhead, nhead, dtype, atol, full_precision)
     torch.testing.assert_close(baseline_output, triton_output, rtol=0, atol=atol)
 
 
+@pytest.mark.cuda
 @pytest.mark.parametrize(
     "b, l, dhead, nhead",
     [
@@ -245,8 +243,6 @@ def test_mask_threshold_forward(b, l, dhead, nhead, dtype, atol, full_precision)
 )
 @pytest.mark.parametrize("full_precision, dtype, atol", DATA_TYPE_PARAMS)
 def test_mask_threshold_backward(b, l, dhead, nhead, dtype, atol, full_precision):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
     torch.manual_seed(0)
 
     lq = lk = l
@@ -293,12 +289,11 @@ def test_mask_threshold_backward(b, l, dhead, nhead, dtype, atol, full_precision
     torch.testing.assert_close(grad_q_baseline, grad_q_triton, rtol=0, atol=atol)
 
 
+@pytest.mark.cuda
 @pytest.mark.parametrize("b, lq, lk, dhead, nhead", HARD_SHAPE_PARAMS)
 @pytest.mark.parametrize("full_precision", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_autocast(b, lq, lk, dhead, nhead, full_precision, dtype):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
     torch.manual_seed(0)
     atol = 0.05
 
@@ -336,58 +331,73 @@ def test_autocast(b, lq, lk, dhead, nhead, full_precision, dtype):
 
 class TestModule:
 
-    def test_self_attention(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA is not available")
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    def test_self_attention(self, device):
         torch.manual_seed(0)
 
         B, H, L, D = 2, 8, 32, 16
-        x = torch.randn((B, L, D * H), device="cuda", requires_grad=True)
-        pos = torch.randn((B, H, L, 2), device="cuda")
-        slopes = -1 * torch.rand((B, H), device="cuda")
+        x = torch.randn((B, L, D * H), device=device, requires_grad=True)
+        pos = torch.randn((B, H, L, 2), device=device)
+        slopes = -1 * torch.rand((B, H), device=device)
 
-        attn = MultiheadAttention(D * H, H, batch_first=True).to("cuda")
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
+        attn = MultiheadAttention(D * H, H, batch_first=True).to(device)
+        with torch.autocast(device_type=device, dtype=torch.float16):
             o = attn(x, x, x, pos, pos, slopes)
         assert o.shape == x.shape
 
-        x.sum().backward()
+        o.sum().backward()
 
-    def test_cross_attention(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA is not available")
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    def test_cross_attention(self, device):
         torch.manual_seed(0)
 
         B, H, L, D = 2, 8, 32, 16
-        q = torch.randn((B, L, D * H), device="cuda", requires_grad=True)
-        kv = torch.randn((B, L, D * H), device="cuda", requires_grad=True)
-        pos_q = torch.randn((B, H, L, 2), device="cuda")
-        pos_kv = torch.randn((B, H, L, 2), device="cuda")
-        slopes = -1 * torch.rand((B, H), device="cuda")
+        q = torch.randn((B, L, D * H), device=device, requires_grad=True)
+        kv = torch.randn((B, L, D * H), device=device, requires_grad=True)
+        pos_q = torch.randn((B, H, L, 2), device=device)
+        pos_kv = torch.randn((B, H, L, 2), device=device)
+        slopes = -1 * torch.rand((B, H), device=device)
 
-        attn = MultiheadAttention(D * H, H, batch_first=True).to("cuda")
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
+        attn = MultiheadAttention(D * H, H, batch_first=True).to(device)
+        with torch.autocast(device_type=device, dtype=torch.float16):
             o = attn(q, kv, kv, pos_q, pos_kv, slopes)
         assert o.shape == q.shape
 
         o.sum().backward()
 
-    def test_cross_attention_qkv_dim_diff(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA is not available")
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    def test_cross_attention_qkv_dim_diff(self, device):
         torch.manual_seed(0)
 
         B, H, L, D = 2, 8, 32, 16
         Dk = 12
         Dv = 14
-        q = torch.randn((B, L, D * H), device="cuda", requires_grad=True)
-        k = torch.randn((B, L, Dk * H), device="cuda", requires_grad=True)
-        v = torch.randn((B, L, Dv * H), device="cuda", requires_grad=True)
-        pos_q = torch.randn((B, H, L, 2), device="cuda")
-        pos_kv = torch.randn((B, H, L, 2), device="cuda")
-        slopes = -1 * torch.rand((B, H), device="cuda")
+        q = torch.randn((B, L, D * H), device=device, requires_grad=True)
+        k = torch.randn((B, L, Dk * H), device=device, requires_grad=True)
+        v = torch.randn((B, L, Dv * H), device=device, requires_grad=True)
+        pos_q = torch.randn((B, H, L, 2), device=device)
+        pos_kv = torch.randn((B, H, L, 2), device=device)
+        slopes = -1 * torch.rand((B, H), device=device)
 
-        attn = MultiheadAttention(D * H, H, kdim=Dk * H, vdim=Dv * H, batch_first=True).to("cuda")
+        attn = MultiheadAttention(D * H, H, kdim=Dk * H, vdim=Dv * H, batch_first=True).to(device)
         with torch.autocast(device_type="cuda", dtype=torch.float16):
             o = attn(q, k, v, pos_q, pos_kv, slopes)
         assert o.shape == q.shape
@@ -396,8 +406,6 @@ class TestModule:
 
 
 def test_flash_attn_cpu():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
     torch.manual_seed(0)
     dtype = torch.float16
     full_precision = True
@@ -453,3 +461,40 @@ def test_flash_attn_cpu():
     torch.testing.assert_close(grad_v_baseline, grad_v_triton, rtol=0, atol=atol)
     torch.testing.assert_close(grad_k_baseline, grad_k_triton, rtol=0, atol=atol)
     torch.testing.assert_close(grad_q_baseline, grad_q_triton, rtol=0, atol=atol)
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param("cuda", marks=pytest.mark.cuda),
+    ],
+)
+def test_mask_threshold_infinity(device):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    torch.manual_seed(0)
+    dtype = torch.float16
+    atol = 1e-2
+    dpos = 2
+    b, nhead, lq, lk, dhead = 2, 8, 32, 32, 16
+
+    q = torch.randn((b, nhead, lq, dhead), device=device, dtype=dtype, requires_grad=True)
+    k = torch.randn((b, nhead, lk, dhead), device=device, dtype=dtype, requires_grad=True)
+    v = torch.randn((b, nhead, lk, dhead), device=device, dtype=dtype, requires_grad=True)
+    pos_q = torch.rand(*(b, nhead, lq, dpos), device=device, dtype=dtype)
+    pos_k = torch.rand(*(b, nhead, lk, dpos), device=device, dtype=dtype)
+    slopes = torch.full((b, nhead), -1, device=device, dtype=dtype)
+    pos_q[..., -1, :] = float("inf")
+    pos_k[..., -1, :] = float("inf")
+
+    baseline = attention(
+        q[..., :-1, :],
+        k[..., :-1, :],
+        v[..., :-1, :],
+        pos_q[..., :-1, :],
+        pos_k[..., :-1, :],
+        slopes,
+    )
+    actual = attention(q, k, v, pos_q, pos_k, slopes)
+    torch.testing.assert_close(baseline, actual[..., :-1, :], rtol=0, atol=atol)
