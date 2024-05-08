@@ -236,15 +236,13 @@ def _fwd_kernel(
 
         # Compute scaling constant alpha and rescale the previous contributions, updating the maximum logit
         alpha = tl.math.exp2(query_i_maxdot - query_i_maxdot_new).to(ACCUMULATOR_DTYPE)
-        if HAS_MASK_THRESH:
-            alpha = tl.where(tl.math.isnan(alpha), to_tensor(1, alpha.dtype), alpha)
+        alpha = tl.where(tl.math.isnan(alpha), to_tensor(1, alpha.dtype), alpha)
         tl.device_assert((alpha >= 0) & (alpha <= 1), "alpha must be in [0, 1]")
         query_i_maxdot = query_i_maxdot_new
 
         # Compute the softmax numerator for each key, applying the maximum logit offset to avoid numerical overflow
         p = tl.math.exp2(qk - query_i_maxdot_new[:, None])
-        if HAS_MASK_THRESH:
-            p = tl.where(tl.math.isnan(p), to_tensor(0, p.dtype), p)
+        p = tl.where(tl.math.isnan(p), to_tensor(0, p.dtype), p)
         p = p.to(PROB_DTYPE)
         tl.device_assert((p >= 0) & (p <= 1), "p must be in [0, 1]")
 
@@ -843,6 +841,10 @@ def attention(
 
     .. note::
         This implementation has been optimized on a RTX 3090 and may not be optimal on other GPUs.
+
+    .. note::
+        Passing ``float('inf')`` to a positional encoding will result in that token being masked out in the attention
+        computation, regardless of the value of the mask threshold.
 
     Args:
         q: Query tensor of shape `(B, H, Lq, D)`
