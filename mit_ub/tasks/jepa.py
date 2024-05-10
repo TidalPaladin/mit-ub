@@ -3,6 +3,7 @@ from typing import Any, Dict, Optional, Set, cast, Tuple
 from copy import deepcopy
 
 import torch
+import numpy as np
 import torch.nn as nn
 import torchmetrics as tm
 from deep_helpers.structs import State
@@ -12,11 +13,7 @@ from functools import partial
 from ..model import BACKBONES, TransformerBlock, ViT
 
 from ssl_tasks.tokens import TokenMask
-
-
-def mask_fn(module: nn.Module, args: Any, output: Tensor, mask: TokenMask) -> Tensor:
-    output = mask.apply_to_tokens(output, fill_value=None)
-    return output
+from ssl_tasks.contrastive.loss import PointwiseContrastiveEmbeddingLoss
 
 
 class JEPA(Task):
@@ -27,7 +24,8 @@ class JEPA(Task):
         context_scale: int = 4,
         target_ratio: float = 0.25,
         target_scale: int = 2,
-        ema_alpha: float = 0.999,
+        ema_alpha: float = 0.95,
+        linear_probe: bool = True,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -62,8 +60,14 @@ class JEPA(Task):
 
         self.backbone = cast(ViT, self.prepare_backbone(backbone))
         self.ema_backbone = deepcopy(self.backbone)
+        for p in self.ema_backbone.parameters():
+            p.requires_grad = False
+
+        #self.context_norm = nn.LayerNorm(self.backbone.dim, elementwise_affine=False)
+        self.context_norm = nn.Identity()
         self.jepa_loss = nn.MSELoss()
-        self.jepa_query = nn.Parameter(torch.randn(1, 1, self.backbone.dim))
+        self.jepa_query = nn.Parameter(torch.empty(1, 1, self.backbone.dim))
+        torch.nn.init.trunc_normal_(self.jepa_query, mean=0, std=1)
 
         predictor_depth = 4
         predictor_dim_ff = self.backbone.dim
@@ -80,6 +84,15 @@ class JEPA(Task):
                 for i in range(predictor_depth)
             ]
         )
+        self.contrastive_loss = PointwiseContrastiveEmbeddingLoss()
+
+        # linear probe
+        if linear_probe:
+            self.linear_probe = nn.Linear(self.backbone.dim, 1)
+            self.linear_probe_loss = nn.BCEWithLogitsLoss()
+        else:
+            self.linear_probe = None
+            self.linear_probe_loss = None
 
     def prepare_backbone(self, name: str) -> nn.Module:
         return BACKBONES.get(name).instantiate_with_metadata().fn
@@ -114,11 +127,11 @@ class JEPA(Task):
 
     def create_metrics(self, state: State) -> tm.MetricCollection:
         r"""Gets a MetricCollection for a given state"""
-        return tm.MetricCollection({})
+        return tm.MetricCollection({"probe_acc": tm.Accuracy(task="binary")})
 
     def forward(self, x: Tensor, context_mask: TokenMask, target_mask: TokenMask) -> Dict[str, Tensor]:
         # Run encoder on context and broadcast back to full size with 0 padding
-        context: Tensor = self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
+        context: Tensor = self.context_norm(self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False))
         context = context_mask.restore_tokens(context, 0)
 
         # Create empty queries w/ position encoding that forms the initial predictor input
@@ -148,10 +161,9 @@ class JEPA(Task):
         mask = (context_mask.mask | target_mask.mask)
         mask = TokenMask(mask, context_mask.size, context_mask.patch_size)
         query = mask.apply_to_tokens(query, fill_value=None)
-        assert False
 
-        # Do the same to the ALiBi position encodings
-        positions = mask.apply_to_tokens(positions, fill_value=None)
+        # Do the same to the ALiBi position encodings, ensuring that we set mask token positions to "inf"
+        positions = mask.apply_to_tokens(positions, fill_value=None, padding_value=float("inf"))
         assert query.shape[:2] == positions.shape[:2]
 
         # Run the queries and ALiBi positions through the predictor
@@ -169,9 +181,51 @@ class JEPA(Task):
 
     @torch.no_grad()
     def update_ema(self):
-        alpha = min(1 - 1 / (self.global_step + 1), self.alpha)
-        for ema_param, param in zip(self.ema_model.parameters(), self.model.parameters()):
-            ema_param.data.mul_(alpha).add_(param.data, alpha=1 - alpha)
+        for i, (ema_param, param) in enumerate(zip(self.ema_backbone.parameters(), self.backbone.parameters())):
+            ema_param.data.mul_(self.ema_alpha).add_(param.data, alpha=1 - self.ema_alpha)
+            assert not ema_param.requires_grad
+        self.synchronize_ema_weights()
+
+    @torch.no_grad()
+    def synchronize_ema_weights(self):
+        if self.trainer.world_size > 1:
+            for ema_param in self.ema_backbone.parameters():
+                torch.distributed.all_reduce(ema_param.data, op=torch.distributed.ReduceOp.SUM)
+                ema_param.data /= self.trainer.world_size
+
+    @torch.no_grad()
+    def weight_histogram(self, module: nn.Module, bins: int = 100) -> Tuple[Tensor, Tensor]:
+        r"""Create a histogram of weights in a given module."""
+        weights = torch.cat([p.detach().float().ravel() for p in module.parameters() if p.requires_grad])
+        return tuple(t.cpu().numpy() for t in torch.histogram(weights.cpu(), bins=bins))
+
+    @torch.no_grad()
+    def tensor_histogram(self, tensor: Tensor, bins: int = 100) -> Tuple[Tensor, Tensor]:
+        r"""Create a histogram of weights in a given module."""
+        tensor = tensor.detach().float().ravel()
+        return tuple(t.cpu().numpy() for t in torch.histogram(tensor.cpu(), bins=bins))
+
+    @torch.no_grad()
+    def create_linprobe_gt(self, batch: Dict[str, Any]) -> Tensor:
+        view = [e.get("ViewPosition", "unknown") for e in batch["manifest"]]
+        view_int = [
+            0 if v.startswith("ml") or v.startswith("lm")
+            else 1 if "cc" in v else -1
+            for v in view
+        ]
+        return batch["img"].new_tensor(view_int, dtype=torch.long)
+
+    def forward_linear_probe(self, batch: Dict[str, Any], target: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        # linear probe forward
+        N = target.shape[0]
+        linprobe_pred = self.linear_probe(target.mean(1).view(N, -1)).view(N)
+        assert linprobe_pred.requires_grad or not self.training
+
+        # Build ground truth and compute loss
+        linprobe_gt = self.create_linprobe_gt(batch).view(N)
+        mask = linprobe_gt != -1
+        linprobe_loss = self.linear_probe_loss(linprobe_pred[mask], linprobe_gt[mask].float())
+        return linprobe_pred[mask], linprobe_gt[mask], linprobe_loss
 
     def step(
         self,
@@ -181,7 +235,9 @@ class JEPA(Task):
         metrics: Optional[tm.MetricCollection] = None,
     ) -> Dict[str, Any]:
         x: Tensor = batch["img"]
-        torch.autograd.set_detect_anomaly(True)
+
+        # ema update from previous step
+        self.update_ema()
 
         # generate context and target masks
         context_mask = self.create_context_mask(x)
@@ -189,21 +245,52 @@ class JEPA(Task):
 
         # generate ground truth with forward pass of ema backbone on unmasked image
         with torch.no_grad():
-            target: Tensor = self.ema_backbone(x, reshape=False)
+            self.ema_backbone.eval()
+            target: Tensor = self.context_norm(self.ema_backbone(x, reshape=False))
             target = target_mask.apply_to_tokens(target, fill_value=None)
 
         # generate predictions by encoding the context and then running the encoded context
         # plus the positional target queries through the predictor
         pred: Tensor = self(x, context_mask, target_mask)["jepa"]
 
+        # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
         loss = self.jepa_loss(pred, target)
+
+        # linear probe
+        if self.linear_probe is not None:
+            linprobe_pred, linprobe_gt, linprobe_loss = self.forward_linear_probe(batch, target)
+            with torch.no_grad():
+                for name, metric in (metrics or {}).items():
+                    if "probe" in name:
+                        metric.update(linprobe_pred, linprobe_gt)
+
+        # collapse mitigation
+        pred_pool = pred.mean(1)
+        #target_pool = target.mean(1)
+        #loss_contrastive = (
+        #    self.contrastive_loss(pred_pool, pred_pool)
+        #    + self.contrastive_loss(pred_pool, target_pool)
+        #).sum() / 2
+        loss_contrastive = self.contrastive_loss(pred_pool, pred_pool).sum()
 
         output = {
             "log": {
                 "loss_jepa": loss,
+                "loss_contrastive": loss_contrastive,
+                "loss_linprobe": linprobe_loss,
             },
         }
+
+        if self.trainer.global_step % 100 == 0:
+            with torch.no_grad():
+                target_std = target.std(dim=0)
+                histograms = {
+                    "target_hist": self.tensor_histogram(target),
+                    "pred_hist": self.tensor_histogram(pred),
+                    "std_hist": self.tensor_histogram(target_std),
+                }
+                output.update(histograms)
 
         return output
 

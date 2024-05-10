@@ -1,10 +1,10 @@
 fit:
-  compile: true
+  #compile: true
   float32_matmul_precision: medium
   trainer:
     accelerator: gpu
-    devices: 2
-    strategy: "ddp_find_unused_parameters_true"
+    devices: 1
+    #strategy: "ddp_find_unused_parameters_true"
     precision: "bf16-mixed"
     #precision: "16-mixed"
     max_steps: 250000
@@ -74,7 +74,7 @@ fit:
         project: mit-ub
 
   model:
-    class_path: mit_ub.tasks.JEPA
+    class_path: mit_ub.tasks.ViewPrediction
     init_args:
       backbone: "vit-i1-p16-d512"
       #loss_includes_unmasked: false
@@ -106,13 +106,11 @@ fit:
     class_path: torch_dicom.preprocessing.datamodule.PreprocessedPNGDataModule
     init_args:
       train_inputs: 
-        #- "/mnt/active_1/chase/data/optimam"
-        - "/mnt/active_2/chase/data/medcog"
-        - "/mnt/active_2/chase/data/optimam"
-        - "/mnt/active_2/chase/data/optimam_proc"
-      #val_inputs: /mnt/active_1/chase/data/val
+        - "/mnt/active_1/chase/data/optimam"
+        - "/mnt/active_1/chase/data/medcog"
+      val_inputs: /mnt/active_1/chase/data/val
       #train_sopuid_exclusions: /mnt/active_1/chase/data/train_density_exclude.csv
-      #val_sopuid_exclusions: /mnt/active_1/chase/data/test_density_exclude.csv
+      val_sopuid_exclusions: /mnt/active_1/chase/data/test_density_exclude.csv
       #metadata_filenames:
       #  manifest: "manifest.csv"
       #  #annotation: "autoannotation.csv"
@@ -124,10 +122,8 @@ fit:
         - "trait"
         - "types"
 
-      batch_size: 64
+      batch_size: 32
       num_workers: 23
-      pin_memory: false
-      persistent_workers: true
 
       train_transforms:
         class_path: torchvision.transforms.v2.Compose

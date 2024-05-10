@@ -33,6 +33,17 @@ class MAE(MAEBase):
         weight_decay_exemptions: Set of exemptions for weight decay.
 
     """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        linear_probe = True
+
+        # linear probe
+        if linear_probe:
+            self.linear_probe = nn.Linear(self.backbone.dim, 1)
+            self.linear_probe_loss = nn.BCEWithLogitsLoss()
+        else:
+            self.linear_probe = None
+            self.linear_probe_loss = None
 
     def prepare_backbone(self, name: str) -> nn.Module:
         return BACKBONES.get(name).instantiate_with_metadata().fn

@@ -2406,10 +2406,10 @@ files = [
 
 [[package]]
 name = "ssl-tasks"
-version = "0.1.dev12+g660d43a"
+version = "0.1.dev14+gf749aa8"
 requires_python = ">=3.10,<3.12"
 git = "https://github.com/TidalPaladin/ssl-tasks.git"
-revision = "660d43a8130696f97c6dac6eeab86595082d685e"
+revision = "f749aa864a581bcf299175874dd6d4b66e0247db"
 summary = ""
 dependencies = [
     "deep-helpers @ git+https://github.com/TidalPaladin/deep-helpers.git",
@@ -2538,10 +2538,10 @@ files = [
 
 [[package]]
 name = "torch-dicom"
-version = "0.1.dev67+g10ed235"
-requires_python = ">=3.11"
+version = "0.1.dev68+g40a15aa"
+requires_python = ">=3.9,<3.12"
 git = "https://github.com/medcognetics/torch-dicom.git"
-revision = "10ed2357c17b6760e0fb3d0a08ce6be61230a948"
+revision = "40a15aacd6dae795dc7414de803985db2210a55f"
 summary = ""
 dependencies = [
     "dicom-utils @ git+https://github.com/medcognetics/dicom-utils.git",
@@ -2553,16 +2553,16 @@ dependencies = [
 
 [[package]]
 name = "torch-dicom"
-version = "0.1.dev67+g10ed235"
+version = "0.1.dev68+g40a15aa"
 extras = ["datamodule"]
-requires_python = ">=3.11"
+requires_python = ">=3.9,<3.12"
 git = "https://github.com/medcognetics/torch-dicom.git"
-revision = "10ed2357c17b6760e0fb3d0a08ce6be61230a948"
+revision = "40a15aacd6dae795dc7414de803985db2210a55f"
 summary = ""
 dependencies = [
     "deep-helpers @ git+https://github.com/TidalPaladin/deep-helpers.git",
     "pytorch-lightning>=2.1.2",
-    "torch-dicom @ git+https://github.com/medcognetics/torch-dicom.git@10ed2357c17b6760e0fb3d0a08ce6be61230a948",
+    "torch-dicom @ git+https://github.com/medcognetics/torch-dicom.git",
 ]
 
 [[package]]
