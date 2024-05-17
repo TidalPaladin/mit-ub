@@ -1,13 +1,13 @@
-from typing import Callable, Optional, Sequence, Tuple
+from typing import Callable, Optional, Sequence, Tuple, cast
 
 import torch
 import torch.nn as nn
 from deep_helpers.helpers import to_tuple
 from einops import rearrange
 from einops.layers.torch import Rearrange
+from ssl_tasks.tokens import TokenMask
 from torch import Tensor
 from torch.utils.hooks import RemovableHandle
-from ssl_tasks.tokens import TokenMask
 
 from .kernels.attention import MultiheadAttention
 from .pos_enc import RelativeFactorizedPosition
@@ -105,7 +105,7 @@ class ViT(nn.Module):
         )
         # TODO: When patch size is (1, H, W) we can share weight / bias with Conv2d
         self.patch_embed_3d = nn.Sequential(
-            nn.Conv3d(in_channels, dim, kernel_size=patch_size, stride=patch_size),
+            nn.Conv3d(in_channels, dim, kernel_size=self.patch_size, stride=self.patch_size),
             Rearrange("b c d h w -> b (d h w) c"),
         )
 
@@ -132,7 +132,7 @@ class ViT(nn.Module):
 
     @property
     def patch_size(self) -> Tuple[int, int, int]:
-        return self._patch_size
+        return cast(Tuple[int, int, int], self._patch_size)
 
     @property
     def patch_size_2d(self) -> Tuple[int, int]:
@@ -143,9 +143,9 @@ class ViT(nn.Module):
         return tuple(s // p for s, p in zip(size, patch_size))
 
     def forward(
-        self, 
-        x: Tensor, 
-        reshape: bool = True, 
+        self,
+        x: Tensor,
+        reshape: bool = True,
         mask: TokenMask | None = None,
         mask_fill_value: float | Tensor | None = None,
         pos_mask_threshold: float | None = None,
@@ -185,8 +185,8 @@ class ViT(nn.Module):
 
     @torch.no_grad()
     def create_alibi_positions(
-        self, 
-        tokens: Tensor, 
+        self,
+        tokens: Tensor,
         tokenized_size: Sequence[int],
         mask: TokenMask | None = None,
         mask_fill_value: float | Tensor | None = None,

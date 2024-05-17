@@ -26,21 +26,21 @@ fit:
         init_args:
           log_momentum: true
 
-      - class_path: mit_ub.callbacks.LogInputCallback
-        init_args:
-          name: input
-          modes:
-            - "TRAIN"
-          queue_size: 4
-          flush_interval: 1000
+      #- class_path: mit_ub.callbacks.LogInputCallback
+      #  init_args:
+      #    name: input
+      #    modes:
+      #      - "TRAIN"
+      #    queue_size: 4
+      #    flush_interval: 1000
 
-      - class_path: mit_ub.callbacks.LogInputCallback
-        init_args:
-          name: input
-          modes:
-            - "VAL"
-            - "TEST"
-          queue_size: 4
+      #- class_path: mit_ub.callbacks.LogInputCallback
+      #  init_args:
+      #    name: input
+      #    modes:
+      #      - "VAL"
+      #      - "TEST"
+      #    queue_size: 4
 
       - class_path: mit_ub.callbacks.HistogramCallback
         init_args:
@@ -99,18 +99,17 @@ fit:
           pct_start: 0.10
           three_phase: false
           total_steps: 250000
-      #checkpoint: /mnt/iscsi/rsna_final.ckpt
+      #checkpoint: /mnt/storage/users/chase/models/jepa.ckpt
       #strict_checkpoint: false
 
   data:
     class_path: torch_dicom.preprocessing.datamodule.PreprocessedPNGDataModule
     init_args:
       train_inputs: 
-        #- "/mnt/active_1/chase/data/optimam"
         - "/mnt/active_2/chase/data/medcog"
         - "/mnt/active_2/chase/data/optimam"
         - "/mnt/active_2/chase/data/optimam_proc"
-      #val_inputs: /mnt/active_1/chase/data/val
+      val_inputs: /mnt/active_1/chase/data/val
       #train_sopuid_exclusions: /mnt/active_1/chase/data/train_density_exclude.csv
       #val_sopuid_exclusions: /mnt/active_1/chase/data/test_density_exclude.csv
       #metadata_filenames:
@@ -125,9 +124,8 @@ fit:
         - "types"
 
       batch_size: 64
-      num_workers: 23
-      pin_memory: false
-      persistent_workers: true
+      num_workers: 0
+      pin_memory: true
 
       train_transforms:
         class_path: torchvision.transforms.v2.Compose

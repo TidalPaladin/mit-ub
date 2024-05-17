@@ -1,6 +1,6 @@
+from .histogram import HistogramCallback
 from .input import LogInputCallback
 from .mae import LogMAECallback
-from .histogram import HistogramCallback
 
 
 __all__ = [

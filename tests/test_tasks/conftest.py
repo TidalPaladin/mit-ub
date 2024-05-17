@@ -1,5 +1,5 @@
 import pytest
-from torch import Tensor
+
 from mit_ub.model import BACKBONES, ViT
 
 
@@ -25,4 +25,3 @@ def backbone():
         dropout=0.1,
     )
     return "vit-dummy"
-

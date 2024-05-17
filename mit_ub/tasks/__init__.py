@@ -1,7 +1,5 @@
-from .mae import MAE
-from .triage import BreastTriage
 from .jepa import JEPA
-from .view import ViewPrediction
+from .triage import BreastTriage
 
 
-__all__ = ["MAE", "BreastTriage", "JEPA", "ViewPrediction"]
+__all__ = ["BreastTriage", "JEPA"]

@@ -1,6 +1,6 @@
 from registry import Registry
 
-from .backbone import ViT, TransformerBlock
+from .backbone import TransformerBlock, ViT
 
 
 BACKBONES = Registry("backbones")

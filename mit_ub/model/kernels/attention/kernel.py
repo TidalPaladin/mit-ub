@@ -264,7 +264,9 @@ def _fwd_kernel(
 
     # Compute the final softmax values
     value_accumulator = value_accumulator / softmax_denominator.to(ACCUMULATOR_DTYPE)[:, None]
-    value_accumulator = tl.where(tl.math.isnan(value_accumulator), to_tensor(0, value_accumulator.dtype), value_accumulator)
+    value_accumulator = tl.where(
+        tl.math.isnan(value_accumulator), to_tensor(0, value_accumulator.dtype), value_accumulator
+    )
 
     # Per Flash Attention 2, we store only logsumexp for the backward pass
     start_m = tl.program_id(2)

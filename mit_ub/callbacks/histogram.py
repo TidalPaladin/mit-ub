@@ -1,16 +1,11 @@
-
-from typing import Any, ClassVar, Dict, Iterator, List, Optional, Tuple, Type, TypedDict, Union, cast
+from typing import Any, ClassVar, Dict, List, Type
 
 import pytorch_lightning as pl
-import torch
 import wandb
 from deep_helpers.callbacks import LoggerIntegration, LoggingCallback
 from deep_helpers.tasks import Task
-from einops import rearrange, repeat
 from pytorch_lightning.loggers import Logger
 from pytorch_lightning.loggers.wandb import WandbLogger
-from torch import Tensor
-
 
 
 class WandBLoggerIntegration(LoggerIntegration):
@@ -18,15 +13,12 @@ class WandBLoggerIntegration(LoggerIntegration):
 
     def __call__(
         self,
-        target: List[Dict[str, Any]],
+        target: Dict[str, Any],
         pl_module: Task,
         tag: str,
         step: int,
     ) -> None:
-        log_dict = {
-            f"{tag}_{k}": wandb.Histogram(np_histogram=v)
-            for k, v in target.items()
-        }
+        log_dict = {f"{tag}_{k}": wandb.Histogram(np_histogram=v) for k, v in target.items()}
         pl_module.logger.experiment.log(log_dict, step=step)
 
 
@@ -50,8 +42,4 @@ class HistogramCallback(LoggingCallback):
         **kwargs,
     ) -> Dict[str, Any]:
         r"""Prepare the batch for logging."""
-        return {
-            k.replace("_hist", ""): v
-            for k, v in outputs.items()
-            if k.endswith("_hist")
-        }
+        return {k.replace("_hist", ""): v for k, v in outputs.items() if k.endswith("_hist")}

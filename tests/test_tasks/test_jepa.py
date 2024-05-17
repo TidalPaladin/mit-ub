@@ -1,12 +1,7 @@
-from typing import Any, Dict, Optional, Tuple, cast
-
 import pytest
 import pytorch_lightning as pl
-import torch.nn as nn
-from torch import Tensor
 
 from mit_ub.tasks.jepa import JEPA
-from ssl_tasks.tokens import TokenMask
 
 
 @pytest.fixture(params=[False, True])

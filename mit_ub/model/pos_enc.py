@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -14,7 +14,7 @@ class PositionEncoder(nn.Module):
     @torch.jit.export  # type: ignore
     def from_grid(
         self,
-        dims: List[int],
+        dims: Sequence[int],
         batch_size: int = 1,
         proto: Optional[Tensor] = None,
         requires_grad: bool = True,
@@ -41,7 +41,7 @@ class PositionEncoder(nn.Module):
 
     @staticmethod
     def create_grid(
-        dims: List[int],
+        dims: Sequence[int],
         proto: Optional[Tensor] = None,
         requires_grad: bool = True,
         normalize: bool = True,
