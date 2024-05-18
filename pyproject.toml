@@ -101,6 +101,12 @@ markers = [
 ]
 filterwarnings = [
   "ignore:.*Reducing precision for BF16 inputs is slower than full precision.*:UserWarning",
+  "ignore:.*Trying to infer the `batch_size` from an ambiguous collection.*:UserWarning",
+  "ignore:.*The ``compute`` method of metric .* was called before the.*:UserWarning",
+  "ignore:.*does not have many workers which may be a bottleneck.*:UserWarning",
+  "ignore:.*GPU available but not used.*:UserWarning",
+  "ignore:.*Invalid value for VR UI.*:UserWarning",
+  "ignore:.*The length of the pixel data in the dataset .* indicates it contains excess padding.*:UserWarning",
 ]
 
 [tool.pytest_env]

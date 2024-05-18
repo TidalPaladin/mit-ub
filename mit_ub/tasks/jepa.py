@@ -255,7 +255,7 @@ class JEPA(Task):
     @torch.no_grad()
     def tensor_histogram(self, tensor: Tensor, bins: int = 100) -> Tuple[Tensor, Tensor]:
         r"""Create a histogram of weights in a given module."""
-        tensor = tensor.detach().float().ravel()
+        tensor = tensor[~tensor.isnan()].detach().float().ravel()
         return tuple(t.cpu().numpy() for t in torch.histogram(tensor.cpu(), bins=bins))
 
     @torch.no_grad()
@@ -276,6 +276,8 @@ class JEPA(Task):
         linprobe_gt = self.create_linprobe_gt(batch).view(N)
         mask = linprobe_gt != -1
         linprobe_loss = self.linear_probe_loss(linprobe_pred[mask], linprobe_gt[mask].float())
+        if not mask.any():
+            linprobe_loss = torch.zeros_like(linprobe_loss)
         return linprobe_pred[mask], linprobe_gt[mask], linprobe_loss
 
     def clip_activations(self, x: Tensor) -> Tensor:
@@ -319,7 +321,7 @@ class JEPA(Task):
             linprobe_pred, linprobe_gt, linprobe_loss = self.forward_linear_probe(batch, target)
             with torch.no_grad():
                 for name, metric in (metrics or {}).items():
-                    if "probe" in name:
+                    if "probe" in name and linprobe_gt.numel():
                         metric.update(linprobe_pred, linprobe_gt)
         else:
             linprobe_loss = None
