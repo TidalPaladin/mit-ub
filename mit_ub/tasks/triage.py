@@ -6,18 +6,14 @@ import torch.nn as nn
 import torchmetrics as tm
 from deep_helpers.structs import State
 from deep_helpers.tasks import Task
+from einops.layers.torch import Rearrange
 
 # from gpvit import GPViT
 # from gpvit.layers import MLPMixerPooling
 from torch import Tensor
 from torchvision.ops import sigmoid_focal_loss
 
-
-# from gpvit.train import BACKBONES
-# Placeholder
-BACKBONES: Any = None
-GPViT: Any = None
-MLPMixerPooling: Any = None
+from ..model import BACKBONES, ViT
 
 
 UNKNOWN_INT: Final = -1
@@ -38,6 +34,7 @@ class TriageTask(Task):
 
     Args:
         backbone: Name of the backbone to use for the task.
+        crop_adjust: If True, adjust the global label for crops using the presence of malignant traces.
         optimizer_init: Initial configuration for the optimizer.
         lr_scheduler_init: Initial configuration for the learning rate scheduler.
         lr_interval: Frequency of learning rate update. Can be 'step' or 'epoch'.
@@ -53,6 +50,7 @@ class TriageTask(Task):
     def __init__(
         self,
         backbone: str,
+        crop_adjust: bool = False,
         focal_loss: bool = False,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
@@ -77,12 +75,13 @@ class TriageTask(Task):
             log_train_metrics_on_epoch,
             weight_decay_exemptions,
         )
+        self.crop_adjust = crop_adjust
 
-        self.backbone = cast(GPViT, self.prepare_backbone(backbone))
+        self.backbone = cast(ViT, self.prepare_backbone(backbone))
         dim = self.backbone.dim
-        group_tokens = self.backbone.num_group_tokens
         self.triage_head = nn.Sequential(
-            MLPMixerPooling(dim, group_tokens, group_tokens, dim, dropout=0.1),
+            nn.AdaptiveAvgPool2d((1, 1)),
+            Rearrange("b c () () -> b c"),
             nn.Linear(dim, 1),
         )
         self.criterion = nn.BCEWithLogitsLoss(reduction="none") if not focal_loss else sigmoid_focal_loss
@@ -256,8 +255,8 @@ class TriageTask(Task):
         return weight
 
     def forward(self, x: Tensor) -> Dict[str, Tensor]:
-        x, groups = self.backbone(x)
-        cls = self.triage_head(groups)
+        x = self.backbone(x)
+        cls = self.triage_head(x)
         return {"triage": cls.view(-1, 1)}
 
     def step(
@@ -265,7 +264,7 @@ class TriageTask(Task):
     ) -> Dict[str, Any]:
         batch = self.sanitize_boxes(batch)
         x = batch["img"]
-        y = self.get_tensor_label(batch)
+        y = self.get_tensor_label(batch, crop_adjust=self.crop_adjust)
 
         # forward pass
         result = self(x)
@@ -312,10 +311,11 @@ class TriageTask(Task):
             return "unknown"
 
 
-class BreastTriageTask(TriageTask):
+class BreastTriage(TriageTask):
     def __init__(
         self,
         backbone: str,
+        crop_adjust: bool = False,
         focal_loss: bool = False,
         pos_weight: float = 1.0,
         standard_view_weight: float = 1.0,
@@ -333,6 +333,7 @@ class BreastTriageTask(TriageTask):
     ):
         super().__init__(
             backbone,
+            crop_adjust,
             focal_loss,
             optimizer_init,
             lr_scheduler_init,

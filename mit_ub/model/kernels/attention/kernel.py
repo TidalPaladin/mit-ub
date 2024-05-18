@@ -264,6 +264,9 @@ def _fwd_kernel(
 
     # Compute the final softmax values
     value_accumulator = value_accumulator / softmax_denominator.to(ACCUMULATOR_DTYPE)[:, None]
+    value_accumulator = tl.where(
+        tl.math.isnan(value_accumulator), to_tensor(0, value_accumulator.dtype), value_accumulator
+    )
 
     # Per Flash Attention 2, we store only logsumexp for the backward pass
     start_m = tl.program_id(2)
@@ -360,7 +363,9 @@ def _bwd_do_o_dot(
     do = tl.load(do_block_ptr, boundary_check=BOUND_CHECK_Q.value).to(tl.float32)
 
     # Compute
-    delta = tl.sum(o * do, axis=1).to(Delta.dtype.element_ty)
+    delta = tl.sum(o * do, axis=1)
+    delta = tl.where(tl.math.isnan(delta), to_tensor(0, delta.dtype), delta)
+    delta = delta.to(Delta.dtype.element_ty)
 
     # Write output
     delta_block_ptr = tl.make_block_ptr(Delta, (M,), (stride_delta_m,), (start_m * BLOCK_M,), (BLOCK_M,), (0,))
@@ -558,9 +563,12 @@ def _bwd_kernel(
                 bias = tl.where(bias <= MASK_THRESH, bias, to_tensor(float("inf"), bias.dtype))
             bias = pos_slope * bias
             qk = qk * QK_SCALE + bias
-            p = tl.math.exp2(qk - logit_scale[:, None]).to(do_p.dtype.element_ty)
+            p = tl.math.exp2(qk - logit_scale[:, None])
         else:
-            p = tl.math.exp2(qk * QK_SCALE - logit_scale[:, None]).to(do_p.dtype.element_ty)
+            p = tl.math.exp2(qk * QK_SCALE - logit_scale[:, None])
+
+        p = tl.where(tl.math.isnan(p), to_tensor(0, p.dtype), p)
+        p = p.to(do_p.dtype.element_ty)
 
         # compute dL/dv = dL/do * do/dv = dL/do * p
         # Shape do = (MxD)

@@ -31,15 +31,15 @@ dependencies = [
     "triton>=2.0",
     "pip>=24.0",
     "ipykernel>=6.29.4",
+    "plotly",
+    "nbformat>=4.2.0",
+    "ssl-tasks @ git+https://github.com/TidalPaladin/ssl-tasks.git",
 ]
 readme = "README.md"
 license = {text = "Apache"}
 dynamic = ["version"]
 
 [project.optional-dependencies]
-train = [
-    "ssl-tasks @ git+https://github.com/TidalPaladin/ssl-tasks.git",
-]
 
 [tool.autoflake]
 remove-all-unused-imports = true
@@ -79,12 +79,11 @@ version = { source = "scm" }
 
 [tool.pdm.dev-dependencies]
 test = [
-  "pytest",
-  "pytest-mock",
-  "pytest-cov",
-  "pytest-env",
-  "coverage",
-  "pdbpp",
+    "pytest",
+    "pytest-mock",
+    "pytest-cov",
+    "pytest-env",
+    "coverage",
 ]
 quality = [
   "autoflake",
@@ -102,11 +101,17 @@ markers = [
 ]
 filterwarnings = [
   "ignore:.*Reducing precision for BF16 inputs is slower than full precision.*:UserWarning",
+  "ignore:.*Trying to infer the `batch_size` from an ambiguous collection.*:UserWarning",
+  "ignore:.*The ``compute`` method of metric .* was called before the.*:UserWarning",
+  "ignore:.*does not have many workers which may be a bottleneck.*:UserWarning",
+  "ignore:.*GPU available but not used.*:UserWarning",
+  "ignore:.*Invalid value for VR UI.*:UserWarning",
+  "ignore:.*The length of the pixel data in the dataset .* indicates it contains excess padding.*:UserWarning",
 ]
 
 [tool.pytest_env]
 TRITON_DEBUG = "1"
 
 # Sample script config
-#[project.scripts]
-#foo = "project.cli.__main__:main"
+[project.scripts]
+train = "deep_helpers.cli:main"

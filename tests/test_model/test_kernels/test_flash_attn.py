@@ -496,5 +496,24 @@ def test_mask_threshold_infinity(device):
         pos_k[..., :-1, :],
         slopes,
     )
+    baseline.sum().backward()
+    grad_q_baseline = q.grad
+    grad_k_baseline = k.grad
+    grad_v_baseline = v.grad
+
+    q.grad = k.grad = v.grad = None
     actual = attention(q, k, v, pos_q, pos_k, slopes)
+    actual.sum().backward()
+    grad_q_triton = q.grad
+    grad_k_triton = k.grad
+    grad_v_triton = v.grad
+
     torch.testing.assert_close(baseline, actual[..., :-1, :], rtol=0, atol=atol)
+
+    # CPU doesnt seem to work in this case
+    if device != "cpu":
+        assert not actual.isnan().any()
+        assert not actual.isinf().any()
+        torch.testing.assert_close(grad_v_baseline, grad_v_triton, rtol=0, atol=atol)
+        torch.testing.assert_close(grad_k_baseline, grad_k_triton, rtol=0, atol=atol)
+        torch.testing.assert_close(grad_q_baseline, grad_q_triton, rtol=0, atol=atol)
