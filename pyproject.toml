@@ -33,15 +33,13 @@ dependencies = [
     "ipykernel>=6.29.4",
     "plotly",
     "nbformat>=4.2.0",
+    "ssl-tasks @ git+https://github.com/TidalPaladin/ssl-tasks.git",
 ]
 readme = "README.md"
 license = {text = "Apache"}
 dynamic = ["version"]
 
 [project.optional-dependencies]
-train = [
-    "ssl-tasks @ git+https://github.com/TidalPaladin/ssl-tasks.git",
-]
 
 [tool.autoflake]
 remove-all-unused-imports = true
