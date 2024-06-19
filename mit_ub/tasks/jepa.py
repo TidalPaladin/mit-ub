@@ -118,6 +118,8 @@ class JEPA(Task):
 
         predictor_depth = 4
         predictor_dim_ff = self.backbone.dim
+        # ALiBi initialization for predictor matches that of backbone
+        alibi_bounds = [self.backbone.get_alibi_bounds(i) for i in range(predictor_depth)]
         self.jepa_predictor = nn.ModuleList(
             [
                 TransformerBlock(
@@ -126,9 +128,10 @@ class JEPA(Task):
                     predictor_dim_ff,
                     dropout=0.1,
                     activation=nn.GELU(),
-                    alibi_upper=i,
+                    alibi_lower=lower,
+                    alibi_upper=upper,
                 )
-                for i in range(predictor_depth)
+                for lower, upper in alibi_bounds
             ]
         )
         self.contrastive_loss = PointwiseContrastiveEmbeddingLoss()

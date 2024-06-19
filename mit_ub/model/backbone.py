@@ -23,7 +23,8 @@ class TransformerBlock(nn.Module):
         dropout: float = 0.1,
         activation: nn.Module = nn.GELU(),
         layer_norm_eps: float = 1e-5,
-        alibi_upper: int = 8,
+        alibi_lower: int | None = 0,
+        alibi_upper: int | None = 8,
     ):
         super().__init__()
         self.nhead = nhead
@@ -40,11 +41,16 @@ class TransformerBlock(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
         self.activation = activation
 
-        self.register_buffer("alibi", self.init_alibi(alibi_upper))
+        if alibi_lower is None and alibi_upper is None:
+            self.alibi = None
+        elif alibi_lower is not None and alibi_upper is not None:
+            self.register_buffer("alibi", self.init_alibi(alibi_lower, alibi_upper))
+        else:
+            raise ValueError("Either both `alibi_lower` and `alibi_upper` must be provided, or neither")
 
     @torch.no_grad()
-    def init_alibi(self, upper: int) -> Tensor:
-        return torch.logspace(0, upper, self.nhead, base=2).reciprocal_().neg_()
+    def init_alibi(self, lower: int, upper: int) -> Tensor:
+        return torch.logspace(lower, upper, self.nhead, base=2).reciprocal_().neg_()
 
     def forward(
         self,
@@ -56,8 +62,11 @@ class TransformerBlock(nn.Module):
         # Self attention
         y = self.norm1(x)
         B, H = x.shape[0], self.nhead
-        slopes = self.alibi.view(1, H).expand(B, -1).contiguous()
-        y = self.self_attn(y, y, y, pos, pos, slopes, mask_threshold=mask_threshold)
+        if self.alibi is not None:
+            slopes = self.alibi.view(1, H).expand(B, -1).contiguous()
+            y = self.self_attn(y, y, y, pos, pos, slopes, mask_threshold=mask_threshold)
+        else:
+            y = self.self_attn(y, y, y)
         x = x + y
 
         # MLP
@@ -83,11 +92,13 @@ class ViT(nn.Module):
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
         activation: nn.Module = nn.GELU(),
+        alibi: bool = True,
     ):
         super().__init__()
         self._dim = dim
         self._nhead = nhead if nhead is not None else self.dim // 32
         self._in_channels = in_channels
+        self._alibi = alibi
         dim_feedforward = dim_feedforward or 4 * dim
 
         # Make patch size length 3 (D H W) for 2D or 3D inputs
@@ -114,8 +125,12 @@ class ViT(nn.Module):
         self.pos_enc_3d = RelativeFactorizedPosition(3, dim)
 
         # Transformer blocks
+        alibi_bounds = [self.get_alibi_bounds(i) for i in range(depth)]
         self.blocks = nn.ModuleList(
-            [TransformerBlock(dim, nhead, dim_feedforward, dropout, activation, alibi_upper=i) for i in range(depth)]
+            [
+                TransformerBlock(dim, nhead, dim_feedforward, dropout, activation, alibi_lower=lower, alibi_upper=upper)
+                for lower, upper in alibi_bounds
+            ]
         )
 
     @property
@@ -142,6 +157,20 @@ class ViT(nn.Module):
         patch_size = self.patch_size[-len(size) :]
         return tuple(s // p for s, p in zip(size, patch_size))
 
+    def get_alibi_bounds(self, depth: int) -> Tuple[int, int] | Tuple[None, None]:
+        r"""Get the ALiBi bounds for a given depth
+
+        Args:
+            depth: Depth of the transformer block
+
+        Returns:
+            Lower and upper bounds for the alibi slopes, or ``None`` if alibi is not used
+        """
+        if self._alibi:
+            return 0, depth
+        else:
+            return None, None
+
     def forward(
         self,
         x: Tensor,
@@ -164,7 +193,8 @@ class ViT(nn.Module):
         if mask is not None:
             x = mask.apply_to_tokens(x, fill_value=mask_fill_value)
 
-        position = self.create_alibi_positions(x, tokenized_size, mask, mask_fill_value, normalize=True)
+        # ALiBi positions are unnormalized, i.e. in pixel coordinate units
+        position = self.create_alibi_positions(x, tokenized_size, mask, mask_fill_value, normalize=False)
         position = position.expand(-1, self.nhead, -1, -1)
 
         # Transformer blocks
