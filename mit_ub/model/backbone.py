@@ -193,7 +193,8 @@ class ViT(nn.Module):
         if mask is not None:
             x = mask.apply_to_tokens(x, fill_value=mask_fill_value)
 
-        position = self.create_alibi_positions(x, tokenized_size, mask, mask_fill_value, normalize=True)
+        # ALiBi positions are unnormalized, i.e. in pixel coordinate units
+        position = self.create_alibi_positions(x, tokenized_size, mask, mask_fill_value, normalize=False)
         position = position.expand(-1, self.nhead, -1, -1)
 
         # Transformer blocks
