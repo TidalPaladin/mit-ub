@@ -9,7 +9,6 @@ from ssl_tasks.tokens import TokenMask
 from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 
-from .gqa import GroupedQueryAttention
 from .kernels.attention import MultiheadAttention
 from .pos_enc import RelativeFactorizedPosition
 
@@ -41,7 +40,7 @@ class TransformerBlock(nn.Module):
         self.self_attn = (
             MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
             if self.alibi is not None
-            else GroupedQueryAttention(d_model, nhead, nhead // 2, dropout=dropout)
+            else nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
         )
 
         # MLP up-project is a GLU-variant -> F.silu(W1x + b1) * F.sigmoid(W2x + b2).
@@ -83,7 +82,7 @@ class TransformerBlock(nn.Module):
             slopes = self.alibi.view(1, H).expand(B, -1).contiguous()
             y = self.self_attn(y, y, y, pos, pos, slopes, mask_threshold=mask_threshold)
         else:
-            y = self.self_attn(y)
+            y, _ = self.self_attn(y, y, y)
         x = x + y
 
         # MLP

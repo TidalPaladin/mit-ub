@@ -4,6 +4,7 @@ from einops import rearrange
 from torch import Tensor
 
 
+# TODO: Fix this, GPT messed it up
 class GroupedQueryAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int, num_groups: int, dropout: float = 0.0):
         super(GroupedQueryAttention, self).__init__()
