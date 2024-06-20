@@ -129,6 +129,8 @@ class JEPA(Task):
             self.linear_probe = None
             self.linear_probe_loss = None
 
+        self.save_hyperparameters()
+
     def prepare_backbone(self, name: str) -> nn.Module:
         return BACKBONES.get(name).instantiate_with_metadata().fn
 
