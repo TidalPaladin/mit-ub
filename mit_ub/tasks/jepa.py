@@ -51,6 +51,7 @@ class JEPA(Task):
         linear_probe: bool = True,
         loss_fn: str = "cosine",
         distribution_loss: bool = False,
+        predictor_depth: int = 4,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -101,10 +102,7 @@ class JEPA(Task):
         self.jepa_query = nn.Parameter(torch.empty(1, 1, self.backbone.dim))
         torch.nn.init.trunc_normal_(self.jepa_query, mean=0, std=1)
 
-        predictor_depth = 4
         predictor_dim_ff = self.backbone.dim
-        # ALiBi initialization for predictor matches that of backbone
-        alibi_bounds = [self.backbone.get_alibi_bounds(i) for i in range(predictor_depth)]
         self.jepa_predictor = nn.ModuleList(
             [
                 TransformerBlock(
@@ -113,10 +111,8 @@ class JEPA(Task):
                     predictor_dim_ff,
                     dropout=0.1,
                     activation=nn.SiLU(),
-                    alibi_lower=lower,
-                    alibi_upper=upper,
                 )
-                for lower, upper in alibi_bounds
+                for _ in range(predictor_depth)
             ]
         )
         self.contrastive_loss = PointwiseContrastiveEmbeddingLoss(margin=margin) if margin is not None else None
