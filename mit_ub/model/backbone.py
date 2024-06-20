@@ -37,11 +37,7 @@ class TransformerBlock(nn.Module):
         else:
             raise ValueError("Either both `alibi_lower` and `alibi_upper` must be provided, or neither")
 
-        self.self_attn = (
-            MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-            if self.alibi is not None
-            else nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        )
+        self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
 
         # MLP up-project is a GLU-variant -> F.silu(W1x + b1) * F.sigmoid(W2x + b2).
         # This was hallucinated by GPT and empirically works better than standard SwiGLU.
@@ -82,7 +78,7 @@ class TransformerBlock(nn.Module):
             slopes = self.alibi.view(1, H).expand(B, -1).contiguous()
             y = self.self_attn(y, y, y, pos, pos, slopes, mask_threshold=mask_threshold)
         else:
-            y, _ = self.self_attn(y, y, y)
+            y = self.self_attn(y, y, y)
         x = x + y
 
         # MLP

@@ -2,6 +2,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from .kernel import attention
 
@@ -51,7 +52,18 @@ class MultiheadAttention(nn.MultiheadAttention):
         v = rearrange(v, "b l (d h) -> b h l d", b=B, h=H)
 
         # Attention and restore shape
-        result = attention(q, k, v, pos_q, pos_k, slopes, softmax_scale, full_precision, mask_threshold)
+        if slopes is not None and pos_q is not None:
+            result = attention(q, k, v, pos_q, pos_k, slopes, softmax_scale, full_precision, mask_threshold)
+        elif self.training and q.is_cuda:
+            with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                result = F.scaled_dot_product_attention(
+                    q.contiguous(), k.contiguous(), v.contiguous(), dropout_p=self.dropout
+                )
+        else:
+            result = F.scaled_dot_product_attention(
+                q.contiguous(), k.contiguous(), v.contiguous(), dropout_p=self.dropout
+            )
+
         result = rearrange(result, "b h l d -> b l (d h)")
 
         # Output projection
