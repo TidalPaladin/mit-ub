@@ -296,6 +296,7 @@ class JEPA(Task):
             self.ema_backbone.eval()
             target: Tensor = self.ema_backbone(x, reshape=False)
             target = target_mask.apply_to_tokens(target, fill_value=None)
+            target = self.clip_activations(target)
 
         # generate predictions by encoding the context and then running the encoded context
         # plus the positional target queries through the predictor
@@ -307,7 +308,7 @@ class JEPA(Task):
             N = pred.shape[0]
             loss = self.jepa_loss(pred.view(N, -1), target.view(N, -1), target.new_full((N,), 1, dtype=torch.long))
         elif isinstance(self.jepa_loss, nn.MSELoss):
-            loss = self.jepa_loss(pred, self.clip_activations(target))
+            loss = self.jepa_loss(pred, target)
         else:
             raise ValueError(f"Unknown loss function: {self.jepa_loss}")
 
