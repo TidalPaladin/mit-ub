@@ -141,12 +141,8 @@ class ViT(nn.Module):
         self.pos_enc_3d = RelativeFactorizedPosition(3, dim)
 
         # Transformer blocks
-        alibi_bounds = [self.get_alibi_bounds(i) for i in range(depth)]
         self.blocks = nn.ModuleList(
-            [
-                TransformerBlock(dim, nhead, dim_feedforward, dropout, activation, alibi_lower=lower, alibi_upper=upper)
-                for lower, upper in alibi_bounds
-            ]
+            [TransformerBlock(dim, nhead, dim_feedforward, dropout, activation) for _ in range(depth)]
         )
 
     @property
@@ -193,8 +189,6 @@ class ViT(nn.Module):
         reshape: bool = True,
         mask: TokenMask | None = None,
         mask_fill_value: float | Tensor | None = None,
-        pos_mask_threshold: float | None = None,
-        full_precision: bool = True,
     ) -> Tensor:
         B, C, *original_size = x.shape
         tokenized_size = self.tokenized_size(*original_size)
@@ -209,13 +203,9 @@ class ViT(nn.Module):
         if mask is not None:
             x = mask.apply_to_tokens(x, fill_value=mask_fill_value)
 
-        # ALiBi positions are unnormalized, i.e. in pixel coordinate units
-        position = self.create_alibi_positions(x, tokenized_size, mask, mask_fill_value, normalize=False)
-        position = position.expand(-1, self.nhead, -1, -1)
-
         # Transformer blocks
         for block in self.blocks:
-            x = block(x, position, mask_threshold=pos_mask_threshold, full_precision=full_precision)
+            x = block(x)
 
         if reshape and mask is not None and mask_fill_value is None:
             raise ValueError(
