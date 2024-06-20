@@ -25,7 +25,7 @@ class NormallyDistributed(nn.Module):
         dim: The dimension to measure the distribution of.
     """
 
-    def __init__(self, dim: int = -1):
+    def __init__(self, dim: int | None = -1):
         super().__init__()
         self.dim = dim
 
@@ -47,8 +47,10 @@ class JEPA(Task):
         target_scale: int = 2,
         ema_alpha: float = 0.95,
         activation_clip: float | None = None,
-        margin: float = 0.5,
+        margin: float | None = 0.5,
         linear_probe: bool = True,
+        loss_fn: str = "cosine",
+        distribution_loss: bool = False,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -88,8 +90,14 @@ class JEPA(Task):
         for p in self.ema_backbone.parameters():
             p.requires_grad = False
 
-        self.jepa_loss = nn.SmoothL1Loss()
-        self.normally_distributed = NormallyDistributed()
+        if loss_fn == "cosine":
+            self.jepa_loss = nn.CosineEmbeddingLoss()
+        elif loss_fn == "mse":
+            self.jepa_loss = nn.MSELoss()
+        else:
+            raise ValueError(f"Unknown loss function: {loss_fn}, expected 'cosine' or 'mse'")
+
+        self.normally_distributed = NormallyDistributed() if distribution_loss else None
         self.jepa_query = nn.Parameter(torch.empty(1, 1, self.backbone.dim))
         torch.nn.init.trunc_normal_(self.jepa_query, mean=0, std=1)
 
@@ -111,7 +119,7 @@ class JEPA(Task):
                 for lower, upper in alibi_bounds
             ]
         )
-        self.contrastive_loss = PointwiseContrastiveEmbeddingLoss(margin=margin)
+        self.contrastive_loss = PointwiseContrastiveEmbeddingLoss(margin=margin) if margin is not None else None
 
         # linear probe
         if linear_probe:
@@ -293,8 +301,23 @@ class JEPA(Task):
 
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
-        loss = self.jepa_loss(pred, self.clip_activations(target))
-        loss_distribution = self.normally_distributed(pred)
+        if isinstance(self.jepa_loss, nn.CosineEmbeddingLoss):
+            N = pred.shape[0]
+            loss = self.jepa_loss(pred.view(N, -1), target.view(N, -1), target.new_full((N,), 1, dtype=torch.long))
+        elif isinstance(self.jepa_loss, nn.MSELoss):
+            loss = self.jepa_loss(pred, self.clip_activations(target))
+        else:
+            raise ValueError(f"Unknown loss function: {self.jepa_loss}")
+
+        # compute distribution loss
+        loss_distribution = self.normally_distributed(pred) if self.normally_distributed is not None else None
+
+        # compute contrastive loss for collapse mitigation
+        if self.contrastive_loss is not None:
+            pred_pool = pred.mean(1)
+            loss_contrastive = self.contrastive_loss(pred_pool, pred_pool).sum()
+        else:
+            loss_contrastive = None
 
         # linear probe
         if self.linear_probe is not None:
@@ -306,10 +329,6 @@ class JEPA(Task):
         else:
             linprobe_loss = None
 
-        # collapse mitigation
-        pred_pool = pred.mean(1)
-        loss_contrastive = self.contrastive_loss(pred_pool, pred_pool).sum()
-
         # calculate descriptive statistics for target
         with torch.no_grad():
             target_var, target_mean = torch.var_mean(target.view(-1, self.backbone.dim), dim=-1)
@@ -319,12 +338,14 @@ class JEPA(Task):
         output = {
             "log": {
                 "loss_jepa": loss,
-                "loss_contrastive": loss_contrastive,
-                "loss_distribution": loss_distribution,
                 "var": target_var,
                 "mean": target_mean,
             },
         }
+        if loss_contrastive is not None:
+            output["log"]["loss_contrastive"] = loss_contrastive
+        if loss_distribution is not None:
+            output["log"]["loss_distribution"] = loss_distribution
         if linprobe_loss is not None:
             output["log"]["loss_linprobe"] = linprobe_loss
 
