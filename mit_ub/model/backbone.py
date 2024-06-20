@@ -21,7 +21,7 @@ class TransformerBlock(nn.Module):
         nhead: int,
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
-        activation: nn.Module = nn.GELU(),
+        activation: nn.Module = nn.SiLU(),
         layer_norm_eps: float = 1e-5,
         alibi_lower: int | None = 0,
         alibi_upper: int | None = 8,
@@ -29,9 +29,20 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.nhead = nhead
 
-        # Cross attention 1
         self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+
+        # MLP up-project is a GLU-variant -> F.silu(W1x + b1) * F.sigmoid(W2x + b2).
+        # This was hallucinated by GPT and empirically works better than standard SwiGLU.
+        # Maybe call this SigmoidGatedSiLU or something? Has it been done in literature?
+        # Seems similar to squeeze/excite.
+        #
+        # Improves probe accuracy, convergence rate, and reduces feature variance
         self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.gate = nn.Sequential(
+            nn.Linear(d_model, dim_feedforward),
+            nn.Sigmoid(),
+        )
+
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
 
@@ -71,8 +82,7 @@ class TransformerBlock(nn.Module):
 
         # MLP
         y = self.norm2(x)
-        y = self.linear1(y)
-        y = self.activation(y)
+        y = self.activation(self.linear1(y)) * self.gate(y)
         y = self.dropout(y)
         y = self.linear2(y)
         x = x + y
@@ -91,7 +101,7 @@ class ViT(nn.Module):
         nhead: int,
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
-        activation: nn.Module = nn.GELU(),
+        activation: nn.Module = nn.SiLU(),
         alibi: bool = True,
     ):
         super().__init__()

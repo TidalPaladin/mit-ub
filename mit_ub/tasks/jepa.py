@@ -112,7 +112,7 @@ class JEPA(Task):
                     self.backbone.nhead,
                     predictor_dim_ff,
                     dropout=0.1,
-                    activation=nn.GELU(),
+                    activation=nn.SiLU(),
                     alibi_lower=lower,
                     alibi_upper=upper,
                 )
