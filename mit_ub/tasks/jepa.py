@@ -46,7 +46,8 @@ class JEPA(Task):
         target_ratio: float = 0.25,
         target_scale: int = 2,
         ema_alpha: float = 0.95,
-        activation_clip: float | None = 5,
+        activation_clip: float | None = None,
+        margin: float = 0.5,
         linear_probe: bool = True,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
@@ -110,7 +111,7 @@ class JEPA(Task):
                 for lower, upper in alibi_bounds
             ]
         )
-        self.contrastive_loss = PointwiseContrastiveEmbeddingLoss()
+        self.contrastive_loss = PointwiseContrastiveEmbeddingLoss(margin=margin)
 
         # linear probe
         if linear_probe:
