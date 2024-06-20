@@ -76,20 +76,6 @@ class TestViT:
             out = model(x)
         assert out.shape[:2] == (1, 128)
 
-    def test_alibi(self, mocker):
-        spy = mocker.spy(TransformerBlock, "forward")
-        D, H, W = 128, 224, 224
-        x = torch.randn(1, 3, H, W)
-        nhead = D // 16
-        model = ViT(3, D, (16, 16), 3, nhead)
-        model(x)
-        spy.assert_called()
-        for call in spy.mock_calls:
-            pos = call.args[-1]
-            pos = pos.view(nhead, *model.tokenized_size(H, W), -1)
-            assert (pos[:, 0, ..., 0] == 0).all()
-            assert (pos[:, -1, ..., 0] == 13).all()
-
     @pytest.mark.parametrize(
         "device",
         [

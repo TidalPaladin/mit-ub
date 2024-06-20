@@ -21,17 +21,40 @@ class TransformerBlock(nn.Module):
         nhead: int,
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
-        activation: nn.Module = nn.GELU(),
+        activation: nn.Module = nn.SiLU(),
         layer_norm_eps: float = 1e-5,
-        alibi_lower: int | None = 0,
-        alibi_upper: int | None = 8,
+        alibi_lower: int | None = None,
+        alibi_upper: int | None = None,
     ):
         super().__init__()
         self.nhead = nhead
 
-        # Cross attention 1
-        self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        # Configure ALiBi if bounds are provided
+        if alibi_lower is None and alibi_upper is None:
+            self.alibi = None
+        elif alibi_lower is not None and alibi_upper is not None:
+            self.register_buffer("alibi", self.init_alibi(alibi_lower, alibi_upper))
+        else:
+            raise ValueError("Either both `alibi_lower` and `alibi_upper` must be provided, or neither")
+
+        self.self_attn = (
+            MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+            if self.alibi is not None
+            else nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        )
+
+        # MLP up-project is a GLU-variant -> F.silu(W1x + b1) * F.sigmoid(W2x + b2).
+        # This was hallucinated by GPT and empirically works better than standard SwiGLU.
+        # Maybe call this SigmoidGatedSiLU or something? Has it been done in literature?
+        # Seems similar to squeeze/excite.
+        #
+        # Improves probe accuracy, convergence rate, and reduces feature variance
         self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.gate = nn.Sequential(
+            nn.Linear(d_model, dim_feedforward),
+            nn.Sigmoid(),
+        )
+
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
 
@@ -40,13 +63,6 @@ class TransformerBlock(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
         self.activation = activation
-
-        if alibi_lower is None and alibi_upper is None:
-            self.alibi = None
-        elif alibi_lower is not None and alibi_upper is not None:
-            self.register_buffer("alibi", self.init_alibi(alibi_lower, alibi_upper))
-        else:
-            raise ValueError("Either both `alibi_lower` and `alibi_upper` must be provided, or neither")
 
     @torch.no_grad()
     def init_alibi(self, lower: int, upper: int) -> Tensor:
@@ -66,13 +82,12 @@ class TransformerBlock(nn.Module):
             slopes = self.alibi.view(1, H).expand(B, -1).contiguous()
             y = self.self_attn(y, y, y, pos, pos, slopes, mask_threshold=mask_threshold)
         else:
-            y = self.self_attn(y, y, y)
+            y, _ = self.self_attn(y, y, y)
         x = x + y
 
         # MLP
         y = self.norm2(x)
-        y = self.linear1(y)
-        y = self.activation(y)
+        y = self.activation(self.linear1(y)) * self.gate(y)
         y = self.dropout(y)
         y = self.linear2(y)
         x = x + y
@@ -91,7 +106,7 @@ class ViT(nn.Module):
         nhead: int,
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
-        activation: nn.Module = nn.GELU(),
+        activation: nn.Module = nn.SiLU(),
         alibi: bool = True,
     ):
         super().__init__()
@@ -125,12 +140,8 @@ class ViT(nn.Module):
         self.pos_enc_3d = RelativeFactorizedPosition(3, dim)
 
         # Transformer blocks
-        alibi_bounds = [self.get_alibi_bounds(i) for i in range(depth)]
         self.blocks = nn.ModuleList(
-            [
-                TransformerBlock(dim, nhead, dim_feedforward, dropout, activation, alibi_lower=lower, alibi_upper=upper)
-                for lower, upper in alibi_bounds
-            ]
+            [TransformerBlock(dim, nhead, dim_feedforward, dropout, activation) for _ in range(depth)]
         )
 
     @property
@@ -177,8 +188,6 @@ class ViT(nn.Module):
         reshape: bool = True,
         mask: TokenMask | None = None,
         mask_fill_value: float | Tensor | None = None,
-        pos_mask_threshold: float | None = None,
-        full_precision: bool = True,
     ) -> Tensor:
         B, C, *original_size = x.shape
         tokenized_size = self.tokenized_size(*original_size)
@@ -193,13 +202,9 @@ class ViT(nn.Module):
         if mask is not None:
             x = mask.apply_to_tokens(x, fill_value=mask_fill_value)
 
-        # ALiBi positions are unnormalized, i.e. in pixel coordinate units
-        position = self.create_alibi_positions(x, tokenized_size, mask, mask_fill_value, normalize=False)
-        position = position.expand(-1, self.nhead, -1, -1)
-
         # Transformer blocks
         for block in self.blocks:
-            x = block(x, position, mask_threshold=pos_mask_threshold, full_precision=full_precision)
+            x = block(x)
 
         if reshape and mask is not None and mask_fill_value is None:
             raise ValueError(

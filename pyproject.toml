@@ -33,6 +33,7 @@ dependencies = [
     "ipykernel>=6.29.4",
     "plotly",
     "nbformat>=4.2.0",
+    "tqdm-multiprocessing",
     "ssl-tasks @ git+https://github.com/TidalPaladin/ssl-tasks.git",
 ]
 readme = "README.md"

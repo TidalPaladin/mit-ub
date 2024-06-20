@@ -14,50 +14,26 @@ from torch.distributed import ReduceOp, all_reduce
 from ..model import BACKBONES, TransformerBlock, ViT
 
 
-def calculate_skewness(x: Tensor, dim: int = -1) -> Tensor:
-    r"""Calculate the skewness of a tensor along a given dimension"""
-    mean = x.mean(dim=dim, keepdim=True)
-    std = x.std(dim=dim, unbiased=False)
-    skewness = ((x - mean) ** 3).mean(dim=dim) / (std**3)
-    return skewness
-
-
-def calculate_kurtosis(x: Tensor, dim: int = -1) -> Tensor:
-    r"""Calculate the kurtosis of a tensor along a given dimension"""
-    mean = x.mean(dim=dim, keepdim=True)
-    std = x.std(dim=dim, unbiased=False)
-    kurtosis = ((x - mean) ** 4).mean(dim=dim) / (std**4) - 3
-    return kurtosis
-
-
 class NormallyDistributed(nn.Module):
     r"""Criterion that measures if a tensor is normally distributed.
 
     The following factors are considered:
         - Zero-mean
         - Unit variance
-        - Skewness
-        - Kurtosis
 
     Args:
         dim: The dimension to measure the distribution of.
     """
 
-    def __init__(self, dim: int = -1):
+    def __init__(self, dim: int | None = -1):
         super().__init__()
         self.dim = dim
 
     def forward(self, x: Tensor) -> Tensor:
         var, mean = torch.var_mean(x, dim=self.dim, unbiased=False, keepdim=True)
-        skewness = calculate_skewness(x, dim=self.dim)
-        kurtosis = calculate_kurtosis(x, dim=self.dim)
-
-        mean_loss = mean.pow(2).mean()
-        var_loss = (var - 1).pow(2).mean()
-        skewness_loss = skewness.pow(2).mean()
-        kurtosis_loss = kurtosis.pow(2).mean()
-
-        total_loss = mean_loss + var_loss + skewness_loss + kurtosis_loss
+        mean_loss = mean.abs().mean()
+        var_loss = (var - 1).abs().mean()
+        total_loss = mean_loss + var_loss
         return total_loss
 
 
@@ -70,8 +46,12 @@ class JEPA(Task):
         target_ratio: float = 0.25,
         target_scale: int = 2,
         ema_alpha: float = 0.95,
-        activation_clip: float | None = 5,
+        activation_clip: float | None = None,
+        margin: float | None = 0.5,
         linear_probe: bool = True,
+        loss_fn: str = "cosine",
+        distribution_loss: bool = False,
+        predictor_depth: int = 4,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -111,15 +91,18 @@ class JEPA(Task):
         for p in self.ema_backbone.parameters():
             p.requires_grad = False
 
-        self.jepa_loss = nn.SmoothL1Loss()
-        self.normally_distributed = NormallyDistributed()
+        if loss_fn == "cosine":
+            self.jepa_loss = nn.CosineEmbeddingLoss()
+        elif loss_fn == "mse":
+            self.jepa_loss = nn.MSELoss()
+        else:
+            raise ValueError(f"Unknown loss function: {loss_fn}, expected 'cosine' or 'mse'")
+
+        self.normally_distributed = NormallyDistributed() if distribution_loss else None
         self.jepa_query = nn.Parameter(torch.empty(1, 1, self.backbone.dim))
         torch.nn.init.trunc_normal_(self.jepa_query, mean=0, std=1)
 
-        predictor_depth = 4
         predictor_dim_ff = self.backbone.dim
-        # ALiBi initialization for predictor matches that of backbone
-        alibi_bounds = [self.backbone.get_alibi_bounds(i) for i in range(predictor_depth)]
         self.jepa_predictor = nn.ModuleList(
             [
                 TransformerBlock(
@@ -127,14 +110,12 @@ class JEPA(Task):
                     self.backbone.nhead,
                     predictor_dim_ff,
                     dropout=0.1,
-                    activation=nn.GELU(),
-                    alibi_lower=lower,
-                    alibi_upper=upper,
+                    activation=nn.SiLU(),
                 )
-                for lower, upper in alibi_bounds
+                for _ in range(predictor_depth)
             ]
         )
-        self.contrastive_loss = PointwiseContrastiveEmbeddingLoss()
+        self.contrastive_loss = PointwiseContrastiveEmbeddingLoss(margin=margin) if margin is not None else None
 
         # linear probe
         if linear_probe:
@@ -143,6 +124,8 @@ class JEPA(Task):
         else:
             self.linear_probe = None
             self.linear_probe_loss = None
+
+        self.save_hyperparameters()
 
     def prepare_backbone(self, name: str) -> nn.Module:
         return BACKBONES.get(name).instantiate_with_metadata().fn
@@ -309,6 +292,7 @@ class JEPA(Task):
             self.ema_backbone.eval()
             target: Tensor = self.ema_backbone(x, reshape=False)
             target = target_mask.apply_to_tokens(target, fill_value=None)
+            target = self.clip_activations(target)
 
         # generate predictions by encoding the context and then running the encoded context
         # plus the positional target queries through the predictor
@@ -316,8 +300,23 @@ class JEPA(Task):
 
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
-        loss = self.jepa_loss(pred, self.clip_activations(target))
-        loss_distribution = self.normally_distributed(pred)
+        if isinstance(self.jepa_loss, nn.CosineEmbeddingLoss):
+            N = pred.shape[0]
+            loss = self.jepa_loss(pred.view(N, -1), target.view(N, -1), target.new_full((N,), 1, dtype=torch.long))
+        elif isinstance(self.jepa_loss, nn.MSELoss):
+            loss = self.jepa_loss(pred, target)
+        else:
+            raise ValueError(f"Unknown loss function: {self.jepa_loss}")
+
+        # compute distribution loss
+        loss_distribution = self.normally_distributed(pred) if self.normally_distributed is not None else None
+
+        # compute contrastive loss for collapse mitigation
+        if self.contrastive_loss is not None:
+            pred_pool = pred.mean(1)
+            loss_contrastive = self.contrastive_loss(pred_pool, pred_pool).sum()
+        else:
+            loss_contrastive = None
 
         # linear probe
         if self.linear_probe is not None:
@@ -329,29 +328,23 @@ class JEPA(Task):
         else:
             linprobe_loss = None
 
-        # collapse mitigation
-        pred_pool = pred.mean(1)
-        loss_contrastive = self.contrastive_loss(pred_pool, pred_pool).sum()
-
         # calculate descriptive statistics for target
         with torch.no_grad():
             target_var, target_mean = torch.var_mean(target.view(-1, self.backbone.dim), dim=-1)
             target_var = target_var.mean()
             target_mean = target_mean.mean()
-            kurtosis = calculate_kurtosis(target, dim=-1).mean()
-            skewness = calculate_skewness(target, dim=-1).mean()
 
         output = {
             "log": {
                 "loss_jepa": loss,
-                "loss_contrastive": loss_contrastive,
-                "loss_distribution": loss_distribution,
                 "var": target_var,
                 "mean": target_mean,
-                "skewness": skewness,
-                "kurtosis": kurtosis,
             },
         }
+        if loss_contrastive is not None:
+            output["log"]["loss_contrastive"] = loss_contrastive
+        if loss_distribution is not None:
+            output["log"]["loss_distribution"] = loss_distribution
         if linprobe_loss is not None:
             output["log"]["loss_linprobe"] = linprobe_loss
 
