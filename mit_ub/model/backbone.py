@@ -9,6 +9,7 @@ from ssl_tasks.tokens import TokenMask
 from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 
+from .gqa import GroupedQueryAttention
 from .kernels.attention import MultiheadAttention
 from .pos_enc import RelativeFactorizedPosition
 
@@ -23,13 +24,25 @@ class TransformerBlock(nn.Module):
         dropout: float = 0.1,
         activation: nn.Module = nn.SiLU(),
         layer_norm_eps: float = 1e-5,
-        alibi_lower: int | None = 0,
-        alibi_upper: int | None = 8,
+        alibi_lower: int | None = None,
+        alibi_upper: int | None = None,
     ):
         super().__init__()
         self.nhead = nhead
 
-        self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        # Configure ALiBi if bounds are provided
+        if alibi_lower is None and alibi_upper is None:
+            self.alibi = None
+        elif alibi_lower is not None and alibi_upper is not None:
+            self.register_buffer("alibi", self.init_alibi(alibi_lower, alibi_upper))
+        else:
+            raise ValueError("Either both `alibi_lower` and `alibi_upper` must be provided, or neither")
+
+        self.self_attn = (
+            MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+            if self.alibi is not None
+            else GroupedQueryAttention(d_model, nhead, nhead // 2, dropout=dropout)
+        )
 
         # MLP up-project is a GLU-variant -> F.silu(W1x + b1) * F.sigmoid(W2x + b2).
         # This was hallucinated by GPT and empirically works better than standard SwiGLU.
@@ -52,13 +65,6 @@ class TransformerBlock(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
         self.activation = activation
 
-        if alibi_lower is None and alibi_upper is None:
-            self.alibi = None
-        elif alibi_lower is not None and alibi_upper is not None:
-            self.register_buffer("alibi", self.init_alibi(alibi_lower, alibi_upper))
-        else:
-            raise ValueError("Either both `alibi_lower` and `alibi_upper` must be provided, or neither")
-
     @torch.no_grad()
     def init_alibi(self, lower: int, upper: int) -> Tensor:
         return torch.logspace(lower, upper, self.nhead, base=2).reciprocal_().neg_()
@@ -77,7 +83,7 @@ class TransformerBlock(nn.Module):
             slopes = self.alibi.view(1, H).expand(B, -1).contiguous()
             y = self.self_attn(y, y, y, pos, pos, slopes, mask_threshold=mask_threshold)
         else:
-            y = self.self_attn(y, y, y)
+            y = self.self_attn(y)
         x = x + y
 
         # MLP
