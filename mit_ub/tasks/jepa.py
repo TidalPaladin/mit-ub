@@ -14,30 +14,12 @@ from torch.distributed import ReduceOp, all_reduce
 from ..model import BACKBONES, TransformerBlock, ViT
 
 
-def calculate_skewness(x: Tensor, dim: int = -1) -> Tensor:
-    r"""Calculate the skewness of a tensor along a given dimension"""
-    mean = x.mean(dim=dim, keepdim=True)
-    std = x.std(dim=dim, unbiased=False)
-    skewness = ((x - mean) ** 3).mean(dim=dim) / (std**3)
-    return skewness
-
-
-def calculate_kurtosis(x: Tensor, dim: int = -1) -> Tensor:
-    r"""Calculate the kurtosis of a tensor along a given dimension"""
-    mean = x.mean(dim=dim, keepdim=True)
-    std = x.std(dim=dim, unbiased=False)
-    kurtosis = ((x - mean) ** 4).mean(dim=dim) / (std**4) - 3
-    return kurtosis
-
-
 class NormallyDistributed(nn.Module):
     r"""Criterion that measures if a tensor is normally distributed.
 
     The following factors are considered:
         - Zero-mean
         - Unit variance
-        - Skewness
-        - Kurtosis
 
     Args:
         dim: The dimension to measure the distribution of.
@@ -49,15 +31,9 @@ class NormallyDistributed(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         var, mean = torch.var_mean(x, dim=self.dim, unbiased=False, keepdim=True)
-        skewness = calculate_skewness(x, dim=self.dim)
-        kurtosis = calculate_kurtosis(x, dim=self.dim)
-
-        mean_loss = mean.pow(2).mean()
-        var_loss = (var - 1).pow(2).mean()
-        skewness_loss = skewness.pow(2).mean()
-        kurtosis_loss = kurtosis.pow(2).mean()
-
-        total_loss = mean_loss + var_loss + skewness_loss + kurtosis_loss
+        mean_loss = mean.abs().mean()
+        var_loss = (var - 1).abs().mean()
+        total_loss = mean_loss + var_loss
         return total_loss
 
 
@@ -338,8 +314,6 @@ class JEPA(Task):
             target_var, target_mean = torch.var_mean(target.view(-1, self.backbone.dim), dim=-1)
             target_var = target_var.mean()
             target_mean = target_mean.mean()
-            kurtosis = calculate_kurtosis(target, dim=-1).mean()
-            skewness = calculate_skewness(target, dim=-1).mean()
 
         output = {
             "log": {
@@ -348,8 +322,6 @@ class JEPA(Task):
                 "loss_distribution": loss_distribution,
                 "var": target_var,
                 "mean": target_mean,
-                "skewness": skewness,
-                "kurtosis": kurtosis,
             },
         }
         if linprobe_loss is not None:
