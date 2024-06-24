@@ -287,12 +287,6 @@ class JEPA(Task):
         else:
             loss_contrastive = None
 
-        # linear probe
-        if self.linear_probe is not None:
-            linprobe_pred, linprobe_gt, linprobe_loss = self.forward_linear_probe(batch, target)
-        else:
-            linprobe_loss = None
-
         # calculate descriptive statistics for target
         with torch.no_grad():
             target_var, target_mean = torch.var_mean(target.view(-1, self.backbone.dim), dim=-1)
@@ -312,8 +306,6 @@ class JEPA(Task):
             output["log"]["loss_contrastive"] = loss_contrastive
         if loss_distribution is not None:
             output["log"]["loss_distribution"] = loss_distribution
-        if linprobe_loss is not None:
-            output["log"]["loss_linprobe"] = linprobe_loss
 
         if self.trainer.global_step % 100 == 0 or (not self.training and batch_idx == 0):
             with torch.no_grad():
@@ -394,7 +386,9 @@ class JEPAWithProbe(JEPA, ABC):
         raise NotImplementedError  # pragma: no cover
 
     @abstractmethod
-    def step_linear_probe(self, batch: Dict[str, Any], output: Dict[str, Any]) -> Dict[str, Any]:
+    def step_linear_probe(
+        self, batch: Dict[str, Any], output: Dict[str, Any], metrics: tm.MetricCollection | None
+    ) -> Dict[str, Any]:
         r"""Compute the linear probe loss and update the metrics"""
         raise NotImplementedError  # pragma: no cover
 
@@ -406,5 +400,5 @@ class JEPAWithProbe(JEPA, ABC):
         metrics: Optional[tm.MetricCollection] = None,
     ) -> Dict[str, Any]:
         output = super().step(batch, batch_idx, state, metrics)
-        output = self.step_linear_probe(batch, output)
+        output = self.step_linear_probe(batch, output, metrics)
         return output

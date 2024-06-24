@@ -1,9 +1,9 @@
-from abc import abstractmethod
 from copy import copy
 from typing import Any, Dict, Optional, Set
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.structs import State
 from torch import Tensor
@@ -60,13 +60,11 @@ class JEPAWithViewPosition(JEPAWithProbe):
             weight_decay_exemptions,
         )
 
-    @abstractmethod
     def create_probe_head(self) -> nn.Module:
         return nn.Linear(self.backbone.dim, 1)
 
-    @abstractmethod
     def create_metrics(self, state: State) -> tm.MetricCollection:
-        return tm.MetricCollection({"probe_acc": tm.Accuracy(task="binary")})
+        return tm.MetricCollection({"view_pos_acc": tm.Accuracy(task="binary")})
 
     @torch.no_grad()
     def create_view_pos_gt(self, batch: Dict[str, Any]) -> Tensor:
@@ -85,10 +83,9 @@ class JEPAWithViewPosition(JEPAWithProbe):
         assert linprobe_logits.requires_grad or not self.training
 
         # Build ground truth and compute loss
-        assert self.linear_probe_loss is not None
         linprobe_gt = self.create_view_pos_gt(batch).view(N)
         mask = linprobe_gt != -1
-        linprobe_loss = self.linear_probe_loss(linprobe_logits[mask], linprobe_gt[mask].float())
+        linprobe_loss = F.binary_cross_entropy_with_logits(linprobe_logits[mask], linprobe_gt[mask].float())
         if not mask.any():
             linprobe_loss = torch.zeros_like(linprobe_loss)
 
@@ -98,9 +95,10 @@ class JEPAWithViewPosition(JEPAWithProbe):
 
         # Compute metrics
         with torch.no_grad():
-            for name, metric in (metrics or {}).items():
-                if "probe" in name and linprobe_gt.numel():
-                    metric.update(linprobe_probs, linprobe_gt)
+            if mask.any():
+                for name, metric in (metrics or {}).items():
+                    if "view_pos" in name and linprobe_gt.numel():
+                        metric.update(linprobe_probs[mask], linprobe_gt[mask])
 
         output = copy(output)
         output["log"]["loss_linprobe"] = linprobe_loss
