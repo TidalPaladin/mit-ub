@@ -1,13 +1,13 @@
 import pytest
 import pytorch_lightning as pl
 
-from mit_ub.tasks.jepa import JEPA
+from mit_ub.tasks.view_pos import JEPAWithViewPosition
 
 
-class TestJEPA:
+class TestJEPAWithViewPosition:
     @pytest.fixture
     def task(self, optimizer_init, backbone):
-        return JEPA(backbone, optimizer_init=optimizer_init)
+        return JEPAWithViewPosition(backbone, optimizer_init=optimizer_init)
 
     def test_fit(self, task, datamodule, logger):
         trainer = pl.Trainer(

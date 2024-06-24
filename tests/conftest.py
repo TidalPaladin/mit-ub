@@ -43,10 +43,16 @@ def datamodule(tmpdir_factory):
     return factory(batch_size=2, num_workers=0, datamodule_class=PreprocessedPNGDataModule)
 
 
-@pytest.fixture
-def logger(tmp_path, mocker):
-    tmp_path = Path(tmp_path)
+@pytest.fixture(scope="session")
+def _logger(tmpdir_factory):
+    tmp_path = Path(tmpdir_factory.mktemp("wandb_logs"))
     logger = WandbLogger(name="test", save_dir=tmp_path, offline=True, anonymous=True)
+    return logger
+
+
+@pytest.fixture
+def logger(_logger, mocker):
+    logger = _logger
     logger.experiment.log = mocker.spy(logger.experiment, "log")
     return logger
 

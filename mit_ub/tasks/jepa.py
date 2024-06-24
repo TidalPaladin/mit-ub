@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from copy import deepcopy
 from typing import Any, Dict, Optional, Set, Tuple, cast
 
@@ -48,7 +49,6 @@ class JEPA(Task):
         ema_alpha: float = 0.95,
         activation_clip: float | None = None,
         margin: float | None = 0.5,
-        linear_probe: bool = True,
         loss_fn: str = "cosine",
         distribution_loss: bool = False,
         predictor_depth: int = 4,
@@ -116,15 +116,6 @@ class JEPA(Task):
             ]
         )
         self.contrastive_loss = PointwiseContrastiveEmbeddingLoss(margin=margin) if margin is not None else None
-
-        # linear probe
-        if linear_probe:
-            self.linear_probe = nn.Linear(self.backbone.dim, 1)
-            self.linear_probe_loss = nn.BCEWithLogitsLoss()
-        else:
-            self.linear_probe = None
-            self.linear_probe_loss = None
-
         self.save_hyperparameters()
 
     def prepare_backbone(self, name: str) -> nn.Module:
@@ -160,7 +151,7 @@ class JEPA(Task):
 
     def create_metrics(self, state: State) -> tm.MetricCollection:
         r"""Gets a MetricCollection for a given state"""
-        return tm.MetricCollection({"probe_acc": tm.Accuracy(task="binary")})
+        return tm.MetricCollection({})
 
     def forward(self, x: Tensor, context_mask: TokenMask, target_mask: TokenMask) -> Dict[str, Tensor]:
         # Run encoder on context and broadcast back to full size with 0 padding
@@ -244,28 +235,6 @@ class JEPA(Task):
         tensor = tensor[~tensor.isnan()].detach().float().ravel()
         return tuple(t.cpu().numpy() for t in torch.histogram(tensor.cpu(), bins=bins))
 
-    @torch.no_grad()
-    def create_linprobe_gt(self, batch: Dict[str, Any]) -> Tensor:
-        view = [e.get("ViewPosition", "unknown") for e in batch["manifest"]]
-        view_int = [0 if v.startswith("ml") or v.startswith("lm") else 1 if "cc" in v else -1 for v in view]
-        return batch["img"].new_tensor(view_int, dtype=torch.long)
-
-    def forward_linear_probe(self, batch: Dict[str, Any], target: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
-        # linear probe forward
-        assert self.linear_probe is not None
-        N = target.shape[0]
-        linprobe_pred = self.linear_probe(target.mean(1).view(N, -1)).view(N)
-        assert linprobe_pred.requires_grad or not self.training
-
-        # Build ground truth and compute loss
-        assert self.linear_probe_loss is not None
-        linprobe_gt = self.create_linprobe_gt(batch).view(N)
-        mask = linprobe_gt != -1
-        linprobe_loss = self.linear_probe_loss(linprobe_pred[mask], linprobe_gt[mask].float())
-        if not mask.any():
-            linprobe_loss = torch.zeros_like(linprobe_loss)
-        return linprobe_pred[mask], linprobe_gt[mask], linprobe_loss
-
     def clip_activations(self, x: Tensor) -> Tensor:
         if self.activation_clip is None:
             return x
@@ -318,16 +287,6 @@ class JEPA(Task):
         else:
             loss_contrastive = None
 
-        # linear probe
-        if self.linear_probe is not None:
-            linprobe_pred, linprobe_gt, linprobe_loss = self.forward_linear_probe(batch, target)
-            with torch.no_grad():
-                for name, metric in (metrics or {}).items():
-                    if "probe" in name and linprobe_gt.numel():
-                        metric.update(linprobe_pred, linprobe_gt)
-        else:
-            linprobe_loss = None
-
         # calculate descriptive statistics for target
         with torch.no_grad():
             target_var, target_mean = torch.var_mean(target.view(-1, self.backbone.dim), dim=-1)
@@ -340,13 +299,13 @@ class JEPA(Task):
                 "var": target_var,
                 "mean": target_mean,
             },
+            "jepa_pred": pred,
+            "target": target,
         }
         if loss_contrastive is not None:
             output["log"]["loss_contrastive"] = loss_contrastive
         if loss_distribution is not None:
             output["log"]["loss_distribution"] = loss_distribution
-        if linprobe_loss is not None:
-            output["log"]["loss_linprobe"] = linprobe_loss
 
         if self.trainer.global_step % 100 == 0 or (not self.training and batch_idx == 0):
             with torch.no_grad():
@@ -366,3 +325,80 @@ class JEPA(Task):
         return {
             "jepa": pred["jepa"],
         }
+
+
+class JEPAWithProbe(JEPA, ABC):
+    def __init__(
+        self,
+        backbone: str,
+        context_ratio: float = 0.5,
+        context_scale: int = 4,
+        target_ratio: float = 0.25,
+        target_scale: int = 2,
+        ema_alpha: float = 0.95,
+        activation_clip: float | None = None,
+        margin: float | None = 0.5,
+        loss_fn: str = "cosine",
+        distribution_loss: bool = False,
+        predictor_depth: int = 4,
+        optimizer_init: Dict[str, Any] = {},
+        lr_scheduler_init: Dict[str, Any] = {},
+        lr_interval: str = "epoch",
+        lr_monitor: str = "train/total_loss_epoch",
+        named_datasets: bool = False,
+        checkpoint: Optional[str] = None,
+        strict_checkpoint: bool = True,
+        log_train_metrics_interval: int = 1,
+        log_train_metrics_on_epoch: bool = False,
+        weight_decay_exemptions: Set[str] = set(),
+    ):
+        super().__init__(
+            backbone,
+            context_ratio,
+            context_scale,
+            target_ratio,
+            target_scale,
+            ema_alpha,
+            activation_clip,
+            margin,
+            loss_fn,
+            distribution_loss,
+            predictor_depth,
+            optimizer_init,
+            lr_scheduler_init,
+            lr_interval,
+            lr_monitor,
+            named_datasets,
+            checkpoint,
+            strict_checkpoint,
+            log_train_metrics_interval,
+            log_train_metrics_on_epoch,
+            weight_decay_exemptions,
+        )
+        self.linear_probe = self.create_probe_head()
+
+    @abstractmethod
+    def create_probe_head(self) -> nn.Module:
+        raise NotImplementedError  # pragma: no cover
+
+    @abstractmethod
+    def create_metrics(self, state: State) -> tm.MetricCollection:
+        raise NotImplementedError  # pragma: no cover
+
+    @abstractmethod
+    def step_linear_probe(
+        self, batch: Dict[str, Any], output: Dict[str, Any], metrics: tm.MetricCollection | None
+    ) -> Dict[str, Any]:
+        r"""Compute the linear probe loss and update the metrics"""
+        raise NotImplementedError  # pragma: no cover
+
+    def step(
+        self,
+        batch: Any,
+        batch_idx: int,
+        state: State,
+        metrics: Optional[tm.MetricCollection] = None,
+    ) -> Dict[str, Any]:
+        output = super().step(batch, batch_idx, state, metrics)
+        output = self.step_linear_probe(batch, output, metrics)
+        return output
