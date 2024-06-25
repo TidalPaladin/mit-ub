@@ -155,8 +155,8 @@ class JEPA(Task):
 
     def forward(self, x: Tensor, context_mask: TokenMask, target_mask: TokenMask) -> Dict[str, Tensor]:
         # Run encoder on context and broadcast back to full size with 0 padding
-        context: Tensor = self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
-        context = context_mask.restore_tokens(context, 0)
+        dense_context: Tensor = self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
+        context = context_mask.restore_tokens(dense_context, 0)
 
         # Create empty queries w/ position encoding that forms the initial predictor input
         B, _, D = context.shape
@@ -207,7 +207,7 @@ class JEPA(Task):
         query = mask.restore_tokens(query, 0)
         query = target_mask.apply_to_tokens(query, fill_value=None)
 
-        return {"jepa": query}
+        return {"jepa": query, "jepa_context": dense_context}
 
     @torch.no_grad()
     def update_ema(self):
@@ -259,13 +259,15 @@ class JEPA(Task):
         # generate ground truth with forward pass of ema backbone on unmasked image
         with torch.no_grad():
             self.ema_backbone.eval()
-            target: Tensor = self.ema_backbone(x, reshape=False)
-            target = target_mask.apply_to_tokens(target, fill_value=None)
+            full_target: Tensor = self.ema_backbone(x, reshape=False)
+            target = target_mask.apply_to_tokens(full_target, fill_value=None)
             target = self.clip_activations(target)
 
         # generate predictions by encoding the context and then running the encoded context
         # plus the positional target queries through the predictor
-        pred: Tensor = self(x, context_mask, target_mask)["jepa"]
+        pred_dict = self(x, context_mask, target_mask)
+        pred: Tensor = pred_dict["jepa"]
+        context: Tensor = pred_dict["jepa_context"]
 
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
@@ -293,6 +295,10 @@ class JEPA(Task):
             target_var = target_var.mean()
             target_mean = target_mean.mean()
 
+        # combine prediction and target into a single tensor that requires grad.
+        # this can be used with a supervised loss to backprop through the backbone.
+        combined = full_target + context_mask.restore_tokens(context, 0)
+
         output = {
             "log": {
                 "loss_jepa": loss,
@@ -301,6 +307,7 @@ class JEPA(Task):
             },
             "jepa_pred": pred,
             "target": target,
+            "combined": combined,
         }
         if loss_contrastive is not None:
             output["log"]["loss_contrastive"] = loss_contrastive
