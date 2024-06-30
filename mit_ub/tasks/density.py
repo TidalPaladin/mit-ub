@@ -12,6 +12,18 @@ from einops.layers.torch import Rearrange
 
 from torch import Tensor
 from torchvision.ops import sigmoid_focal_loss
+import sys
+from pathlib import Path
+from typing import Final
+
+from dicom_utils.container.collection import iterate_input_path
+from dicom_utils.dicom import has_dicm_prefix
+from dicom_utils.volume import ReduceVolume
+from jsonargparse import ActionConfigFile, ArgumentParser, Namespace
+from torch import Tensor
+from torch_dicom.inference.lightning import LightningInferencePipeline
+from tqdm import tqdm
+
 
 from ..model import BACKBONES, ViT
 
@@ -102,6 +114,10 @@ class Density(Task):
         if detach:
             for p in self.backbone.parameters():
                 p.requires_grad = False
+
+    @property
+    def img_size(self) -> Tuple[int, int]:
+        return (512, 384)
 
     def prepare_backbone(self, name: str) -> nn.Module:
         return BACKBONES.get(name).instantiate_with_metadata().fn
@@ -215,3 +231,112 @@ class Density(Task):
             cast(tm.Metric, metrics["auroc"]).update(binary_pred, binary_true)
 
         return output
+
+    @torch.no_grad()
+    def predict_step(self, batch: Any, *args, **kwargs) -> Dict[str, Any]:
+        x = batch["img"]
+        pred_logits: Tensor = self(x)["density"]
+
+        # Post-processed predictions and original target
+        pred, p = self.postprocess(pred_logits)
+        return {
+            "pred": p,
+            "pred_cls": pred
+        }
+
+
+
+
+IGNORE_KEYS: Final = {
+    "density_int",
+    "raw",
+}
+
+
+def is_dicom(path: Path) -> bool:
+    # Try to avoid slow opening the file if possible by checking the suffix
+    if path.suffix.lower() == ".dcm":
+        return True
+    return has_dicm_prefix(path)
+
+
+def main(args: Namespace) -> None:
+    # Prepare model
+    model: Density = args.model
+    model = model.to(args.device)
+    checkpoint: Path = Path(args.checkpoint)
+    model.checkpoint = checkpoint.absolute()
+    model.setup()
+
+    dicom_paths = filter(is_dicom, iterate_input_path(args.target, ignore_missing=True))
+    png_paths = filter(lambda p: p.suffix.lower() == ".png", iterate_input_path(args.target, ignore_missing=True))
+    pipeline = LightningInferencePipeline(
+        dicom_paths=dicom_paths,
+        image_paths=png_paths,
+        device=args.device,
+        batch_size=args.batch_size,
+        dataloader_kwargs={"num_workers": args.num_workers},
+        volume_handler=ReduceVolume(skip_edge_frames=5),
+        models=[model],
+        transform=LightningInferencePipeline.create_default_transform(img_size=model.img_size),
+        enumerate_inputs=args.enumerate,
+    )
+
+    header = None
+    for example, pred in pipeline:
+        # Example keys are different for DICOM and PNG. We also support falling back to the path for the SOPInstanceUID
+        path = example["record"].path if "record" in example else example["path"]
+        sop = example["record"].SOPInstanceUID if "record" in example else path.stem if args.uid_from_stem else ""
+        result = {
+            "path": path,
+            "SOPInstanceUID": sop,
+            **{k: v.item() if isinstance(v, Tensor) else v for k, v in pred.items() if k not in IGNORE_KEYS},
+        }
+        with tqdm.external_write_mode():
+            if header is None:
+                header = ",".join(result.keys())
+                print(header)
+            print(",".join(str(v) for v in result.values()))
+            sys.stdout.flush()
+            sys.stderr.flush()
+
+
+def parse_args() -> Namespace:
+    parser = ArgumentParser(prog="mammo-density", description="Infer breast density from mammograms.")
+    parser.add_argument("--config", action=ActionConfigFile)
+
+    parser.add_argument(
+        "target",
+        type=Path,
+        help="Target DICOMs or PNGs to process. Can be a file, directory, or text file containing paths.",
+    )
+    Density.add_args_to_parser(parser, skip={"weights"}, subclass=True)
+
+    parser.add_argument(
+        "-e",
+        "--enumerate",
+        default=False,
+        action="store_true",
+        help="Enumerate the input DICOMs. May take time but enables a progress bar.",
+    )
+    parser.add_argument("-b", "--batch-size", type=int, default=1, help="Batch size for processing")
+    parser.add_argument("--num-workers", type=int, default=4, help="Number of workers for data loading.")
+    parser.add_argument(
+        "--uid-from-stem",
+        default=False,
+        action="store_true",
+        help="Use the file stem as the SOPInstanceUID when it is not available in the metadata.",
+    )
+
+    cfg = parser.parse_args()
+    cfg = parser.instantiate_classes(cfg)
+    cfg = Density.on_after_parse(cfg)
+    return cfg
+
+
+def entrypoint():
+    main(parse_args())
+
+
+if __name__ == "__main__":
+    entrypoint()

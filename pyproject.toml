@@ -116,3 +116,4 @@ TRITON_DEBUG = "1"
 # Sample script config
 [project.scripts]
 train = "deep_helpers.cli:main"
+density = "mit_ub.tasks.density:entrypoint"

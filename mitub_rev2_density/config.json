@@ -1,0 +1,6 @@
+{
+    "class_path": "mit_ub.tasks.Density",
+    "init_args": {
+        "backbone": "vit-i1-p16-d512"
+    }
+}
