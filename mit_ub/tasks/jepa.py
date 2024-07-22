@@ -10,7 +10,8 @@ from deep_helpers.tasks import Task
 from ssl_tasks.contrastive.loss import PointwiseContrastiveEmbeddingLoss
 from ssl_tasks.tokens import TokenMask
 from torch import Tensor
-from torch.distributed import ReduceOp, all_reduce
+from torch.distributed import ReduceOp, all_gather, all_reduce
+from torch.distributed import is_initialized as dist_is_initialized
 
 from ..model import BACKBONES, TransformerBlock, ViT
 
@@ -52,6 +53,7 @@ class JEPA(Task):
         loss_fn: str = "cosine",
         distribution_loss: bool = False,
         predictor_depth: int = 4,
+        dist_gather: bool = False,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -85,6 +87,7 @@ class JEPA(Task):
         self.ema_alpha = ema_alpha
         self.activation_clip = activation_clip
         assert self.activation_clip is None or self.activation_clip > 0
+        self.dist_gather = dist_gather
 
         self.backbone = cast(ViT, self.prepare_backbone(backbone))
         self.ema_backbone = deepcopy(self.backbone)
@@ -285,6 +288,12 @@ class JEPA(Task):
         # compute contrastive loss for collapse mitigation
         if self.contrastive_loss is not None:
             pred_pool = pred.mean(1)
+
+            # Gather average-pooled predictions from all GPUs if requested
+            if self.dist_gather and dist_is_initialized():
+                gathered_preds = [torch.zeros_like(pred_pool) for _ in range(self.trainer.world_size)]
+                all_gather(gathered_preds, pred_pool)
+                pred_pool = torch.cat(gathered_preds, dim=0)
             loss_contrastive = self.contrastive_loss(pred_pool, pred_pool).sum()
         else:
             loss_contrastive = None
@@ -348,6 +357,7 @@ class JEPAWithProbe(JEPA, ABC):
         loss_fn: str = "cosine",
         distribution_loss: bool = False,
         predictor_depth: int = 4,
+        dist_gather: bool = False,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -371,6 +381,7 @@ class JEPAWithProbe(JEPA, ABC):
             loss_fn,
             distribution_loss,
             predictor_depth,
+            dist_gather,
             optimizer_init,
             lr_scheduler_init,
             lr_interval,

@@ -9,7 +9,9 @@ class TestJEPA:
     def task(self, optimizer_init, backbone):
         return JEPA(backbone, optimizer_init=optimizer_init)
 
-    def test_fit(self, task, datamodule, logger):
+    @pytest.mark.parametrize("dist_gather", [False, True])
+    def test_fit(self, task, datamodule, logger, dist_gather):
+        task.dist_gather = dist_gather
         trainer = pl.Trainer(
             accelerator="cpu",
             fast_dev_run=True,
