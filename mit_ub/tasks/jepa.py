@@ -230,13 +230,15 @@ class JEPA(Task):
     def weight_histogram(self, module: nn.Module, bins: int = 100) -> Tuple[Tensor, Tensor]:
         r"""Create a histogram of weights in a given module."""
         weights = torch.cat([p.detach().float().ravel() for p in module.parameters() if p.requires_grad])
-        return tuple(t.cpu().numpy() for t in torch.histogram(weights.cpu(), bins=bins))
+        result = tuple(t.cpu().numpy() for t in torch.histogram(weights.cpu(), bins=bins))
+        return cast(Tuple[Tensor, Tensor], result)
 
     @torch.no_grad()
     def tensor_histogram(self, tensor: Tensor, bins: int = 100) -> Tuple[Tensor, Tensor]:
         r"""Create a histogram of weights in a given module."""
         tensor = tensor[~tensor.isnan()].detach().float().ravel()
-        return tuple(t.cpu().numpy() for t in torch.histogram(tensor.cpu(), bins=bins))
+        result = tuple(t.cpu().numpy() for t in torch.histogram(tensor.cpu(), bins=bins))
+        return cast(Tuple[Tensor, Tensor], result)
 
     def clip_activations(self, x: Tensor) -> Tensor:
         if self.activation_clip is None:

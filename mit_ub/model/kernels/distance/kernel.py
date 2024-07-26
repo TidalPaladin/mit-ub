@@ -5,6 +5,7 @@ import triton
 import triton.language as tl
 from torch import Tensor
 from torch.autograd import Function
+from triton.language.extra.cuda import libdevice as ld
 from triton_helpers import TENSOR_CORE_K
 from triton_helpers.heuristics import BoundaryCheckHeuristic, PowerOfTwoHeuristic
 
@@ -55,8 +56,8 @@ def euclidean_distance_inner(
 
         # Compute diagonals for without a matmul
         elif METHOD == "matmul-nodiag":
-            diag_a = tl.sum(tl.math.pow(a.to(tl.float32), 2), 1)
-            diag_b = tl.sum(tl.math.pow(b.to(tl.float32), 2), 1)
+            diag_a = tl.sum(ld.pow(a.to(tl.float32), 2), 1)
+            diag_b = tl.sum(ld.pow(b.to(tl.float32), 2), 1)
 
         else:
             tl.static_assert(False, "Unreachable code path in Euclidean distance kernel.")
@@ -71,7 +72,7 @@ def euclidean_distance_inner(
 
         # Sometimes inf -> nan happens, so fix that
         result = tl.where(
-            tl.math.isnan(result),
+            ld.isnan(result),
             tl.full((BLOCK_M, BLOCK_N), float("inf"), result.dtype),
             result,
         )
