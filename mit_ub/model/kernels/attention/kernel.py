@@ -1,5 +1,5 @@
 import math
-from typing import Any, Dict, Final, Tuple, cast
+from typing import Any, Dict, Tuple, cast
 
 import torch
 import torch.nn.functional as F
@@ -7,6 +7,7 @@ import triton
 import triton.language as tl
 from torch import Tensor
 from triton import JITFunction
+from triton.language.extra.cuda import libdevice as ld
 from triton_helpers import TENSOR_CORE_K
 from triton_helpers.heuristics import BoundaryCheckHeuristic, IsBlockMultiple, PowerOfTwoHeuristic, SMHeuristic
 from triton_helpers.ops import to_tensor
@@ -14,7 +15,7 @@ from triton_helpers.ops import to_tensor
 from ..distance.kernel import euclidean_distance_inner
 
 
-LN_2_RECIP: Final = 1 / math.log(2)
+LN_2_RECIP: tl.constexpr = 1 / math.log(2)
 
 
 # @triton.autotune(
@@ -212,7 +213,7 @@ def _fwd_kernel(
     for i in range(0, N, BLOCK_N):
         # Load K block and compute QK
         k = tl.load(K_block_ptr, boundary_check=BOUND_CHECK_K.value)
-        qk = tl.dot(q, tl.trans(k), out_dtype=cast(tl.dtype, DOT_DTYPE))
+        qk = tl.dot(q, tl.trans(k), out_dtype=DOT_DTYPE)
 
         # Compute the bias
         if HAS_BIAS:
@@ -236,13 +237,13 @@ def _fwd_kernel(
 
         # Compute scaling constant alpha and rescale the previous contributions, updating the maximum logit
         alpha = tl.math.exp2(query_i_maxdot - query_i_maxdot_new).to(ACCUMULATOR_DTYPE)
-        alpha = tl.where(tl.math.isnan(alpha), to_tensor(1, alpha.dtype), alpha)
+        alpha = tl.where(ld.isnan(alpha), to_tensor(1, alpha.dtype), alpha)
         tl.device_assert((alpha >= 0) & (alpha <= 1), "alpha must be in [0, 1]")
         query_i_maxdot = query_i_maxdot_new
 
         # Compute the softmax numerator for each key, applying the maximum logit offset to avoid numerical overflow
         p = tl.math.exp2(qk - query_i_maxdot_new[:, None])
-        p = tl.where(tl.math.isnan(p), to_tensor(0, p.dtype), p)
+        p = tl.where(ld.isnan(p), to_tensor(0, p.dtype), p)
         p = p.to(PROB_DTYPE)
         tl.device_assert((p >= 0) & (p <= 1), "p must be in [0, 1]")
 
@@ -252,9 +253,7 @@ def _fwd_kernel(
         # Accumulate the weighted values for this block of V
         v = tl.load(V_block_ptr, boundary_check=BOUND_CHECK_K.value)
         p = p.to(v_p.dtype.element_ty)
-        value_accumulator = value_accumulator * alpha[:, None] + tl.dot(p, v, out_dtype=cast(tl.dtype, DOT_DTYPE)).to(
-            ACCUMULATOR_DTYPE
-        )
+        value_accumulator = value_accumulator * alpha[:, None] + tl.dot(p, v, out_dtype=DOT_DTYPE).to(ACCUMULATOR_DTYPE)
 
         # Advance pointers
         K_block_ptr = tl.advance(K_block_ptr, (BLOCK_N, 0))
@@ -264,9 +263,7 @@ def _fwd_kernel(
 
     # Compute the final softmax values
     value_accumulator = value_accumulator / softmax_denominator.to(ACCUMULATOR_DTYPE)[:, None]
-    value_accumulator = tl.where(
-        tl.math.isnan(value_accumulator), to_tensor(0, value_accumulator.dtype), value_accumulator
-    )
+    value_accumulator = tl.where(ld.isnan(value_accumulator), to_tensor(0, value_accumulator.dtype), value_accumulator)
 
     # Per Flash Attention 2, we store only logsumexp for the backward pass
     start_m = tl.program_id(2)
@@ -317,7 +314,7 @@ def _fwd_kernel(
 def _bwd_do_o_dot(
     # fmt: off
     # Inputs
-    Out: tl.pointer_type, DO: tl.pointer_type, Delta: tl.pointer_type,
+    Out, DO, Delta,
     # Strides
     stride_o_b: int, stride_o_h: int, stride_o_m: int,
     stride_do_b: int, stride_do_h: int, stride_do_m: int, stride_do_d: int,
@@ -364,7 +361,7 @@ def _bwd_do_o_dot(
 
     # Compute
     delta = tl.sum(o * do, axis=1)
-    delta = tl.where(tl.math.isnan(delta), to_tensor(0, delta.dtype), delta)
+    delta = tl.where(ld.isnan(delta), to_tensor(0, delta.dtype), delta)
     delta = delta.to(Delta.dtype.element_ty)
 
     # Write output
@@ -567,25 +564,25 @@ def _bwd_kernel(
         else:
             p = tl.math.exp2(qk * QK_SCALE - logit_scale[:, None])
 
-        p = tl.where(tl.math.isnan(p), to_tensor(0, p.dtype), p)
+        p = tl.where(ld.isnan(p), to_tensor(0, p.dtype), p)
         p = p.to(do_p.dtype.element_ty)
 
         # compute dL/dv = dL/do * do/dv = dL/do * p
         # Shape do = (MxD)
         # NOTE: `do` is pre-divided by `l`; no normalization here
-        dv += tl.dot(tl.trans(p), do, out_dtype=cast(tl.dtype, DOT_DTYPE)).to(ACCUMULATOR_DTYPE)
+        dv += tl.dot(tl.trans(p), do, out_dtype=DOT_DTYPE).to(ACCUMULATOR_DTYPE)
 
         # compute dL/dp = dL/do * do/dp = dL/do * v
         # Shape dp = (MxN)
         delta = tl.load(Delta_block_ptr, boundary_check=BOUND_CHECK_LOGIT.value)
-        dp = tl.dot(do, tl.trans(v), out_dtype=cast(tl.dtype, DOT_DTYPE))
+        dp = tl.dot(do, tl.trans(v), out_dtype=DOT_DTYPE)
 
         # compute dL/ds = dL/dp * dp/ds = p * (dp - delta[:, None])
         # Shape ds = (MxN)
         ds = ((p * (dp - delta[:, None])) * SOFTMAX_SCALE).to(q_p.dtype.element_ty)
 
         # compute dL/dk = dL/ds * ds/dk = dot(ds.T, q)
-        dk += tl.dot(tl.trans(ds), q, out_dtype=cast(tl.dtype, DOT_DTYPE)).to(ACCUMULATOR_DTYPE)
+        dk += tl.dot(tl.trans(ds), q, out_dtype=DOT_DTYPE).to(ACCUMULATOR_DTYPE)
 
         # compute dL/dq = dL/ds * ds/dq = dot(ds, k)
         # NOTE: We do an atomic add here since multiple threads may be writing to the dq location.
@@ -596,7 +593,7 @@ def _bwd_kernel(
         offs_d = tl.max_contiguous(tl.arange(0, BLOCK_HEADDIM), BLOCK_HEADDIM)
         q_grid = dq_p + offs_m[:, None] + offs_d[None, :]
 
-        dq = tl.dot(ds, k, out_dtype=cast(tl.dtype, DOT_DTYPE)).to(dq_p.dtype.element_ty)
+        dq = tl.dot(ds, k, out_dtype=DOT_DTYPE).to(dq_p.dtype.element_ty)
         if ATOMIC_ADD:
             if EVEN_Q:
                 tl.atomic_add(q_grid, dq)
@@ -618,8 +615,8 @@ def _bwd_kernel(
         # advance pointers
         Q_block_ptr = tl.advance(Q_block_ptr, (BLOCK_M, 0))
         DO_block_ptr = tl.advance(DO_block_ptr, (BLOCK_M, 0))
-        Delta_block_ptr = tl.advance(Delta_block_ptr, BLOCK_M)
-        Logit_block_ptr = tl.advance(Logit_block_ptr, BLOCK_M)
+        Delta_block_ptr = tl.advance(Delta_block_ptr, (BLOCK_M,))
+        Logit_block_ptr = tl.advance(Logit_block_ptr, (BLOCK_M,))
         dq_p += BLOCK_M * stride_q_m
         if not ATOMIC_ADD:
             lock_p += 1
@@ -652,7 +649,7 @@ def _bwd_kernel(
 
 class SDPA(torch.autograd.Function):
 
-    @torch.cuda.amp.custom_fwd()
+    @torch.amp.custom_fwd(device_type="cuda") # type: ignore
     @staticmethod
     def forward(
         # fmt: off
@@ -742,7 +739,7 @@ class SDPA(torch.autograd.Function):
         ctx.mask_threshold = mask_threshold if has_bias else None
         return o
 
-    @torch.cuda.amp.custom_bwd
+    @torch.amp.custom_bwd(device_type="cuda") # type: ignore
     @torch.no_grad()
     @staticmethod
     def backward(ctx, do: Tensor):
