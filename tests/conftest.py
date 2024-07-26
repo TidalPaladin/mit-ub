@@ -6,6 +6,9 @@ import torch
 from pytorch_lightning.loggers import WandbLogger
 from torch_dicom.preprocessing.datamodule import PreprocessedPNGDataModule
 from torch_dicom.testing import MammogramTestFactory
+from torchvision.datasets import CIFAR10
+
+from mit_ub.data import CIFAR10DataModule
 
 
 def cuda_available():
@@ -72,3 +75,27 @@ def no_autotune():
     from triton.runtime import Autotuner
 
     Autotuner.prune_configs = lambda self, *args, **kwargs: [self.configs[0]]
+
+
+@pytest.fixture
+def mock_cifar10(mocker):
+    torch.random.manual_seed(0)
+    mock_dataset = mocker.MagicMock(spec_set=CIFAR10)
+    mock_dataset.__getitem__.side_effect = lambda index: {
+        # Intentionally set 1-channels so we don't need a custom backbone
+        "img": torch.rand(1, 32, 32),
+        "label": torch.randint(0, 10, (1,)).item(),
+    }
+    mock_dataset.__len__.return_value = 100
+    mocker.patch("torchvision.datasets.CIFAR10", return_value=mock_dataset)
+    mocker.patch("mit_ub.data.cifar10.CIFAR10", return_value=mock_dataset)
+    return mock_dataset
+
+
+@pytest.fixture
+def cifar10_datamodule(tmp_path, mock_cifar10):
+    return CIFAR10DataModule(
+        root=tmp_path,
+        batch_size=4,
+        num_workers=0,
+    )
