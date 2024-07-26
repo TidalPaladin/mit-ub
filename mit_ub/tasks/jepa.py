@@ -13,7 +13,7 @@ from torch import Tensor
 from torch.distributed import ReduceOp, all_gather, all_reduce
 from torch.distributed import is_initialized as dist_is_initialized
 
-from ..model import BACKBONES, TransformerBlock, ViT
+from ..model import BACKBONES, TransformerEncoderLayer, ViT
 
 
 class NormallyDistributed(nn.Module):
@@ -108,7 +108,7 @@ class JEPA(Task):
         predictor_dim_ff = self.backbone.dim
         self.jepa_predictor = nn.ModuleList(
             [
-                TransformerBlock(
+                TransformerEncoderLayer(
                     self.backbone.dim,
                     self.backbone.nhead,
                     predictor_dim_ff,
@@ -203,7 +203,7 @@ class JEPA(Task):
         B, L = query.shape[:2]
         position = positions.view(B, 1, L, -1).expand(-1, self.backbone.nhead, -1, -1)
         for block in self.jepa_predictor:
-            block = cast(TransformerBlock, block)
+            block = cast(TransformerEncoderLayer, block)
             query = block(query, position)
 
         # Extract only the target queries from the full set of queries
