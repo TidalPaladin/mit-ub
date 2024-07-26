@@ -649,7 +649,7 @@ def _bwd_kernel(
 
 class SDPA(torch.autograd.Function):
 
-    @torch.amp.custom_fwd(device_type="cuda") # type: ignore
+    @torch.amp.custom_fwd(device_type="cuda")  # type: ignore
     @staticmethod
     def forward(
         # fmt: off
@@ -739,7 +739,7 @@ class SDPA(torch.autograd.Function):
         ctx.mask_threshold = mask_threshold if has_bias else None
         return o
 
-    @torch.amp.custom_bwd(device_type="cuda") # type: ignore
+    @torch.amp.custom_bwd(device_type="cuda")  # type: ignore
     @torch.no_grad()
     @staticmethod
     def backward(ctx, do: Tensor):
