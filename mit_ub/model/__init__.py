@@ -21,6 +21,7 @@ BACKBONES(
     name="vit-i1-p16-d512-adaptive",
     in_channels=1,
     dim=512,
+    kv_dim=64,
     patch_size=16,
     target_shape=(16, 12),
     depth=12,
