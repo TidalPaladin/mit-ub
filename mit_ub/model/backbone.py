@@ -1,3 +1,4 @@
+import warnings
 from typing import Callable, Optional, Sequence, Tuple, cast
 
 import torch
@@ -9,86 +10,9 @@ from ssl_tasks.tokens import TokenMask
 from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 
-from .kernels.attention import MultiheadAttention
+from .adaptive_tokenizer import AdaptiveTokenizer2d
 from .pos_enc import RelativeFactorizedPosition
-
-
-class TransformerBlock(nn.Module):
-
-    def __init__(
-        self,
-        d_model: int,
-        nhead: int,
-        dim_feedforward: int = 2048,
-        dropout: float = 0.1,
-        activation: nn.Module = nn.SiLU(),
-        layer_norm_eps: float = 1e-5,
-        alibi_lower: int | None = None,
-        alibi_upper: int | None = None,
-    ):
-        super().__init__()
-        self.nhead = nhead
-
-        # Configure ALiBi if bounds are provided
-        if alibi_lower is None and alibi_upper is None:
-            self.alibi = None
-        elif alibi_lower is not None and alibi_upper is not None:
-            self.register_buffer("alibi", self.init_alibi(alibi_lower, alibi_upper))
-        else:
-            raise ValueError("Either both `alibi_lower` and `alibi_upper` must be provided, or neither")
-
-        self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-
-        # MLP up-project is a GLU-variant -> F.silu(W1x + b1) * F.sigmoid(W2x + b2).
-        # This was hallucinated by GPT and empirically works better than standard SwiGLU.
-        # Maybe call this SigmoidGatedSiLU or something? Has it been done in literature?
-        # Seems similar to squeeze/excite.
-        #
-        # Improves probe accuracy, convergence rate, and reduces feature variance
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
-        self.gate = nn.Sequential(
-            nn.Linear(d_model, dim_feedforward),
-            nn.Sigmoid(),
-        )
-
-        self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
-
-        self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
-        self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-        self.activation = activation
-
-    @torch.no_grad()
-    def init_alibi(self, lower: int, upper: int) -> Tensor:
-        return torch.logspace(lower, upper, self.nhead, base=2).reciprocal_().neg_()
-
-    def forward(
-        self,
-        x: Tensor,
-        pos: Tensor | None = None,
-        full_precision: bool = True,
-        mask_threshold: float | None = None,
-    ) -> Tensor:
-        # Self attention
-        y = self.norm1(x)
-        B, H = x.shape[0], self.nhead
-        if self.alibi is not None:
-            slopes = self.alibi.view(1, H).expand(B, -1).contiguous()
-            y = self.self_attn(y, y, y, pos, pos, slopes, mask_threshold=mask_threshold)
-        else:
-            y = self.self_attn(y, y, y)
-        x = x + y
-
-        # MLP
-        y = self.norm2(x)
-        y = self.activation(self.linear1(y)) * self.gate(y)
-        y = self.dropout(y)
-        y = self.linear2(y)
-        x = x + y
-
-        return x
+from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
 
 class ViT(nn.Module):
@@ -103,14 +27,14 @@ class ViT(nn.Module):
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
         activation: nn.Module = nn.SiLU(),
-        alibi: bool = True,
+        alibi: bool = False,
     ):
         super().__init__()
         self._dim = dim
         self._nhead = nhead if nhead is not None else self.dim // 32
         self._in_channels = in_channels
         self._alibi = alibi
-        dim_feedforward = dim_feedforward or 4 * dim
+        self._dim_feedforward = dim_feedforward = dim_feedforward or 4 * dim
 
         # Make patch size length 3 (D H W) for 2D or 3D inputs
         if isinstance(patch_size, int):
@@ -137,12 +61,22 @@ class ViT(nn.Module):
 
         # Transformer blocks
         self.blocks = nn.ModuleList(
-            [TransformerBlock(dim, nhead, dim_feedforward, dropout, activation) for _ in range(depth)]
+            [
+                TransformerEncoderLayer(
+                    dim, nhead, dim_feedforward, dropout, activation, alibi_lower=low, alibi_upper=high
+                )
+                for low, high in map(self.get_alibi_bounds, range(depth))
+            ]
         )
+        assert all((block.alibi is None) == (not alibi) for block in self.blocks), "AliBi not configured as expected"
 
     @property
     def dim(self) -> int:
         return self._dim
+
+    @property
+    def dim_feedforward(self) -> int:
+        return self._dim_feedforward
 
     @property
     def nhead(self) -> int:
@@ -198,9 +132,15 @@ class ViT(nn.Module):
         if mask is not None:
             x = mask.apply_to_tokens(x, fill_value=mask_fill_value)
 
+        if self._alibi:
+            alibi_pos = self.create_alibi_positions(x, tokenized_size, mask, mask_fill_value)
+            alibi_pos = alibi_pos.expand(-1, self.nhead, -1, -1)
+        else:
+            alibi_pos = None
+
         # Transformer blocks
         for block in self.blocks:
-            x = block(x)
+            x = block(x, alibi_pos)
 
         if reshape and mask is not None and mask_fill_value is None:
             raise ValueError(
@@ -269,3 +209,117 @@ class ViT(nn.Module):
             A handle that can be used to remove the added hook by calling ``handle.remove()``.
         """
         return self.patch_embed_2d.register_forward_hook(func, *args, **kwargs)
+
+
+class AdaptiveViT(ViT):
+
+    def __init__(
+        self,
+        in_channels: int,
+        dim: int,
+        kv_dim: int,
+        patch_size: int | Sequence[int],
+        target_shape: Tuple[int, int],
+        depth: int,
+        nhead: int,
+        tokenizer_depth: int = 3,
+        dim_feedforward: Optional[int] = None,
+        dropout: float = 0.1,
+        activation: nn.Module = nn.SiLU(),
+        alibi: bool = False,
+    ):
+        super().__init__(in_channels, dim, patch_size, depth, nhead, dim_feedforward, dropout, activation, alibi)
+        # These are all provided by the adaptive tokenizer
+        delattr(self, "patch_embed_2d")
+        delattr(self, "patch_embed_3d")
+        delattr(self, "pos_enc_2d")
+        delattr(self, "pos_enc_3d")
+
+        # TODO: For now only a 2D tokenizer is provided. 3D tokenization support is ready via AdaptiveTokenizer3d
+        # but there isn't an immediate need for it. Having unused parameters complicates DDP training, so we omit
+        # the 3D tokenizer for now.
+        self.tokenizer = AdaptiveTokenizer2d(in_channels, dim, kv_dim, self.patch_size_2d, target_shape)
+        self.cross_attn = nn.ModuleList(
+            [
+                TransformerDecoderLayer(dim, nhead, kv_dim, self.dim_feedforward, dropout, activation)
+                for _ in range(tokenizer_depth)
+            ]
+        )
+
+    def tokenized_size(self, *size: int) -> Sequence[int]:
+        return self.tokenizer.target_shape
+
+    def equivalent_size_2d(self, *size: int) -> Sequence[int]:
+        return tuple(s * p for s, p in zip(self.tokenized_size(*size), self.patch_size_2d))
+
+    @property
+    def pos_enc_2d(self) -> nn.Module:
+        return self.tokenizer.pos_enc_q
+
+    @property
+    def pos_enc_3d(self) -> nn.Module:
+        return self.tokenizer.pos_enc_q
+
+    def forward(
+        self,
+        x: Tensor,
+        reshape: bool = True,
+        mask: TokenMask | None = None,
+        mask_fill_value: float | Tensor | None = None,
+    ) -> Tensor:
+        B, C, *original_size = x.shape
+        tokenized_size = self.tokenized_size(*original_size)
+        is_3d = x.ndim == 5
+        assert not is_3d, "3D input not supported for AdaptiveViT"
+
+        # Tokenize (includes position encoding)
+        q, kv = self.tokenizer(x)
+
+        # Determine the grid size of the key/value tokens
+        kv_tokenized_size = self.tokenizer.kv_size(x.shape[2:])
+        # Determine the effective input size of the key/value tokens by scaling up by patch size
+        effective_kv_size = tuple(t * p for t, p in zip(kv_tokenized_size, self.patch_size_2d))
+
+        # Apply token mask if given
+        if mask is not None:
+            kv_mask = mask.resize(effective_kv_size)
+            q = mask.apply_to_tokens(q, fill_value=mask_fill_value)
+            kv = kv_mask.apply_to_tokens(kv, fill_value=mask_fill_value)
+        else:
+            kv_mask = None
+
+        if self._alibi:
+            # TODO: As currently implemented ALiBi probably won't work for AdaptiveViT. This is
+            # because the q and kv tokens will have different positions on an absolute pixel coordinate grid.
+            # This can be fixed by using relative positions on the interval [-1, 1], but the magnitude of ALiBi
+            # slopes needs to be adjusted to account for this. ALiBi hasn't shown much impact on performance so
+            # for now we generally avoid using it.
+            warnings.warn("ALiBi is not well tested for AdaptiveViT. Use with caution.")
+            alibi_pos_q = self.create_alibi_positions(q, tokenized_size, mask, mask_fill_value)
+            alibi_pos_k = self.create_alibi_positions(kv, effective_kv_size, kv_mask, mask_fill_value)
+            alibi_pos_q = alibi_pos_q.expand(-1, self.nhead, -1, -1)
+            alibi_pos_k = alibi_pos_k.expand(-1, self.nhead, -1, -1)
+        else:
+            alibi_pos_q = alibi_pos_k = None
+
+        # Cross attention blocks between fixed backbone tokens and high res input tokens
+        for block in self.cross_attn:
+            q = block(q, kv, alibi_pos_q, alibi_pos_k)
+        x = q
+
+        # Transformer blocks
+        for block in self.blocks:
+            x = block(x)
+
+        if reshape and mask is not None and mask_fill_value is None:
+            raise ValueError(
+                "Cannot reshape with mask and no fill value. Either specify `reshape=False` or provide a `mask_fill_value`"
+            )
+
+        if reshape and is_3d:
+            raise NotImplementedError("3D reshape not implemented")
+            # x = rearrange(x, "b (d h w) c -> b c d h w", d=tokenized_size[0], h=tokenized_size[1], w=tokenized_size[2])
+        elif reshape:
+            x = rearrange(x, "b (h w) c -> b c h w", h=tokenized_size[0], w=tokenized_size[1])
+
+        return x

@@ -7,7 +7,7 @@ from mit_ub.tasks.jepa import JEPA
 class TestJEPA:
     @pytest.fixture
     def task(self, optimizer_init, backbone):
-        return JEPA(backbone, optimizer_init=optimizer_init)
+        return JEPA(backbone, optimizer_init=optimizer_init, context_scale=1)
 
     @pytest.mark.parametrize("dist_gather", [False, True])
     def test_fit(self, task, datamodule, logger, dist_gather):

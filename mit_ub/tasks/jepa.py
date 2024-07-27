@@ -13,7 +13,7 @@ from torch import Tensor
 from torch.distributed import ReduceOp, all_gather, all_reduce
 from torch.distributed import is_initialized as dist_is_initialized
 
-from ..model import BACKBONES, TransformerBlock, ViT
+from ..model import BACKBONES, AdaptiveViT, TransformerEncoderLayer, ViT
 
 
 class NormallyDistributed(nn.Module):
@@ -108,7 +108,7 @@ class JEPA(Task):
         predictor_dim_ff = self.backbone.dim
         self.jepa_predictor = nn.ModuleList(
             [
-                TransformerBlock(
+                TransformerEncoderLayer(
                     self.backbone.dim,
                     self.backbone.nhead,
                     predictor_dim_ff,
@@ -126,6 +126,10 @@ class JEPA(Task):
 
     def create_context_mask(self, x: Tensor) -> TokenMask:
         size = x.shape[2:]
+        # For AdaptiveViT we choose a token mask that matches the size of the fixed token grid produced
+        # by the ViT.
+        if isinstance(self.backbone, AdaptiveViT):
+            size = self.backbone.equivalent_size_2d(*size)
         batch_size = x.shape[0]
         device = x.device
         return TokenMask.create(
@@ -140,6 +144,10 @@ class JEPA(Task):
 
     def create_target_mask(self, x: Tensor) -> TokenMask:
         size = x.shape[2:]
+        # For AdaptiveViT we choose a token mask that matches the size of the fixed token grid produced
+        # by the ViT.
+        if isinstance(self.backbone, AdaptiveViT):
+            size = self.backbone.equivalent_size_2d(*size)
         batch_size = x.shape[0]
         device = x.device
         return TokenMask.create(
@@ -203,7 +211,7 @@ class JEPA(Task):
         B, L = query.shape[:2]
         position = positions.view(B, 1, L, -1).expand(-1, self.backbone.nhead, -1, -1)
         for block in self.jepa_predictor:
-            block = cast(TransformerBlock, block)
+            block = cast(TransformerEncoderLayer, block)
             query = block(query, position)
 
         # Extract only the target queries from the full set of queries
@@ -260,6 +268,7 @@ class JEPA(Task):
         # generate context and target masks
         context_mask = self.create_context_mask(x)
         target_mask = self.create_target_mask(x)
+        assert not context_mask.mask.all()
 
         # generate ground truth with forward pass of ema backbone on unmasked image
         with torch.no_grad():

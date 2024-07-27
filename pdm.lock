@@ -2151,10 +2151,10 @@ files = [
 
 [[package]]
 name = "ssl-tasks"
-version = "0.1.dev14"
+version = "0.1.dev16"
 requires_python = ">=3.10,<3.12"
 git = "https://github.com/TidalPaladin/ssl-tasks.git"
-revision = "f749aa864a581bcf299175874dd6d4b66e0247db"
+revision = "60281cbdf241ef36205b8cf85689531093c39e18"
 summary = ""
 groups = ["default"]
 dependencies = [
