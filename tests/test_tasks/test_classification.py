@@ -21,7 +21,7 @@ class TestClassificationTask:
 class TestJEPAWithClassification:
     @pytest.fixture
     def task(self, optimizer_init, backbone):
-        return JEPAWithClassification(backbone, num_classes=10, optimizer_init=optimizer_init)
+        return JEPAWithClassification(backbone, num_classes=10, optimizer_init=optimizer_init, context_scale=1)
 
     def test_fit(self, task, cifar10_datamodule, logger):
         trainer = pl.Trainer(

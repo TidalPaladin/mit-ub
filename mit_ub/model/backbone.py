@@ -9,8 +9,9 @@ from ssl_tasks.tokens import TokenMask
 from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 
+from .adaptive_tokenizer import AdaptiveTokenizer2d
 from .pos_enc import RelativeFactorizedPosition
-from .transformer import TransformerEncoderLayer
+from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
 
 class ViT(nn.Module):
@@ -25,14 +26,14 @@ class ViT(nn.Module):
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
         activation: nn.Module = nn.SiLU(),
-        alibi: bool = True,
+        alibi: bool = False,
     ):
         super().__init__()
         self._dim = dim
         self._nhead = nhead if nhead is not None else self.dim // 32
         self._in_channels = in_channels
         self._alibi = alibi
-        dim_feedforward = dim_feedforward or 4 * dim
+        self._dim_feedforward = dim_feedforward = dim_feedforward or 4 * dim
 
         # Make patch size length 3 (D H W) for 2D or 3D inputs
         if isinstance(patch_size, int):
@@ -65,6 +66,10 @@ class ViT(nn.Module):
     @property
     def dim(self) -> int:
         return self._dim
+
+    @property
+    def dim_feedforward(self) -> int:
+        return self._dim_feedforward
 
     @property
     def nhead(self) -> int:
@@ -191,3 +196,92 @@ class ViT(nn.Module):
             A handle that can be used to remove the added hook by calling ``handle.remove()``.
         """
         return self.patch_embed_2d.register_forward_hook(func, *args, **kwargs)
+
+
+class AdaptiveViT(ViT):
+
+    def __init__(
+        self,
+        in_channels: int,
+        dim: int,
+        kv_dim: int,
+        patch_size: int | Sequence[int],
+        target_shape: Tuple[int, int],
+        depth: int,
+        nhead: int,
+        tokenizer_depth: int = 3,
+        dim_feedforward: Optional[int] = None,
+        dropout: float = 0.1,
+        activation: nn.Module = nn.SiLU(),
+        alibi: bool = False,
+    ):
+        super().__init__(in_channels, dim, patch_size, depth, nhead, dim_feedforward, dropout, activation, alibi)
+        del self.patch_embed_2d
+        del self.patch_embed_3d
+        del self.pos_enc_2d
+        del self.pos_enc_3d
+        self.tokenizer = AdaptiveTokenizer2d(in_channels, dim, kv_dim, self.patch_size_2d, target_shape)
+        self.cross_attn = nn.ModuleList(
+            [
+                TransformerDecoderLayer(dim, nhead, kv_dim, self.dim_feedforward, dropout, activation)
+                for _ in range(tokenizer_depth)
+            ]
+        )
+
+    def tokenized_size(self, *size: int) -> Sequence[int]:
+        return self.tokenizer.target_shape
+
+    def equivalent_size_2d(self, *size: int) -> Sequence[int]:
+        return tuple(s * p for s, p in zip(self.tokenized_size(*size), self.patch_size_2d))
+
+    @property
+    def pos_enc_2d(self) -> nn.Module:
+        return self.tokenizer.pos_enc_q
+
+    @property
+    def pos_enc_3d(self) -> nn.Module:
+        # FIXME
+        return self.tokenizer.pos_enc_q
+
+    def forward(
+        self,
+        x: Tensor,
+        reshape: bool = True,
+        mask: TokenMask | None = None,
+        mask_fill_value: float | Tensor | None = None,
+    ) -> Tensor:
+        B, C, *original_size = x.shape
+        tokenized_size = self.tokenized_size(*original_size)
+        is_3d = x.ndim == 5
+        assert not is_3d, "3D input not supported for AdaptiveViT"
+
+        # Tokenize (includes position encoding)
+        q, kv = self.tokenizer(x)
+
+        # Apply token mask if given
+        if mask is not None:
+            q = mask.apply_to_tokens(q, fill_value=mask_fill_value)
+            effective_kv_size = tuple(t * p for t, p in zip(self.tokenizer.kv_size(x.shape[2:]), self.patch_size_2d))
+            kv = mask.resize(effective_kv_size).apply_to_tokens(kv, fill_value=mask_fill_value)
+
+        # Cross attention blocks between fixed backbone tokens and high res input tokens
+        for block in self.cross_attn:
+            q = block(q, kv)
+        x = q
+
+        # Transformer blocks
+        for block in self.blocks:
+            x = block(x)
+
+        if reshape and mask is not None and mask_fill_value is None:
+            raise ValueError(
+                "Cannot reshape with mask and no fill value. Either specify `reshape=False` or provide a `mask_fill_value`"
+            )
+
+        if reshape and is_3d:
+            raise NotImplementedError("3D reshape not implemented")
+            # x = rearrange(x, "b (d h w) c -> b c d h w", d=tokenized_size[0], h=tokenized_size[1], w=tokenized_size[2])
+        elif reshape:
+            x = rearrange(x, "b (h w) c -> b c h w", h=tokenized_size[0], w=tokenized_size[1])
+
+        return x

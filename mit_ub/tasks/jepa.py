@@ -13,7 +13,7 @@ from torch import Tensor
 from torch.distributed import ReduceOp, all_gather, all_reduce
 from torch.distributed import is_initialized as dist_is_initialized
 
-from ..model import BACKBONES, TransformerEncoderLayer, ViT
+from ..model import BACKBONES, AdaptiveViT, TransformerEncoderLayer, ViT
 
 
 class NormallyDistributed(nn.Module):
@@ -126,6 +126,8 @@ class JEPA(Task):
 
     def create_context_mask(self, x: Tensor) -> TokenMask:
         size = x.shape[2:]
+        if isinstance(self.backbone, AdaptiveViT):
+            size = self.backbone.equivalent_size_2d(*size)
         batch_size = x.shape[0]
         device = x.device
         return TokenMask.create(
@@ -140,6 +142,8 @@ class JEPA(Task):
 
     def create_target_mask(self, x: Tensor) -> TokenMask:
         size = x.shape[2:]
+        if isinstance(self.backbone, AdaptiveViT):
+            size = self.backbone.equivalent_size_2d(*size)
         batch_size = x.shape[0]
         device = x.device
         return TokenMask.create(
@@ -260,6 +264,7 @@ class JEPA(Task):
         # generate context and target masks
         context_mask = self.create_context_mask(x)
         target_mask = self.create_target_mask(x)
+        assert not context_mask.mask.all()
 
         # generate ground truth with forward pass of ema backbone on unmasked image
         with torch.no_grad():

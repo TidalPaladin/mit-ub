@@ -7,7 +7,7 @@ from mit_ub.tasks.view_pos import JEPAWithViewPosition
 class TestJEPAWithViewPosition:
     @pytest.fixture
     def task(self, optimizer_init, backbone):
-        return JEPAWithViewPosition(backbone, optimizer_init=optimizer_init)
+        return JEPAWithViewPosition(backbone, optimizer_init=optimizer_init, context_scale=1)
 
     def test_fit(self, task, datamodule, logger):
         trainer = pl.Trainer(

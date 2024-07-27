@@ -19,6 +19,7 @@ class PositionEncoder(nn.Module):
         proto: Optional[Tensor] = None,
         requires_grad: bool = True,
         normalize: bool = True,
+        add_noise: bool = False,
     ):
         r"""Creates positional encodings for a coordinate space with lengths given in ``dims``.
         Args:
@@ -29,13 +30,20 @@ class PositionEncoder(nn.Module):
                 positional encoding.
             proto:
                 Forwarded to :func:`create_grid`
+            requires_grad:
+                Forwarded to :func:`create_grid`
+            normalize:
+                Forwarded to :func:`create_grid`
+            add_noise:
+                Forwarded to :func:`create_grid`
+
         Keyword Args:
             Forwarded to :func:`create_grid`
         Shapes:
             * Output - :math:`(L, N, D)` where :math:`D` is the embedding size, :math:`L` is ``product(dims)``,
               and :math:`N` is ``batch_size``.
         """
-        grid = self.create_grid(dims, proto, requires_grad, normalize)
+        grid = self.create_grid(dims, proto, requires_grad, normalize, add_noise)
         pos_enc = self(grid).expand(batch_size, -1, -1)
         return pos_enc
 
@@ -45,6 +53,7 @@ class PositionEncoder(nn.Module):
         proto: Optional[Tensor] = None,
         requires_grad: bool = True,
         normalize: bool = True,
+        add_noise: bool = False,
     ) -> Tensor:
         r"""Create a grid of coordinate values given the size of each dimension.
         Args:
@@ -56,6 +65,9 @@ class PositionEncoder(nn.Module):
                 Optional override for requires_grad
             normalize:
                 If true, normalize coordinate values on the range :math:`\[-1, 1\]`
+            add_noise:
+                If true, add noise to the grid. The noise is sampled from a uniform distribution on
+                the range :math:`\[-0.5, 0.5\]` and is applied prior to normalization.
 
         Shapes:
             * Output - :math:`(1, L, C)` where :math:`C` is ``len(dims)`` and :math:`L` is ``product(dims)``
@@ -70,6 +82,9 @@ class PositionEncoder(nn.Module):
         with torch.no_grad():
             lens = [torch.arange(d, device=device, dtype=dtype) for d in dims]
             grid = torch.stack(torch.meshgrid(lens, indexing="ij"), dim=0)
+
+            if add_noise:
+                grid.add_(torch.rand_like(grid).sub_(0.5))
 
             C = grid.shape[0]
             if normalize:
