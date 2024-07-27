@@ -156,6 +156,7 @@ class TransformerDecoderLayer(nn.Module):
         x = q
         y = self.norm1(x)
         B, H = x.shape[0], self.nhead
+        slopes: Tensor | None = None
         if self.alibi is not None:
             slopes = self.alibi.view(1, H).expand(B, -1).contiguous()
             y = self.self_attn(y, y, y, pos_q, pos_q, slopes, mask_threshold=mask_threshold)
@@ -166,6 +167,7 @@ class TransformerDecoderLayer(nn.Module):
         # Cross attention
         y = self.norm2(x)
         if self.alibi is not None:
+            assert slopes is not None
             y = self.cross_attn(y, kv, kv, pos_q, pos_k, slopes, mask_threshold=mask_threshold)
         else:
             y = self.cross_attn(y, kv, kv)

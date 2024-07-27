@@ -1,3 +1,4 @@
+import warnings
 from typing import Callable, Optional, Sequence, Tuple, cast
 
 import torch
@@ -60,8 +61,14 @@ class ViT(nn.Module):
 
         # Transformer blocks
         self.blocks = nn.ModuleList(
-            [TransformerEncoderLayer(dim, nhead, dim_feedforward, dropout, activation) for _ in range(depth)]
+            [
+                TransformerEncoderLayer(
+                    dim, nhead, dim_feedforward, dropout, activation, alibi_lower=low, alibi_upper=high
+                )
+                for low, high in map(self.get_alibi_bounds, range(depth))
+            ]
         )
+        assert all((block.alibi is None) == (not alibi) for block in self.blocks), "AliBi not configured as expected"
 
     @property
     def dim(self) -> int:
@@ -125,9 +132,15 @@ class ViT(nn.Module):
         if mask is not None:
             x = mask.apply_to_tokens(x, fill_value=mask_fill_value)
 
+        if self._alibi:
+            alibi_pos = self.create_alibi_positions(x, tokenized_size, mask, mask_fill_value)
+            alibi_pos = alibi_pos.expand(-1, self.nhead, -1, -1)
+        else:
+            alibi_pos = None
+
         # Transformer blocks
         for block in self.blocks:
-            x = block(x)
+            x = block(x, alibi_pos)
 
         if reshape and mask is not None and mask_fill_value is None:
             raise ValueError(
@@ -216,10 +229,15 @@ class AdaptiveViT(ViT):
         alibi: bool = False,
     ):
         super().__init__(in_channels, dim, patch_size, depth, nhead, dim_feedforward, dropout, activation, alibi)
-        del self.patch_embed_2d
-        del self.patch_embed_3d
-        del self.pos_enc_2d
-        del self.pos_enc_3d
+        # These are all provided by the adaptive tokenizer
+        delattr(self, "patch_embed_2d")
+        delattr(self, "patch_embed_3d")
+        delattr(self, "pos_enc_2d")
+        delattr(self, "pos_enc_3d")
+
+        # TODO: For now only a 2D tokenizer is provided. 3D tokenization support is ready via AdaptiveTokenizer3d
+        # but there isn't an immediate need for it. Having unused parameters complicates DDP training, so we omit
+        # the 3D tokenizer for now.
         self.tokenizer = AdaptiveTokenizer2d(in_channels, dim, kv_dim, self.patch_size_2d, target_shape)
         self.cross_attn = nn.ModuleList(
             [
@@ -240,7 +258,6 @@ class AdaptiveViT(ViT):
 
     @property
     def pos_enc_3d(self) -> nn.Module:
-        # FIXME
         return self.tokenizer.pos_enc_q
 
     def forward(
@@ -258,15 +275,36 @@ class AdaptiveViT(ViT):
         # Tokenize (includes position encoding)
         q, kv = self.tokenizer(x)
 
+        # Determine the grid size of the key/value tokens
+        kv_tokenized_size = self.tokenizer.kv_size(x.shape[2:])
+        # Determine the effective input size of the key/value tokens by scaling up by patch size
+        effective_kv_size = tuple(t * p for t, p in zip(kv_tokenized_size, self.patch_size_2d))
+
         # Apply token mask if given
         if mask is not None:
+            kv_mask = mask.resize(effective_kv_size)
             q = mask.apply_to_tokens(q, fill_value=mask_fill_value)
-            effective_kv_size = tuple(t * p for t, p in zip(self.tokenizer.kv_size(x.shape[2:]), self.patch_size_2d))
-            kv = mask.resize(effective_kv_size).apply_to_tokens(kv, fill_value=mask_fill_value)
+            kv = kv_mask.apply_to_tokens(kv, fill_value=mask_fill_value)
+        else:
+            kv_mask = None
+
+        if self._alibi:
+            # TODO: As currently implemented ALiBi probably won't work for AdaptiveViT. This is
+            # because the q and kv tokens will have different positions on an absolute pixel coordinate grid.
+            # This can be fixed by using relative positions on the interval [-1, 1], but the magnitude of ALiBi
+            # slopes needs to be adjusted to account for this. ALiBi hasn't shown much impact on performance so
+            # for now we generally avoid using it.
+            warnings.warn("ALiBi is not well tested for AdaptiveViT. Use with caution.")
+            alibi_pos_q = self.create_alibi_positions(q, tokenized_size, mask, mask_fill_value)
+            alibi_pos_k = self.create_alibi_positions(kv, effective_kv_size, kv_mask, mask_fill_value)
+            alibi_pos_q = alibi_pos_q.expand(-1, self.nhead, -1, -1)
+            alibi_pos_k = alibi_pos_k.expand(-1, self.nhead, -1, -1)
+        else:
+            alibi_pos_q = alibi_pos_k = None
 
         # Cross attention blocks between fixed backbone tokens and high res input tokens
         for block in self.cross_attn:
-            q = block(q, kv)
+            q = block(q, kv, alibi_pos_q, alibi_pos_k)
         x = q
 
         # Transformer blocks

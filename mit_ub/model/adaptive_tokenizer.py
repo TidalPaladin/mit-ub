@@ -10,7 +10,7 @@ from .pos_enc import RelativeFactorizedPosition
 
 def _adaptive_tokenizer_forward(
     query: nn.Module,
-    kv: nn.Module,
+    key_value: nn.Module,
     pos_enc_q: RelativeFactorizedPosition,
     pos_enc_kv: RelativeFactorizedPosition,
     to_seq: Rearrange,
@@ -18,7 +18,7 @@ def _adaptive_tokenizer_forward(
 ) -> Tuple[Tensor, Tensor]:
     # Tokenize q and kv
     q = query(x)
-    kv = kv(x)
+    kv = key_value(x)
 
     # Add position encoding to q
     B = x.shape[0]
