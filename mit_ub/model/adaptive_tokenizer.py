@@ -8,6 +8,32 @@ from torch import Tensor
 from .pos_enc import RelativeFactorizedPosition
 
 
+def _adaptive_tokenizer_forward(
+    query: nn.Module,
+    kv: nn.Module,
+    pos_enc_q: RelativeFactorizedPosition,
+    pos_enc_kv: RelativeFactorizedPosition,
+    to_seq: Rearrange,
+    x: Tensor,
+) -> Tuple[Tensor, Tensor]:
+    # Tokenize q and kv
+    q = query(x)
+    kv = kv(x)
+
+    # Add position encoding to q
+    B = x.shape[0]
+    q_tokenized_size = q.shape[2:]
+    q = to_seq(q)
+    q += pos_enc_q.from_grid(q_tokenized_size, B, proto=q, normalize=True)
+
+    # Add position encoding to kv
+    kv_tokenized_size = kv.shape[2:]
+    kv = to_seq(kv)
+    kv += pos_enc_kv.from_grid(kv_tokenized_size, B, proto=kv, normalize=True, add_noise=pos_enc_kv.training)
+
+    return q, kv
+
+
 class AdaptiveTokenizer2d(nn.Module):
 
     def __init__(
@@ -38,19 +64,51 @@ class AdaptiveTokenizer2d(nn.Module):
         return divide_tuple(input_size, self.patch_size)
 
     def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
-        # Tokenize q and kv
-        q = self.query(x)
-        kv = self.kv(x)
+        return _adaptive_tokenizer_forward(
+            self.query,
+            self.kv,
+            self.pos_enc_q,
+            self.pos_enc_kv,
+            self.to_seq,
+            x,
+        )
 
-        # Add position encoding to q
-        B = x.shape[0]
-        q_tokenized_size = q.shape[2:]
-        q = self.to_seq(q)
-        q += self.pos_enc_q.from_grid(q_tokenized_size, B, proto=q, normalize=True)
 
-        # Add position encoding to kv
-        kv_tokenized_size = kv.shape[2:]
-        kv = self.to_seq(kv)
-        kv += self.pos_enc_kv.from_grid(kv_tokenized_size, B, proto=kv, normalize=True, add_noise=self.training)
+class AdaptiveTokenizer3d(nn.Module):
 
-        return q, kv
+    def __init__(
+        self,
+        in_channels: int,
+        d_model: int,
+        kv_dim: int,
+        patch_size: Tuple[int, int, int],
+        target_shape: Tuple[int, int, int],
+    ):
+        super().__init__()
+        self.target_shape = tuple(target_shape)
+        self.patch_size = tuple(patch_size)
+        self.d_model = d_model
+        self.kv_dim = kv_dim
+
+        self.query = nn.Sequential(
+            nn.Conv3d(in_channels, d_model, kernel_size=patch_size, stride=patch_size),
+            nn.AdaptiveAvgPool3d(target_shape),
+        )
+        self.kv = nn.Conv3d(in_channels, kv_dim, kernel_size=patch_size, stride=patch_size)
+        self.pos_enc_q = RelativeFactorizedPosition(3, d_model)
+        self.pos_enc_kv = RelativeFactorizedPosition(3, kv_dim)
+
+        self.to_seq = Rearrange("b c d h w -> b (d h w) c")
+
+    def kv_size(self, input_size: Tuple[int, int, int]) -> Tuple[int, int, int]:
+        return divide_tuple(input_size, self.patch_size)
+
+    def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
+        return _adaptive_tokenizer_forward(
+            self.query,
+            self.kv,
+            self.pos_enc_q,
+            self.pos_enc_kv,
+            self.to_seq,
+            x,
+        )
