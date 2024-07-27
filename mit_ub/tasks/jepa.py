@@ -126,6 +126,8 @@ class JEPA(Task):
 
     def create_context_mask(self, x: Tensor) -> TokenMask:
         size = x.shape[2:]
+        # For AdaptiveViT we choose a token mask that matches the size of the fixed token grid produced
+        # by the ViT.
         if isinstance(self.backbone, AdaptiveViT):
             size = self.backbone.equivalent_size_2d(*size)
         batch_size = x.shape[0]
@@ -142,6 +144,8 @@ class JEPA(Task):
 
     def create_target_mask(self, x: Tensor) -> TokenMask:
         size = x.shape[2:]
+        # For AdaptiveViT we choose a token mask that matches the size of the fixed token grid produced
+        # by the ViT.
         if isinstance(self.backbone, AdaptiveViT):
             size = self.backbone.equivalent_size_2d(*size)
         batch_size = x.shape[0]
