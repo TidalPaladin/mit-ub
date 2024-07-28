@@ -24,7 +24,7 @@ def _adaptive_tokenizer_forward(
     B = x.shape[0]
     q_tokenized_size = q.shape[2:]
     q = to_seq(q)
-    q += pos_enc_q.from_grid(q_tokenized_size, B, proto=q, normalize=True)
+    q += pos_enc_q.from_grid(q_tokenized_size, B, proto=q, normalize=True, add_noise=pos_enc_q.training)
 
     # Add position encoding to kv
     kv_tokenized_size = kv.shape[2:]
