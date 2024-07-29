@@ -125,10 +125,14 @@ class ViT(nn.Module):
         # Patch embedding and positional encoding
         if is_3d := x.ndim == 5:
             x = self.patch_embed_3d(x)
-            x += self.pos_enc_3d.from_grid(tokenized_size, B, proto=x, normalize=True)
+            x += self.pos_enc_3d.from_grid(
+                tokenized_size, B, proto=x, normalize=True, add_noise=self.pos_enc_3d.training
+            )
         else:
             x = self.patch_embed_2d(x)
-            x += self.pos_enc_2d.from_grid(tokenized_size, B, proto=x, normalize=True)
+            x += self.pos_enc_2d.from_grid(
+                tokenized_size, B, proto=x, normalize=True, add_noise=self.pos_enc_2d.training
+            )
         if mask is not None:
             x = mask.apply_to_tokens(x, fill_value=mask_fill_value)
 
