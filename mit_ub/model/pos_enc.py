@@ -83,13 +83,19 @@ class PositionEncoder(nn.Module):
             lens = [torch.arange(d, device=device, dtype=dtype) for d in dims]
             grid = torch.stack(torch.meshgrid(lens, indexing="ij"), dim=0)
 
-            if add_noise:
+            # Add noise to the grid (handled differently for normalized and unnormalized grids)
+            if add_noise and not normalize:
                 grid.add_(torch.rand_like(grid).sub_(0.5))
 
             C = grid.shape[0]
             if normalize:
                 scale = grid.view(C, -1).amax(dim=-1, keepdim=True)
                 grid = grid.view(C, -1).div_(scale).sub_(0.5).mul_(2).view_as(grid)
+                # In the normalized case we don't want the injected noise to affect the scale parameter above.
+                # We could handle this with various checks but it is more efficient to have a separate pathway here.
+                if add_noise:
+                    noise = torch.rand_like(grid).view(C, -1).sub_(0.5).div_(scale / 2).view_as(grid)
+                    grid.add_(noise).clip_(min=-1, max=1)
 
             # This is cleaner but not scriptable
             # grid = rearrange(grid, "c ... -> () (...) c")
