@@ -2,6 +2,7 @@ import pytest
 import torch
 from ssl_tasks.tokens import TokenMask
 
+from mit_ub.model import BACKBONES
 from mit_ub.model.backbone import AdaptiveViT, ViT
 
 
@@ -129,3 +130,10 @@ class TestAdaptiveViT:
             out2 = model(x, mask=mask, reshape=False)
         assert out1.isnan().any()
         assert not out2.isnan().any()
+
+
+@pytest.mark.ci_skip
+@pytest.mark.parametrize("model", BACKBONES.available_keys())
+def test_registry(model):
+    model = BACKBONES.get(model).instantiate_with_metadata()
+    assert model is not None
