@@ -1,5 +1,4 @@
-import warnings
-from typing import Callable, Optional, Sequence, Tuple, cast
+from typing import Any, Callable, Optional, Sequence, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -224,29 +223,36 @@ class AdaptiveViT(ViT):
         kv_dim: int,
         patch_size: int | Sequence[int],
         target_shape: Tuple[int, int],
-        depth: int,
+        encoder_depth: int,
+        decoder_depth: int,
         nhead: int,
-        tokenizer_depth: int = 3,
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
         activation: nn.Module = nn.SiLU(),
         alibi: bool = False,
     ):
-        super().__init__(in_channels, dim, patch_size, depth, nhead, dim_feedforward, dropout, activation, alibi)
+        # NOTE: The naming of transformer layers follows PyTorch. However, our "encoder" is a TransformerDecoderLayer
+        # that cross-attends to high-res input tokens and our "decoder" is a TransformerEncoderLayer that attends only to
+        # the backbone tokens.
+        super().__init__(
+            in_channels, dim, patch_size, decoder_depth, nhead, dim_feedforward, dropout, activation, alibi
+        )
         # These are all provided by the adaptive tokenizer
         delattr(self, "patch_embed_2d")
         delattr(self, "patch_embed_3d")
         delattr(self, "pos_enc_2d")
         delattr(self, "pos_enc_3d")
+        if not decoder_depth:
+            self.blocks = None
 
         # TODO: For now only a 2D tokenizer is provided. 3D tokenization support is ready via AdaptiveTokenizer3d
         # but there isn't an immediate need for it. Having unused parameters complicates DDP training, so we omit
         # the 3D tokenizer for now.
         self.tokenizer = AdaptiveTokenizer2d(in_channels, dim, kv_dim, self.patch_size_2d, target_shape)
-        self.cross_attn = nn.ModuleList(
+        self.encoder_blocks = nn.ModuleList(
             [
                 TransformerDecoderLayer(dim, nhead, kv_dim, self.dim_feedforward, dropout, activation)
-                for _ in range(tokenizer_depth)
+                for _ in range(encoder_depth)
             ]
         )
 
@@ -293,27 +299,27 @@ class AdaptiveViT(ViT):
             kv_mask = None
 
         if self._alibi:
-            # TODO: As currently implemented ALiBi probably won't work for AdaptiveViT. This is
-            # because the q and kv tokens will have different positions on an absolute pixel coordinate grid.
-            # This can be fixed by using relative positions on the interval [-1, 1], but the magnitude of ALiBi
-            # slopes needs to be adjusted to account for this. ALiBi hasn't shown much impact on performance so
-            # for now we generally avoid using it.
-            warnings.warn("ALiBi is not well tested for AdaptiveViT. Use with caution.")
+            # Create raw positions
             alibi_pos_q = self.create_alibi_positions(q, tokenized_size, mask, mask_fill_value)
-            alibi_pos_k = self.create_alibi_positions(kv, effective_kv_size, kv_mask, mask_fill_value)
+            alibi_pos_k = self.create_alibi_positions(kv, kv_tokenized_size, kv_mask, mask_fill_value)
+
+            # Scale the query positions based on the ratio of the input size to the key/value size
+            scale = alibi_pos_q.new_tensor([kv / t for t, kv in zip(tokenized_size, kv_tokenized_size)])
+            alibi_pos_q.mul_(scale)
             alibi_pos_q = alibi_pos_q.expand(-1, self.nhead, -1, -1)
             alibi_pos_k = alibi_pos_k.expand(-1, self.nhead, -1, -1)
         else:
             alibi_pos_q = alibi_pos_k = None
 
         # Cross attention blocks between fixed backbone tokens and high res input tokens
-        for block in self.cross_attn:
+        for block in self.encoder_blocks:
             q = block(q, kv, alibi_pos_q, alibi_pos_k)
         x = q
 
         # Transformer blocks
-        for block in self.blocks:
-            x = block(x)
+        if self.blocks is not None:
+            for block in cast(Any, self.blocks):
+                x = block(x, alibi_pos_q)
 
         if reshape and mask is not None and mask_fill_value is None:
             raise ValueError(
