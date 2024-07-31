@@ -96,3 +96,5 @@ class TestTransformerDecoderLayer:
             out = layer(q, k)
             out = out.sum()
         out.backward()
+        assert q.grad is not None
+        assert k.grad is not None
