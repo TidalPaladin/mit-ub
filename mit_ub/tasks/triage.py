@@ -1,22 +1,39 @@
+import hashlib
 import math
-from typing import Any, Dict, Final, Optional, Set, cast
+from typing import Any, Dict, Final, Iterable, List, Optional, Set, Tuple, cast
 
 import torch
 import torch.nn as nn
 import torchmetrics as tm
-from deep_helpers.structs import State
+from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
 from einops.layers.torch import Rearrange
-
-# from gpvit import GPViT
-# from gpvit.layers import MLPMixerPooling
 from torch import Tensor
+from torchmetrics.classification import BinaryAccuracy, BinaryAUROC
+from torchmetrics.classification import BinarySensitivityAtSpecificity as BinarySensitivityAtSpecificityBase
+from torchmetrics.classification import BinarySpecificityAtSensitivity as BinarySpecificityAtSensitivityBase
+from torchmetrics.functional.classification.accuracy import binary_accuracy
+from torchmetrics.functional.classification.auroc import _binary_auroc_compute
+from torchmetrics.utilities.data import dim_zero_cat
 from torchvision.ops import sigmoid_focal_loss
 
 from ..model import BACKBONES, ViT
 
 
 UNKNOWN_INT: Final = -1
+MAX_HASH: Final = torch.iinfo(torch.long).max
+
+
+class BinarySensitivityAtSpecificity(BinarySensitivityAtSpecificityBase):
+
+    def compute(self, *args, **kwargs):
+        return super().compute(*args, **kwargs)[0]
+
+
+class BinarySpecificityAtSensitivity(BinarySpecificityAtSensitivityBase):
+
+    def compute(self, *args, **kwargs):
+        return super().compute(*args, **kwargs)[0]
 
 
 def _check_weights_sum_to_one(weights: Tensor, tol: float = 0.01) -> None:
@@ -26,6 +43,90 @@ def _check_weights_sum_to_one(weights: Tensor, tol: float = 0.01) -> None:
 
 def _str_or_bool(value: Any) -> bool:
     return value.lower() == "true" if isinstance(value, str) else bool(value)
+
+
+def _get_case_metric_state(studies: Tensor, preds: Tensor, target: Tensor) -> Tuple[Tensor, Tensor]:
+    # group by study using max reduction
+    seen_studies, study_indices = torch.unique(studies, return_inverse=True)
+    study_preds = preds.new_zeros(len(seen_studies))
+    study_target = target.new_zeros(len(seen_studies))
+    study_preds.scatter_reduce_(0, study_indices, preds, reduce="max")
+    study_target.scatter_reduce_(0, study_indices, target, reduce="max")
+    return (study_preds, study_target)
+
+
+def _hash_study_uids(study_uids: Iterable[str], proto: Optional[Tensor] = None) -> Tensor:
+    # We don't use the builtin hash, as it seems non-deterministic across processes
+    # and will give incorrect results in multi-GPU mode.
+    # We also take care to ensure we don't overflow torch.long.
+    hashes = [int(hashlib.md5(s.encode("utf-8")).hexdigest(), 16) % MAX_HASH for s in study_uids]
+    return proto.new_tensor(hashes, dtype=torch.long) if proto is not None else torch.tensor(hashes, dtype=torch.long)
+
+
+class CaseAUROC(BinaryAUROC):
+    def __init__(
+        self,
+        *args,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.add_state("preds", default=[], dist_reduce_fx="cat")
+        self.add_state("target", default=[], dist_reduce_fx="cat")
+        self.add_state("studies", default=[], dist_reduce_fx="cat")
+
+    def update(self, study_uids: List[str], preds: Tensor, target: Tensor) -> None:
+        assert len(preds) == len(target) == len(study_uids)
+        cast(List, self.preds).append(preds)
+        cast(List, self.target).append(target)
+
+        # NOTE: we need to store states as tensors, so we hash the study uids.
+        study_uid_hashes = _hash_study_uids(study_uids, proto=target)
+        cast(List, self.studies).append(study_uid_hashes)
+
+    def compute(self) -> Tensor:
+        # join all the batches
+        preds = dim_zero_cat(cast(List, self.preds))
+        target = dim_zero_cat(cast(List, self.target))
+        studies = dim_zero_cat(cast(List, self.studies))
+        assert len(preds) == len(target) == len(studies)
+
+        # group by study using max reduction and compute
+        state = _get_case_metric_state(studies, preds, target)
+        result = _binary_auroc_compute(state, self.thresholds, self.max_fpr)
+        assert isinstance(result, Tensor)
+        return result
+
+
+class CaseAccuracy(BinaryAccuracy):
+    def __init__(
+        self,
+        *args,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.add_state("preds", default=[], dist_reduce_fx="cat")
+        self.add_state("target", default=[], dist_reduce_fx="cat")
+        self.add_state("studies", default=[], dist_reduce_fx="cat")
+
+    def update(self, study_uids: List[str], preds: Tensor, target: Tensor) -> None:
+        assert len(preds) == len(target) == len(study_uids)
+        cast(List, self.preds).append(preds)
+        cast(List, self.target).append(target)
+        study_uid_hashes = _hash_study_uids(study_uids, proto=target)
+        cast(List, self.studies).append(study_uid_hashes)
+
+    def compute(self) -> Tensor:
+        # join all the batches
+        preds = dim_zero_cat(cast(List, self.preds))
+        target = dim_zero_cat(cast(List, self.target))
+        studies = dim_zero_cat(cast(List, self.studies))
+        assert len(preds) == len(target) == len(studies)
+
+        # group by study using max reduction and compute
+        preds, target = _get_case_metric_state(studies, preds, target)
+        return binary_accuracy(
+            preds, target, self.threshold, cast(Any, self.multidim_average), self.ignore_index, self.validate_args
+        )
 
 
 class TriageTask(Task):
@@ -82,19 +183,24 @@ class TriageTask(Task):
         self.triage_head = nn.Sequential(
             nn.AdaptiveAvgPool2d((1, 1)),
             Rearrange("b c () () -> b c"),
+            nn.Dropout(0.1),
             nn.Linear(dim, 1),
         )
         self.criterion = nn.BCEWithLogitsLoss(reduction="none") if not focal_loss else sigmoid_focal_loss
+        self.save_hyperparameters()
 
     def prepare_backbone(self, name: str) -> nn.Module:
         return BACKBONES.get(name).instantiate_with_metadata().fn
 
-    def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
+    def create_metrics(self, state: State, **kwargs) -> tm.MetricCollection:
         return tm.MetricCollection(
             {
                 "auroc": tm.AUROC(task="binary"),
                 "acc": tm.Accuracy(task="binary"),
-                "pos-acc": tm.Accuracy(task="binary", ignore_index=0),
+                "spec-at-sens=86_9": BinarySpecificityAtSensitivity(min_sensitivity=0.869),
+                "sens-at-spec=88_9": BinarySensitivityAtSpecificity(min_specificity=0.889),
+                "auroc_case": CaseAUROC(dist_sync_on_step=state.mode != Mode.TRAIN),
+                "acc_case": CaseAccuracy(dist_sync_on_step=state.mode != Mode.TRAIN),
             }
         )
 
@@ -270,6 +376,7 @@ class TriageTask(Task):
         result = self(x)
 
         # compute loss
+        [x.stem for x in batch["path"]]
         pred_logits = cast(Tensor, result["triage"].flatten())
         weight = self.compute_loss_weight(batch).flatten()
         assert (weight[y == UNKNOWN_INT] == 0).all(), "Unknown labels should have weight 0"
@@ -280,8 +387,17 @@ class TriageTask(Task):
 
         # log metrics
         with torch.no_grad():
-            if metrics is not None:
-                metrics.update(pred[weight > 0], y[weight > 0])
+            for metric in (metrics or {}).values():
+                is_valid = weight > 0
+                _pred = pred[is_valid]
+                _label = y[is_valid].long()
+                if isinstance(metric, (CaseAccuracy, CaseAUROC)):
+                    study_uids = [
+                        example["StudyInstanceUID"] for i, example in enumerate(batch["manifest"]) if is_valid[i]
+                    ]
+                    metric.update(study_uids, _pred, _label)
+                else:
+                    metric.update(_pred, _label)
 
         output = {
             "triage_score": pred.detach(),
