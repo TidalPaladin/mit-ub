@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional, Set, Tuple, cast
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.structs import State
 from deep_helpers.tasks import Task
@@ -50,6 +51,7 @@ class JEPA(Task):
         ema_alpha: float = 0.95,
         activation_clip: float | None = None,
         margin: float | None = 0.5,
+        contrastive_dropout: float | None = None,
         loss_fn: str = "cosine",
         distribution_loss: bool = False,
         predictor_depth: int = 4,
@@ -88,6 +90,7 @@ class JEPA(Task):
         self.activation_clip = activation_clip
         assert self.activation_clip is None or self.activation_clip > 0
         self.dist_gather = dist_gather
+        self.contrastive_dropout = contrastive_dropout
 
         self.backbone = cast(ViT, self.prepare_backbone(backbone))
         self.ema_backbone = deepcopy(self.backbone)
@@ -298,7 +301,10 @@ class JEPA(Task):
 
         # compute contrastive loss for collapse mitigation
         if self.contrastive_loss is not None:
+            # pool tokens and optionally apply dropout to prevent high-magnitude features from dominating
             pred_pool = pred.mean(1)
+            if self.contrastive_dropout is not None:
+                pred_pool = F.dropout(pred_pool, p=self.contrastive_dropout, training=self.training)
 
             # Gather average-pooled predictions from all GPUs if requested
             if self.dist_gather and dist_is_initialized():
@@ -365,6 +371,7 @@ class JEPAWithProbe(JEPA, ABC):
         ema_alpha: float = 0.95,
         activation_clip: float | None = None,
         margin: float | None = 0.5,
+        contrastive_dropout: float | None = None,
         loss_fn: str = "cosine",
         distribution_loss: bool = False,
         predictor_depth: int = 4,
@@ -389,6 +396,7 @@ class JEPAWithProbe(JEPA, ABC):
             ema_alpha,
             activation_clip,
             margin,
+            contrastive_dropout,
             loss_fn,
             distribution_loss,
             predictor_depth,
