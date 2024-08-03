@@ -111,10 +111,13 @@ class PositionEncoder(nn.Module):
 
 class RelativeFactorizedPosition(PositionEncoder):
 
-    def __init__(self, d_in: int, d_out: int):
+    def __init__(self, d_in: int, d_out: int, dropout: float = 0):
         super().__init__()
         self._d_out = d_out
         self.proj = nn.Linear(d_in, d_out)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.proj(x)
+        x = self.proj(x)
+        x = self.dropout(x)
+        return x

@@ -49,6 +49,7 @@ class AdaptiveTokenizer2d(nn.Module):
         patch_size: Tuple[int, int],
         target_shape: Tuple[int, int],
         position_noise: bool = False,
+        dropout: float = 0,
     ):
         super().__init__()
         self.target_shape = tuple(target_shape)
@@ -62,8 +63,8 @@ class AdaptiveTokenizer2d(nn.Module):
             nn.AdaptiveAvgPool2d(target_shape),
         )
         self.kv = nn.Conv2d(in_channels, kv_dim, kernel_size=patch_size, stride=patch_size)
-        self.pos_enc_q = RelativeFactorizedPosition(2, d_model)
-        self.pos_enc_kv = RelativeFactorizedPosition(2, kv_dim)
+        self.pos_enc_q = RelativeFactorizedPosition(2, d_model, dropout)
+        self.pos_enc_kv = RelativeFactorizedPosition(2, kv_dim, dropout)
 
         self.to_seq = Rearrange("b c h w -> b (h w) c")
 
@@ -92,6 +93,7 @@ class AdaptiveTokenizer3d(nn.Module):
         patch_size: Tuple[int, int, int],
         target_shape: Tuple[int, int, int],
         position_noise: bool = False,
+        dropout: float = 0,
     ):
         super().__init__()
         self.target_shape = tuple(target_shape)
@@ -105,8 +107,8 @@ class AdaptiveTokenizer3d(nn.Module):
             nn.AdaptiveAvgPool3d(target_shape),
         )
         self.kv = nn.Conv3d(in_channels, kv_dim, kernel_size=patch_size, stride=patch_size)
-        self.pos_enc_q = RelativeFactorizedPosition(3, d_model)
-        self.pos_enc_kv = RelativeFactorizedPosition(3, kv_dim)
+        self.pos_enc_q = RelativeFactorizedPosition(3, d_model, dropout)
+        self.pos_enc_kv = RelativeFactorizedPosition(3, kv_dim, dropout)
 
         self.to_seq = Rearrange("b c d h w -> b (d h w) c")
 

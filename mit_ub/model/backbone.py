@@ -57,8 +57,8 @@ class ViT(nn.Module):
         )
 
         # Positional encoding
-        self.pos_enc_2d = RelativeFactorizedPosition(2, dim)
-        self.pos_enc_3d = RelativeFactorizedPosition(3, dim)
+        self.pos_enc_2d = RelativeFactorizedPosition(2, dim, dropout)
+        self.pos_enc_3d = RelativeFactorizedPosition(3, dim, dropout)
 
         # Transformer blocks
         self.blocks = nn.ModuleList(
@@ -260,7 +260,9 @@ class AdaptiveViT(ViT):
         # TODO: For now only a 2D tokenizer is provided. 3D tokenization support is ready via AdaptiveTokenizer3d
         # but there isn't an immediate need for it. Having unused parameters complicates DDP training, so we omit
         # the 3D tokenizer for now.
-        self.tokenizer = AdaptiveTokenizer2d(in_channels, dim, kv_dim, self.patch_size_2d, target_shape)
+        self.tokenizer = AdaptiveTokenizer2d(
+            in_channels, dim, kv_dim, self.patch_size_2d, target_shape, position_noise, dropout
+        )
         self.encoder_blocks = nn.ModuleList(
             [
                 TransformerDecoderLayer(dim, nhead, kv_dim, self.dim_feedforward, dropout, activation)
