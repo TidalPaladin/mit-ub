@@ -1,8 +1,15 @@
-from typing import Optional, Sequence
+from typing import Final, Optional, Sequence
 
 import torch
 import torch.nn as nn
 from torch import Tensor
+
+
+# Bound for position noise in grid cell units. This is set slightly below 0.5
+# so that +- 0.5 is still in the cell of the base grid.
+NOISE_BOUND: Final = 0.45
+# Scale for normally distributed noise with zero mean.
+NOISE_SCALE: Final = NOISE_BOUND / 2
 
 
 class PositionEncoder(nn.Module):
@@ -83,19 +90,15 @@ class PositionEncoder(nn.Module):
             lens = [torch.arange(d, device=device, dtype=dtype) for d in dims]
             grid = torch.stack(torch.meshgrid(lens, indexing="ij"), dim=0)
 
-            # Add noise to the grid (handled differently for normalized and unnormalized grids)
-            if add_noise and not normalize:
-                grid.add_(torch.rand_like(grid).sub_(0.5))
+            if add_noise:
+                noise = torch.randn_like(grid).mul_(NOISE_SCALE).clip_(min=-NOISE_BOUND, max=NOISE_BOUND)
+                bounds = noise.new_tensor(dims).view(-1, *[1] * len(dims)).sub_(1)
+                grid.add_(noise).clip_(min=torch.zeros_like(bounds), max=bounds)
 
             C = grid.shape[0]
             if normalize:
                 scale = grid.view(C, -1).amax(dim=-1, keepdim=True)
                 grid = grid.view(C, -1).div_(scale).sub_(0.5).mul_(2).view_as(grid)
-                # In the normalized case we don't want the injected noise to affect the scale parameter above.
-                # We could handle this with various checks but it is more efficient to have a separate pathway here.
-                if add_noise:
-                    noise = torch.rand_like(grid).view(C, -1).sub_(0.5).div_(scale / 2).view_as(grid)
-                    grid.add_(noise).clip_(min=-1, max=1)
 
             # This is cleaner but not scriptable
             # grid = rearrange(grid, "c ... -> () (...) c")

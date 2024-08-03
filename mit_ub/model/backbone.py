@@ -27,6 +27,7 @@ class ViT(nn.Module):
         dropout: float = 0.1,
         activation: nn.Module = nn.SiLU(),
         alibi: bool = False,
+        position_noise: bool = False,
     ):
         super().__init__()
         self._dim = dim
@@ -34,6 +35,7 @@ class ViT(nn.Module):
         self._in_channels = in_channels
         self._alibi = alibi
         self._dim_feedforward = dim_feedforward = dim_feedforward or 4 * dim
+        self._position_noise = position_noise
 
         # Make patch size length 3 (D H W) for 2D or 3D inputs
         if isinstance(patch_size, int):
@@ -125,12 +127,12 @@ class ViT(nn.Module):
         if is_3d := x.ndim == 5:
             x = self.patch_embed_3d(x)
             x += self.pos_enc_3d.from_grid(
-                tokenized_size, B, proto=x, normalize=True, add_noise=self.pos_enc_3d.training
+                tokenized_size, B, proto=x, normalize=True, add_noise=self.pos_enc_3d.training and self._position_noise
             )
         else:
             x = self.patch_embed_2d(x)
             x += self.pos_enc_2d.from_grid(
-                tokenized_size, B, proto=x, normalize=True, add_noise=self.pos_enc_2d.training
+                tokenized_size, B, proto=x, normalize=True, add_noise=self.pos_enc_2d.training and self._position_noise
             )
         if mask is not None:
             x = mask.apply_to_tokens(x, fill_value=mask_fill_value)
@@ -230,12 +232,22 @@ class AdaptiveViT(ViT):
         dropout: float = 0.1,
         activation: nn.Module = nn.SiLU(),
         alibi: bool = False,
+        position_noise: bool = False,
     ):
         # NOTE: The naming of transformer layers follows PyTorch. However, our "encoder" is a TransformerDecoderLayer
         # that cross-attends to high-res input tokens and our "decoder" is a TransformerEncoderLayer that attends only to
         # the backbone tokens.
         super().__init__(
-            in_channels, dim, patch_size, decoder_depth, nhead, dim_feedforward, dropout, activation, alibi
+            in_channels,
+            dim,
+            patch_size,
+            decoder_depth,
+            nhead,
+            dim_feedforward,
+            dropout,
+            activation,
+            alibi,
+            position_noise,
         )
         # These are all provided by the adaptive tokenizer
         delattr(self, "patch_embed_2d")

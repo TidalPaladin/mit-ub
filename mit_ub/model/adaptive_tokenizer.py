@@ -15,6 +15,7 @@ def _adaptive_tokenizer_forward(
     pos_enc_kv: RelativeFactorizedPosition,
     to_seq: Rearrange,
     x: Tensor,
+    position_noise: bool = False,
 ) -> Tuple[Tensor, Tensor]:
     # Tokenize q and kv
     q = query(x)
@@ -24,12 +25,16 @@ def _adaptive_tokenizer_forward(
     B = x.shape[0]
     q_tokenized_size = q.shape[2:]
     q = to_seq(q)
-    q += pos_enc_q.from_grid(q_tokenized_size, B, proto=q, normalize=True, add_noise=pos_enc_q.training)
+    q += pos_enc_q.from_grid(
+        q_tokenized_size, B, proto=q, normalize=True, add_noise=pos_enc_q.training and position_noise
+    )
 
     # Add position encoding to kv
     kv_tokenized_size = kv.shape[2:]
     kv = to_seq(kv)
-    kv += pos_enc_kv.from_grid(kv_tokenized_size, B, proto=kv, normalize=True, add_noise=pos_enc_kv.training)
+    kv += pos_enc_kv.from_grid(
+        kv_tokenized_size, B, proto=kv, normalize=True, add_noise=pos_enc_kv.training and position_noise
+    )
 
     return q, kv
 
@@ -43,12 +48,14 @@ class AdaptiveTokenizer2d(nn.Module):
         kv_dim: int,
         patch_size: Tuple[int, int],
         target_shape: Tuple[int, int],
+        position_noise: bool = False,
     ):
         super().__init__()
         self.target_shape = tuple(target_shape)
         self.patch_size = tuple(patch_size)
         self.d_model = d_model
         self.kv_dim = kv_dim
+        self.position_noise = position_noise
 
         self.query = nn.Sequential(
             nn.Conv2d(in_channels, d_model, kernel_size=patch_size, stride=patch_size),
@@ -71,6 +78,7 @@ class AdaptiveTokenizer2d(nn.Module):
             self.pos_enc_kv,
             self.to_seq,
             x,
+            self.position_noise,
         )
 
 
@@ -83,12 +91,14 @@ class AdaptiveTokenizer3d(nn.Module):
         kv_dim: int,
         patch_size: Tuple[int, int, int],
         target_shape: Tuple[int, int, int],
+        position_noise: bool = False,
     ):
         super().__init__()
         self.target_shape = tuple(target_shape)
         self.patch_size = tuple(patch_size)
         self.d_model = d_model
         self.kv_dim = kv_dim
+        self.position_noise = position_noise
 
         self.query = nn.Sequential(
             nn.Conv3d(in_channels, d_model, kernel_size=patch_size, stride=patch_size),
@@ -111,4 +121,5 @@ class AdaptiveTokenizer3d(nn.Module):
             self.pos_enc_kv,
             self.to_seq,
             x,
+            self.position_noise,
         )
