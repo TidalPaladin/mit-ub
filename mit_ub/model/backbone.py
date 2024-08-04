@@ -28,6 +28,7 @@ class ViT(nn.Module):
         activation: nn.Module = nn.SiLU(),
         alibi: bool = False,
         position_noise: bool = False,
+        output_norm: bool = True,
     ):
         super().__init__()
         self._dim = dim
@@ -70,6 +71,7 @@ class ViT(nn.Module):
             ]
         )
         assert all((block.alibi is None) == (not alibi) for block in self.blocks), "AliBi not configured as expected"
+        self.norm = nn.LayerNorm(dim) if output_norm else nn.Identity()
 
     @property
     def dim(self) -> int:
@@ -146,6 +148,8 @@ class ViT(nn.Module):
         # Transformer blocks
         for block in self.blocks:
             x = block(x, alibi_pos)
+
+        x = self.norm(x)
 
         if reshape and mask is not None and mask_fill_value is None:
             raise ValueError(
@@ -233,6 +237,7 @@ class AdaptiveViT(ViT):
         activation: nn.Module = nn.SiLU(),
         alibi: bool = False,
         position_noise: bool = False,
+        output_norm: bool = True,
     ):
         # NOTE: The naming of transformer layers follows PyTorch. However, our "encoder" is a TransformerDecoderLayer
         # that cross-attends to high-res input tokens and our "decoder" is a TransformerEncoderLayer that attends only to
@@ -332,6 +337,8 @@ class AdaptiveViT(ViT):
         if self.blocks is not None:
             for block in cast(Any, self.blocks):
                 x = block(x, alibi_pos_q)
+
+        x = self.norm(x)
 
         if reshape and mask is not None and mask_fill_value is None:
             raise ValueError(
