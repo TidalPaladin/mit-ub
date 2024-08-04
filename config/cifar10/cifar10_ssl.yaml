@@ -3,15 +3,13 @@ fit:
   float32_matmul_precision: medium
   trainer:
     accelerator: gpu
-    devices: [0, 1, 2]
-    strategy: "ddp_find_unused_parameters_true"
+    devices: [1]
+    #strategy: "ddp_find_unused_parameters_true"
     precision: "bf16-mixed"
     max_steps: 50000
     num_sanity_val_steps: 0
     default_root_dir: /mnt/flash/mit-ub
     check_val_every_n_epoch: 10
-    gradient_clip_val: 1.0
-    gradient_clip_algorithm: "norm"
 
     callbacks:
       - class_path: pytorch_lightning.callbacks.ModelCheckpoint
@@ -35,12 +33,12 @@ fit:
       init_args:
         save_dir: /mnt/flash/mitub
         project: mit-ub
-        name: "cifar-multi-gpu-gather"
+        name: "clip-normal-noise"
 
   model:
     class_path: mit_ub.tasks.JEPAWithClassification
     init_args:
-      backbone: "vit-cifar10-noalibi"
+      backbone: "vit-cifar10"
       num_classes: 10
 
       loss_fn: "cosine"
@@ -56,7 +54,7 @@ fit:
       lr_scheduler_init:
         class_path: torch.optim.lr_scheduler.OneCycleLR
         init_args:
-          max_lr: 0.001
+          max_lr: 0.0005
           div_factor: 5
           final_div_factor: 50
           pct_start: 0.10
