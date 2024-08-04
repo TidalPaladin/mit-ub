@@ -253,6 +253,7 @@ class AdaptiveViT(ViT):
             activation,
             alibi,
             position_noise,
+            output_norm,
         )
         # These are all provided by the adaptive tokenizer
         delattr(self, "patch_embed_2d")
