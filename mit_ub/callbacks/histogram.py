@@ -18,8 +18,9 @@ class WandBLoggerIntegration(LoggerIntegration):
         tag: str,
         step: int,
     ) -> None:
-        log_dict = {f"{tag}_{k}": wandb.Histogram(np_histogram=v) for k, v in target.items()}
-        pl_module.logger.experiment.log(log_dict, step=step)
+        log_dict: Dict[str, Any] = {f"{tag}_{k}": wandb.Histogram(np_histogram=v) for k, v in target.items()}
+        log_dict["trainer/global_step"] = step
+        pl_module.logger.experiment.log(log_dict)
 
 
 class HistogramCallback(LoggingCallback):
