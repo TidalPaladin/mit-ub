@@ -5,12 +5,13 @@ from typing import Any, Dict, Optional, Set, Tuple, cast
 import torch
 import torch.nn as nn
 import torchmetrics as tm
-from deep_helpers.structs import State
+from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
 from ssl_tasks.contrastive.loss import PointwiseContrastiveEmbeddingLoss
 from ssl_tasks.tokens import TokenMask
 from torch import Tensor
 from torch.distributed import ReduceOp, all_gather, all_reduce
+from torch.distributed import barrier as dist_barrier
 from torch.distributed import is_initialized as dist_is_initialized
 
 from ..model import BACKBONES, AdaptiveViT, TransformerEncoderLayer, ViT
@@ -231,8 +232,11 @@ class JEPA(Task):
     def synchronize_ema_weights(self):
         if self.trainer.world_size > 1:
             for ema_param in self.ema_backbone.parameters():
+                # There seems to be sporadic deadlocks in DDP, so we use barriers to keep things synchronized
+                dist_barrier()
                 all_reduce(ema_param.data, op=ReduceOp.SUM)
                 ema_param.data /= self.trainer.world_size
+            dist_barrier()
 
     @torch.no_grad()
     def weight_histogram(self, module: nn.Module, bins: int = 100) -> Tuple[Tensor, Tensor]:
@@ -262,8 +266,9 @@ class JEPA(Task):
     ) -> Dict[str, Any]:
         x: Tensor = batch["img"]
 
-        # ema update from previous step
-        self.update_ema()
+        # ema update from previous step when training
+        if state.mode == Mode.TRAIN:
+            self.update_ema()
 
         # generate context and target masks
         context_mask = self.create_context_mask(x)
