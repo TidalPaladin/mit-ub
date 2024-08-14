@@ -50,11 +50,13 @@ class ViT(nn.Module):
         self.patch_embed_2d = nn.Sequential(
             nn.Conv2d(in_channels, dim, kernel_size=self.patch_size_2d, stride=self.patch_size_2d),
             Rearrange("b c h w -> b (h w) c"),
+            nn.LayerNorm(dim),
         )
         # TODO: When patch size is (1, H, W) we can share weight / bias with Conv2d
         self.patch_embed_3d = nn.Sequential(
             nn.Conv3d(in_channels, dim, kernel_size=self.patch_size, stride=self.patch_size),
             Rearrange("b c d h w -> b (d h w) c"),
+            nn.LayerNorm(dim),
         )
 
         # Positional encoding
@@ -125,17 +127,31 @@ class ViT(nn.Module):
         B, C, *original_size = x.shape
         tokenized_size = self.tokenized_size(*original_size)
 
-        # Patch embedding and positional encoding
-        if is_3d := x.ndim == 5:
-            x = self.patch_embed_3d(x)
-            x += self.pos_enc_3d.from_grid(
-                tokenized_size, B, proto=x, normalize=True, add_noise=self.pos_enc_3d.training and self._position_noise
-            )
-        else:
-            x = self.patch_embed_2d(x)
-            x += self.pos_enc_2d.from_grid(
-                tokenized_size, B, proto=x, normalize=True, add_noise=self.pos_enc_2d.training and self._position_noise
-            )
+        # Patch embedding and positional encoding.
+        # Since medical inputs have high dynamic range, we use float32 for the patch embedding
+        with torch.autocast(device_type=x.device.type, dtype=torch.float32):
+            dtype = x.dtype
+            x = x.to(torch.float32)
+            if is_3d := x.ndim == 5:
+                x = self.patch_embed_3d(x)
+                x += self.pos_enc_3d.from_grid(
+                    tokenized_size,
+                    B,
+                    proto=x,
+                    normalize=True,
+                    add_noise=self.pos_enc_3d.training and self._position_noise,
+                )
+            else:
+                x = self.patch_embed_2d(x)
+                x += self.pos_enc_2d.from_grid(
+                    tokenized_size,
+                    B,
+                    proto=x,
+                    normalize=True,
+                    add_noise=self.pos_enc_2d.training and self._position_noise,
+                )
+            x = x.to(dtype)
+
         if mask is not None:
             x = mask.apply_to_tokens(x, fill_value=mask_fill_value)
 
@@ -301,7 +317,11 @@ class AdaptiveViT(ViT):
         assert not is_3d, "3D input not supported for AdaptiveViT"
 
         # Tokenize (includes position encoding)
-        q, kv = self.tokenizer(x)
+        # Since medical inputs have high dynamic range, we use float32 for the patch embedding
+        with torch.autocast(device_type=x.device.type, dtype=torch.float32):
+            q, kv = self.tokenizer(x.to(torch.float32))
+            q = q.to(x.dtype)
+            kv = kv.to(x.dtype)
 
         # Determine the grid size of the key/value tokens
         kv_tokenized_size = self.tokenizer.kv_size(x.shape[2:])
