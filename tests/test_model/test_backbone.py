@@ -9,7 +9,6 @@ from mit_ub.model.backbone import AdaptiveViT, ViT
 class TestViT:
 
     @pytest.mark.parametrize("alibi", [False, True])
-    @pytest.mark.parametrize("autocast_dtype", [None, torch.float16, torch.bfloat16, torch.float32])
     @pytest.mark.parametrize(
         "device",
         [
@@ -17,12 +16,12 @@ class TestViT:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
-    def test_forward(self, device, alibi, autocast_dtype):
+    def test_forward(self, device, alibi):
         x = torch.randn(1, 3, 224, 224, device=device)
         nhead = 128 // 16
         model = ViT(3, 128, (16, 16), 3, nhead, alibi=alibi).to(device)
         with torch.autocast(device_type=device, dtype=torch.float16):
-            out = model(x, autocast=True, autocast_dtype=autocast_dtype)
+            out = model(x)
         assert out.shape[:2] == (1, 128)
 
     @pytest.mark.parametrize(
@@ -69,7 +68,6 @@ class TestViT:
 class TestAdaptiveViT:
 
     @pytest.mark.parametrize("alibi", [False, True])
-    @pytest.mark.parametrize("autocast_dtype", [None, torch.float16, torch.bfloat16, torch.float32])
     @pytest.mark.parametrize(
         "device",
         [
@@ -77,12 +75,12 @@ class TestAdaptiveViT:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
-    def test_forward(self, device, alibi, autocast_dtype):
+    def test_forward(self, device, alibi):
         x = torch.randn(1, 3, 224, 224, device=device)
         nhead = 128 // 16
         model = AdaptiveViT(3, 128, 32, (16, 16), (4, 4), 3, 3, nhead, alibi=alibi).to(device)
         with torch.autocast(device_type=device, dtype=torch.float16, enabled=True):
-            out = model(x, autocast=True, autocast_dtype=autocast_dtype)
+            out = model(x)
         assert out.shape[:2] == (1, 128)
 
     @pytest.mark.parametrize(

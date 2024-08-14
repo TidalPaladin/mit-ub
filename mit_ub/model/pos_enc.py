@@ -116,6 +116,11 @@ class RelativeFactorizedPosition(PositionEncoder):
         self._d_out = d_out
         self.proj = nn.Linear(d_in, d_out)
 
-    def forward(self, x: Tensor, autocast: bool = True, autocast_dtype: torch.dtype | None = None) -> Tensor:
-        with torch.autocast(device_type="cuda", dtype=autocast_dtype, enabled=autocast):
-            return self.proj(x)
+    def forward(self, x: Tensor) -> Tensor:
+        # Run this at high precision. Should only matter for > 1k positions, but it's cheap.
+        matmul_precision = torch.get_float32_matmul_precision()
+        torch.set_float32_matmul_precision("high")
+        with torch.autocast(device_type="cuda", dtype=torch.float32):
+            result = self.proj(x.to(torch.float32)).to(x.dtype)
+        torch.set_float32_matmul_precision(matmul_precision)
+        return result
