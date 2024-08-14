@@ -116,5 +116,6 @@ class RelativeFactorizedPosition(PositionEncoder):
         self._d_out = d_out
         self.proj = nn.Linear(d_in, d_out)
 
-    def forward(self, x: Tensor) -> Tensor:
-        return self.proj(x)
+    def forward(self, x: Tensor, autocast: bool = True, autocast_dtype: torch.dtype | None = None) -> Tensor:
+        with torch.autocast(device_type="cuda", dtype=autocast_dtype, enabled=autocast):
+            return self.proj(x)

@@ -121,6 +121,8 @@ class ViT(nn.Module):
         reshape: bool = True,
         mask: TokenMask | None = None,
         mask_fill_value: float | Tensor | None = None,
+        autocast: bool = True,
+        autocast_dtype: torch.dtype | None = None,
     ) -> Tensor:
         B, C, *original_size = x.shape
         tokenized_size = self.tokenized_size(*original_size)
@@ -132,7 +134,8 @@ class ViT(nn.Module):
                 tokenized_size, B, proto=x, normalize=True, add_noise=self.pos_enc_3d.training and self._position_noise
             )
         else:
-            x = self.patch_embed_2d(x)
+            with torch.autocast(device_type="cuda", dtype=autocast_dtype, enabled=autocast):
+                x = self.patch_embed_2d(x)
             x += self.pos_enc_2d.from_grid(
                 tokenized_size, B, proto=x, normalize=True, add_noise=self.pos_enc_2d.training and self._position_noise
             )
@@ -294,6 +297,8 @@ class AdaptiveViT(ViT):
         reshape: bool = True,
         mask: TokenMask | None = None,
         mask_fill_value: float | Tensor | None = None,
+        autocast: bool = True,
+        autocast_dtype: torch.dtype | None = None,
     ) -> Tensor:
         B, C, *original_size = x.shape
         tokenized_size = self.tokenized_size(*original_size)
@@ -301,7 +306,7 @@ class AdaptiveViT(ViT):
         assert not is_3d, "3D input not supported for AdaptiveViT"
 
         # Tokenize (includes position encoding)
-        q, kv = self.tokenizer(x)
+        q, kv = self.tokenizer(x, autocast, autocast_dtype)
 
         # Determine the grid size of the key/value tokens
         kv_tokenized_size = self.tokenizer.kv_size(x.shape[2:])
