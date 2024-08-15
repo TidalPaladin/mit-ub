@@ -271,6 +271,7 @@ class AdaptiveViT(ViT):
             position_noise,
             output_norm,
         )
+        self._kv_dim = kv_dim
         # These are all provided by the adaptive tokenizer
         delattr(self, "patch_embed_2d")
         delattr(self, "patch_embed_3d")
@@ -304,13 +305,17 @@ class AdaptiveViT(ViT):
     def pos_enc_3d(self) -> nn.Module:
         return self.tokenizer.pos_enc_q
 
-    def forward(
+    @property
+    def kv_dim(self) -> int:
+        return self._kv_dim
+
+    def forward_with_kv(
         self,
         x: Tensor,
         reshape: bool = True,
         mask: TokenMask | None = None,
         mask_fill_value: float | Tensor | None = None,
-    ) -> Tensor:
+    ) -> Tuple[Tensor, Tensor]:
         B, C, *original_size = x.shape
         tokenized_size = self.tokenized_size(*original_size)
         is_3d = x.ndim == 5
@@ -371,5 +376,15 @@ class AdaptiveViT(ViT):
             # x = rearrange(x, "b (d h w) c -> b c d h w", d=tokenized_size[0], h=tokenized_size[1], w=tokenized_size[2])
         elif reshape:
             x = rearrange(x, "b (h w) c -> b c h w", h=tokenized_size[0], w=tokenized_size[1])
+            kv = rearrange(kv, "b (h w) c -> b c h w", h=kv_tokenized_size[0], w=kv_tokenized_size[1])
 
-        return x
+        return x, kv
+
+    def forward(
+        self,
+        x: Tensor,
+        reshape: bool = True,
+        mask: TokenMask | None = None,
+        mask_fill_value: float | Tensor | None = None,
+    ) -> Tensor:
+        return self.forward_with_kv(x, reshape, mask, mask_fill_value)[0]

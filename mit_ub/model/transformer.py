@@ -101,6 +101,7 @@ class TransformerDecoderLayer(nn.Module):
         alibi_lower: int | None = None,
         alibi_upper: int | None = None,
         sigsilu: bool = True,
+        self_attn: bool = True,
     ):
         super().__init__()
         d_kv = d_kv or d_model
@@ -115,7 +116,7 @@ class TransformerDecoderLayer(nn.Module):
             raise ValueError("Either both `alibi_lower` and `alibi_upper` must be provided, or neither")
 
         self.cross_attn = MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True, kdim=d_kv, vdim=d_kv)
-        self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True) if self_attn else None
 
         # MLP up-project is a GLU-variant -> F.silu(W1x + b1) * F.sigmoid(W2x + b2).
         # Improves probe accuracy, convergence rate, and reduces feature variance
@@ -131,7 +132,7 @@ class TransformerDecoderLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
 
-        self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
+        self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps) if self_attn else None
         self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
         self.norm3 = nn.LayerNorm(d_model, eps=layer_norm_eps)
         self.dropout1 = nn.Dropout(dropout)
@@ -152,22 +153,25 @@ class TransformerDecoderLayer(nn.Module):
         full_precision: bool = True,
         mask_threshold: float | None = None,
     ) -> Tensor:
-        # Self attention
-        x = q
-        y = self.norm1(x)
-        B, H = x.shape[0], self.nhead
         slopes: Tensor | None = None
-        if self.alibi is not None:
-            slopes = self.alibi.view(1, H).expand(B, -1).contiguous()
-            y = self.self_attn(y, y, y, pos_q, pos_q, slopes, mask_threshold=mask_threshold)
-        else:
-            y = self.self_attn(y, y, y)
-        x = x + y
+        x = q
+        B, H = x.shape[0], self.nhead
+
+        # Self attention
+        if self.self_attn is not None:
+            assert self.norm1 is not None
+            y = self.norm1(x)
+            if self.alibi is not None:
+                slopes = self.alibi.view(1, H).expand(B, -1).contiguous()
+                y = self.self_attn(y, y, y, pos_q, pos_q, slopes, mask_threshold=mask_threshold)
+            else:
+                y = self.self_attn(y, y, y)
+            x = x + y
 
         # Cross attention
         y = self.norm2(x)
         if self.alibi is not None:
-            assert slopes is not None
+            slopes = slopes if slopes is not None else self.alibi.view(1, H).expand(B, -1).contiguous()
             y = self.cross_attn(y, kv, kv, pos_q, pos_k, slopes, mask_threshold=mask_threshold)
         else:
             y = self.cross_attn(y, kv, kv)
