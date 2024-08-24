@@ -505,18 +505,18 @@ class BreastTriage(TriageTask):
 
         # Apply standard view weight
         standard_view_mask = self.get_standard_view_mask(batch)
-        baseline_weight[standard_view_mask] *= self.standard_view_weight
+        baseline_weight = torch.where(standard_view_mask, baseline_weight * self.standard_view_weight, baseline_weight)
 
         # Apply implant weight
         implant_mask = self.get_implant_mask(batch)
-        baseline_weight[implant_mask] *= self.implant_weight
+        baseline_weight = torch.where(implant_mask, baseline_weight * self.implant_weight, baseline_weight)
 
         # Apply pos weight
         pos_mask = self.get_tensor_label(batch) == 1
-        baseline_weight[pos_mask] *= self.pos_weight
+        baseline_weight = torch.where(pos_mask, baseline_weight * self.pos_weight, baseline_weight)
 
         # Normalize weights
-        baseline_weight /= baseline_weight.sum()
+        baseline_weight.div_(baseline_weight.sum())
         _check_weights_sum_to_one(baseline_weight)
 
         return baseline_weight
