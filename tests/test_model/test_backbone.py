@@ -79,7 +79,7 @@ class TestAdaptiveViT:
         x = torch.randn(1, 3, 224, 224, device=device)
         nhead = 128 // 16
         model = AdaptiveViT(3, 128, 32, (16, 16), (4, 4), 3, 3, nhead, alibi=alibi).to(device)
-        with torch.autocast(device_type=device, dtype=torch.float16):
+        with torch.autocast(device_type=device, dtype=torch.float16, enabled=True):
             out = model(x)
         assert out.shape[:2] == (1, 128)
 

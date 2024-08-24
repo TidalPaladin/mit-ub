@@ -14,6 +14,8 @@ def _adaptive_tokenizer_forward(
     pos_enc_q: RelativeFactorizedPosition,
     pos_enc_kv: RelativeFactorizedPosition,
     to_seq: Rearrange,
+    norm_q: nn.Module,
+    norm_kv: nn.Module,
     x: Tensor,
     position_noise: bool = False,
 ) -> Tuple[Tensor, Tensor]:
@@ -24,14 +26,14 @@ def _adaptive_tokenizer_forward(
     # Add position encoding to q
     B = x.shape[0]
     q_tokenized_size = q.shape[2:]
-    q = to_seq(q)
+    q = norm_q(to_seq(q))
     q += pos_enc_q.from_grid(
         q_tokenized_size, B, proto=q, normalize=True, add_noise=pos_enc_q.training and position_noise
     )
 
     # Add position encoding to kv
     kv_tokenized_size = kv.shape[2:]
-    kv = to_seq(kv)
+    kv = norm_kv(to_seq(kv))
     kv += pos_enc_kv.from_grid(
         kv_tokenized_size, B, proto=kv, normalize=True, add_noise=pos_enc_kv.training and position_noise
     )
@@ -66,6 +68,8 @@ class AdaptiveTokenizer2d(nn.Module):
         self.pos_enc_kv = RelativeFactorizedPosition(2, kv_dim)
 
         self.to_seq = Rearrange("b c h w -> b (h w) c")
+        self.norm_q = nn.LayerNorm(d_model)
+        self.norm_kv = nn.LayerNorm(kv_dim)
 
     def kv_size(self, input_size: Tuple[int, int]) -> Tuple[int, int]:
         return divide_tuple(input_size, self.patch_size)
@@ -77,6 +81,8 @@ class AdaptiveTokenizer2d(nn.Module):
             self.pos_enc_q,
             self.pos_enc_kv,
             self.to_seq,
+            self.norm_q,
+            self.norm_kv,
             x,
             self.position_noise,
         )
@@ -109,6 +115,8 @@ class AdaptiveTokenizer3d(nn.Module):
         self.pos_enc_kv = RelativeFactorizedPosition(3, kv_dim)
 
         self.to_seq = Rearrange("b c d h w -> b (d h w) c")
+        self.norm_q = nn.LayerNorm(d_model)
+        self.norm_kv = nn.LayerNorm(kv_dim)
 
     def kv_size(self, input_size: Tuple[int, int, int]) -> Tuple[int, int, int]:
         return divide_tuple(input_size, self.patch_size)
@@ -120,6 +128,8 @@ class AdaptiveTokenizer3d(nn.Module):
             self.pos_enc_q,
             self.pos_enc_kv,
             self.to_seq,
+            self.norm_q,
+            self.norm_kv,
             x,
             self.position_noise,
         )
