@@ -103,7 +103,7 @@ fit:
       #strict_checkpoint: false
 
   data:
-    class_path: torch_dicom.preprocessing.datamodule.PreprocessedPNGDataModule
+    class_path: torch_dicom.preprocessing.datamodule.PreprocessedDataModule
     init_args:
       train_inputs: 
         - "/mnt/active_2/chase/data/medcog"

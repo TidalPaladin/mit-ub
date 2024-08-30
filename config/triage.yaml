@@ -75,7 +75,7 @@ fit:
       strict_checkpoint: false
 
   data:
-    class_path: mit_ub.data.triage.PreprocessedPNGDataModule
+    class_path: mit_ub.data.triage.PreprocessedDataModule
     init_args:
       train_inputs: 
         - "/mnt/active_1/chase/data/optimam"

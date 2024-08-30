@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import torch
 from pytorch_lightning.loggers import WandbLogger
-from torch_dicom.preprocessing.datamodule import PreprocessedPNGDataModule
+from torch_dicom.preprocessing.datamodule import PreprocessedDataModule
 from torch_dicom.testing import MammogramTestFactory
 from torchvision.datasets import CIFAR10
 
@@ -43,7 +43,7 @@ def pytest_runtest_setup(item):
 def datamodule(tmpdir_factory):
     root = Path(tmpdir_factory.mktemp("preprocessed"))
     factory = MammogramTestFactory(root, dicom_size=(64, 32), num_studies=3)
-    return factory(batch_size=2, num_workers=0, datamodule_class=PreprocessedPNGDataModule)
+    return factory(batch_size=2, num_workers=0, datamodule_class=PreprocessedDataModule)
 
 
 @pytest.fixture(scope="session")

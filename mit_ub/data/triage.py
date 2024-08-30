@@ -5,10 +5,10 @@ from deep_helpers.structs import Mode
 from torch.utils.data import RandomSampler, Sampler, SequentialSampler
 from torch_dicom.datasets import ImagePathDataset
 from torch_dicom.datasets.sampler import WeightedCSVSampler
-from torch_dicom.preprocessing.datamodule import PreprocessedPNGDataModule as BasePreprocessedPNGDataModule
+from torch_dicom.preprocessing.datamodule import PreprocessedDataModule as BasePreprocessedDataModule
 
 
-class PreprocessedPNGDataModule(BasePreprocessedPNGDataModule):
+class PreprocessedDataModule(BasePreprocessedDataModule):
 
     def __init__(self, *args, malign_weight: float | None = 0.5, **kwargs):
         super().__init__(*args, **kwargs)
