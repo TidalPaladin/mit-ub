@@ -3,6 +3,7 @@ from typing import Final
 from registry import Registry
 
 from .backbone import AdaptiveViT, ViT
+from .convnext import ConvNext
 from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
 
@@ -126,4 +127,15 @@ BACKBONES(
     dropout=0.1,
 )
 
-__all__ = ["BACKBONES", "ViT", "TransformerEncoderLayer", "TransformerDecoderLayer", "AdaptiveViT"]
+BACKBONES(
+    ConvNext,
+    name="convnext-cifar10",
+    in_channels=3,
+    depths=(3, 5, 7),
+    dims=(128, 256, 512),
+    patch_size=2,
+    dropout=0.1,
+    kernel_size=3,
+)
+
+__all__ = ["BACKBONES", "ViT", "TransformerEncoderLayer", "TransformerDecoderLayer", "AdaptiveViT", "ConvNext"]
