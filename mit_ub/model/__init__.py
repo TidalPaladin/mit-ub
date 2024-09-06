@@ -94,15 +94,17 @@ BACKBONES(
 )
 
 
+CIFAR10_DIM: Final = 384
+
 BACKBONES(
     ViT,
     name="vit-cifar10",
     in_channels=3,
-    dim=256,
+    dim=CIFAR10_DIM,
     patch_size=4,
     depth=12,
-    nhead=256 // HEAD_DIM,
-    num_kv_heads=256 // HEAD_DIM // QUERY_GROUPS,
+    nhead=CIFAR10_DIM // HEAD_DIM,
+    num_kv_heads=CIFAR10_DIM // HEAD_DIM // QUERY_GROUPS,
     dropout=0.1,
 )
 
@@ -110,13 +112,13 @@ BACKBONES(
     AdaptiveViT,
     name="vit-cifar10-adaptive",
     in_channels=3,
-    dim=256,
+    dim=CIFAR10_DIM,
     kv_dim=64,
     patch_size=4,
     target_shape=(4, 4),
     encoder_depth=6,
     decoder_depth=6,
-    nhead=256 // HEAD_DIM,
+    nhead=CIFAR10_DIM // HEAD_DIM,
     num_kv_heads=64 // HEAD_DIM // QUERY_GROUPS,
     dropout=0.1,
 )

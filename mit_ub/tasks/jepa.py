@@ -15,6 +15,7 @@ from torch.distributed import barrier as dist_barrier
 from torch.distributed import is_initialized as dist_is_initialized
 
 from ..model import BACKBONES, AdaptiveViT, TransformerEncoderLayer, ViT
+from ..model.pos_enc import RelativeFactorizedPosition
 
 
 class NormallyDistributed(nn.Module):
@@ -107,6 +108,7 @@ class JEPA(Task):
         torch.nn.init.trunc_normal_(self.jepa_query, mean=0, std=1)
 
         predictor_dim_ff = self.backbone.dim
+        self.pos_enc_2d = RelativeFactorizedPosition(2, self.backbone.dim)
         self.jepa_predictor = nn.ModuleList(
             [
                 TransformerEncoderLayer(
@@ -174,13 +176,9 @@ class JEPA(Task):
         B, _, D = context.shape
         tokenized_size = self.backbone.tokenized_size(*x.shape[2:])
         if is_3d := x.ndim == 5:
-            query = self.backbone.pos_enc_3d.from_grid(
-                tokenized_size, B, proto=context, normalize=True, requires_grad=False
-            )
+            raise NotImplementedError("3D not implemented")
         else:
-            query = self.backbone.pos_enc_2d.from_grid(
-                tokenized_size, B, proto=context, normalize=True, requires_grad=False
-            )
+            query = self.pos_enc_2d.from_grid(tokenized_size, B, proto=context, normalize=True, requires_grad=False)
         query = query.contiguous()
         query += self.jepa_query.type_as(query)
 
