@@ -2438,10 +2438,10 @@ files = [
 
 [[package]]
 name = "triton-helpers"
-version = "0.1.dev16"
+version = "0.1.dev19"
 requires_python = ">=3.9"
 git = "https://github.com/TidalPaladin/triton-helpers.git"
-revision = "179af437d543ee5e9938148d9d9d601270842f51"
+revision = "6f5785a2f55af8346943948ef84073aa67c301cd"
 summary = ""
 groups = ["default"]
 dependencies = [
