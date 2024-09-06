@@ -26,6 +26,7 @@ class ViT(nn.Module):
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
         activation: nn.Module = nn.SiLU(),
+        gate_activation: nn.Module | None = None,
         alibi: bool = False,
         position_noise: bool = False,
         output_norm: bool = True,
@@ -67,7 +68,14 @@ class ViT(nn.Module):
         self.blocks = nn.ModuleList(
             [
                 TransformerEncoderLayer(
-                    dim, nhead, dim_feedforward, dropout, activation, alibi_lower=low, alibi_upper=high
+                    dim,
+                    nhead,
+                    dim_feedforward,
+                    dropout,
+                    activation,
+                    gate_activation,
+                    alibi_lower=low,
+                    alibi_upper=high,
                 )
                 for low, high in map(self.get_alibi_bounds, range(depth))
             ]
@@ -251,6 +259,7 @@ class AdaptiveViT(ViT):
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
         activation: nn.Module = nn.SiLU(),
+        gate_activation: nn.Module | None = None,
         alibi: bool = False,
         position_noise: bool = False,
         output_norm: bool = True,
@@ -267,6 +276,7 @@ class AdaptiveViT(ViT):
             dim_feedforward,
             dropout,
             activation,
+            gate_activation,
             alibi,
             position_noise,
             output_norm,
@@ -285,7 +295,7 @@ class AdaptiveViT(ViT):
         self.tokenizer = AdaptiveTokenizer2d(in_channels, dim, kv_dim, self.patch_size_2d, target_shape)
         self.encoder_blocks = nn.ModuleList(
             [
-                TransformerDecoderLayer(dim, nhead, kv_dim, self.dim_feedforward, dropout, activation)
+                TransformerDecoderLayer(dim, nhead, kv_dim, self.dim_feedforward, dropout, activation, gate_activation)
                 for _ in range(encoder_depth)
             ]
         )
