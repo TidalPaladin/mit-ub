@@ -27,14 +27,17 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
         self.nhead = nhead
         self.num_kv_heads = num_kv_heads or nhead
 
+        head_dim = d_model // nhead
+        kv_dim = head_dim * self.num_kv_heads
+
         self.self_attn = MultiHeadAttention(
             embed_dim=d_model,
             num_heads=nhead,
             num_kv_heads=self.num_kv_heads,
-            head_dim=d_model // nhead,
+            head_dim=head_dim,
             q_proj=nn.Linear(d_model, d_model, bias=False),
-            k_proj=nn.Linear(d_model, d_model, bias=False),
-            v_proj=nn.Linear(d_model, d_model, bias=True),
+            k_proj=nn.Linear(d_model, kv_dim, bias=False),
+            v_proj=nn.Linear(d_model, kv_dim, bias=True),
             output_proj=nn.Linear(d_model, d_model, bias=True),
             is_causal=False,
             attn_dropout=dropout,
@@ -128,14 +131,16 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
         self.nhead = nhead
         self.num_kv_heads = num_kv_heads or nhead
 
+        head_dim = d_model // nhead
+        kv_dim = head_dim * self.num_kv_heads
         self.self_attn = MultiHeadAttention(
             embed_dim=d_model,
             num_heads=nhead,
             num_kv_heads=self.num_kv_heads,
-            head_dim=d_model // nhead,
+            head_dim=head_dim,
             q_proj=nn.Linear(d_model, d_model, bias=False),
-            k_proj=nn.Linear(d_model, d_model, bias=False),
-            v_proj=nn.Linear(d_model, d_model, bias=True),
+            k_proj=nn.Linear(d_model, kv_dim, bias=False),
+            v_proj=nn.Linear(d_model, kv_dim, bias=True),
             output_proj=nn.Linear(d_model, d_model, bias=True),
             is_causal=False,
             attn_dropout=dropout,
@@ -144,10 +149,10 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
             embed_dim=d_model,
             num_heads=nhead,
             num_kv_heads=self.num_kv_heads,
-            head_dim=d_model // nhead,
+            head_dim=head_dim,
             q_proj=nn.Linear(d_model, d_model, bias=False),
-            k_proj=nn.Linear(d_kv, d_model, bias=False),
-            v_proj=nn.Linear(d_kv, d_model, bias=True),
+            k_proj=nn.Linear(d_kv, kv_dim, bias=False),
+            v_proj=nn.Linear(d_kv, kv_dim, bias=True),
             output_proj=nn.Linear(d_model, d_model, bias=True),
             is_causal=False,
             attn_dropout=dropout,

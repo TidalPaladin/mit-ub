@@ -36,6 +36,14 @@ class TestTransformerEncoderLayer:
         assert isinstance(layer.activation, type(activation))
         assert gate_activation is None or (layer.gate is not None and isinstance(layer.gate[-1], type(gate_activation)))
 
+    def test_forward_multi_query(self):
+        B, L, D = 1, 128, 128
+        x = torch.randn(B, L, D)
+        nhead = D // 16
+        layer = TransformerEncoderLayer(D, nhead, D, num_kv_heads=nhead // 2)
+        out = layer(x)
+        assert out.shape == x.shape
+
     @pytest.mark.parametrize(
         "device",
         [
@@ -135,6 +143,16 @@ class TestTransformerDecoderLayer:
         assert out.shape == q.shape
         assert isinstance(layer.activation, type(activation))
         assert gate_activation is None or (layer.gate is not None and isinstance(layer.gate[-1], type(gate_activation)))
+
+    def test_forward_multi_query(self):
+        B, Lq, Dq = 1, 64, 128
+        B, Lk, Dk = 1, 128, 32
+        q = torch.randn(B, Lq, Dq)
+        k = torch.randn(B, Lk, Dk)
+        nhead = Dq // 16
+        layer = TransformerDecoderLayer(Dq, nhead, Dk, num_kv_heads=nhead // 2)
+        out = layer(q, k)
+        assert out.shape == q.shape
 
     @pytest.mark.parametrize(
         "device",
