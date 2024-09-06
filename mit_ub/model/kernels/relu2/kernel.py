@@ -1,6 +1,7 @@
 from typing import Any, cast
 
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 from torch import Tensor
@@ -158,4 +159,8 @@ class ReLU2(Function):
 
 def relu2(x: Tensor) -> Tensor:
     r"""Computes squared ReLU of an input."""
-    return cast(Tensor, ReLU2.apply(x))
+    if x.device.type == "cuda":
+        return cast(Tensor, ReLU2.apply(x))
+    else:
+        y = F.relu(x)
+        return y * y
