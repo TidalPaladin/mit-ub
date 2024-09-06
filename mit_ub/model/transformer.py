@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -20,10 +22,10 @@ class TransformerEncoderLayer(nn.Module):
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
         activation: nn.Module = ReLU2(),
+        gate_activation: nn.Module | None = None,
         layer_norm_eps: float = 1e-5,
         alibi_lower: int | None = None,
         alibi_upper: int | None = None,
-        sigsilu: bool = True,
     ):
         super().__init__()
         self.nhead = nhead
@@ -41,10 +43,10 @@ class TransformerEncoderLayer(nn.Module):
         # MLP up-project is a GLU-variant -> F.silu(W1x + b1) * F.sigmoid(W2x + b2).
         # Improves probe accuracy, convergence rate, and reduces feature variance
         self.linear1 = nn.Linear(d_model, dim_feedforward)
-        if sigsilu:
+        if gate_activation is not None:
             self.gate = nn.Sequential(
                 nn.Linear(d_model, dim_feedforward),
-                nn.Sigmoid(),
+                deepcopy(gate_activation),
             )
         else:
             self.gate = None
@@ -56,7 +58,7 @@ class TransformerEncoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
-        self.activation = activation
+        self.activation = deepcopy(activation)
 
     def forward(
         self,
@@ -98,10 +100,10 @@ class TransformerDecoderLayer(nn.Module):
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
         activation: nn.Module = ReLU2(),
+        gate_activation: nn.Module | None = None,
         layer_norm_eps: float = 1e-5,
         alibi_lower: int | None = None,
         alibi_upper: int | None = None,
-        sigsilu: bool = True,
     ):
         super().__init__()
         d_kv = d_kv or d_model
@@ -118,13 +120,11 @@ class TransformerDecoderLayer(nn.Module):
         self.cross_attn = MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True, kdim=d_kv, vdim=d_kv)
         self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
 
-        # MLP up-project is a GLU-variant -> F.silu(W1x + b1) * F.sigmoid(W2x + b2).
-        # Improves probe accuracy, convergence rate, and reduces feature variance
         self.linear1 = nn.Linear(d_model, dim_feedforward)
-        if sigsilu:
+        if gate_activation is not None:
             self.gate = nn.Sequential(
                 nn.Linear(d_model, dim_feedforward),
-                nn.Sigmoid(),
+                deepcopy(gate_activation),
             )
         else:
             self.gate = None
@@ -138,7 +138,7 @@ class TransformerDecoderLayer(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
         self.dropout3 = nn.Dropout(dropout)
-        self.activation = activation
+        self.activation = deepcopy(activation)
 
     @torch.no_grad()
     def init_alibi(self, lower: int, upper: int) -> Tensor:

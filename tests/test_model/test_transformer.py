@@ -1,5 +1,6 @@
 import pytest
 import torch
+import torch.nn as nn
 from torch.testing import assert_close
 
 from mit_ub.model.transformer import TransformerDecoderLayer, TransformerEncoderLayer
@@ -31,14 +32,25 @@ class TestTransformerEncoderLayer:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
-    def test_forward(self, device):
+    @pytest.mark.parametrize(
+        "activation, gate_activation",
+        [
+            pytest.param(nn.ReLU(), None, id="relu"),
+            pytest.param(nn.Identity(), nn.Sigmoid(), id="glu"),
+            pytest.param(nn.Identity(), nn.SiLU(), id="swiglu"),
+            pytest.param(nn.SiLU(), nn.Sigmoid(), id="sigsilu"),
+        ],
+    )
+    def test_forward(self, device, activation, gate_activation):
         B, L, D = 1, 128, 128
         x = torch.randn(B, L, D, device=device)
         nhead = D // 16
-        layer = TransformerEncoderLayer(D, nhead, D).to(device)
+        layer = TransformerEncoderLayer(D, nhead, D, activation=activation, gate_activation=gate_activation).to(device)
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(x)
         assert out.shape == x.shape
+        assert isinstance(layer.activation, type(activation))
+        assert gate_activation is None or (layer.gate is not None and isinstance(layer.gate[-1], type(gate_activation)))
 
     @pytest.mark.parametrize(
         "device",
@@ -67,16 +79,29 @@ class TestTransformerDecoderLayer:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
-    def test_forward(self, device):
+    @pytest.mark.parametrize(
+        "activation, gate_activation",
+        [
+            pytest.param(nn.ReLU(), None, id="relu"),
+            pytest.param(nn.Identity(), nn.Sigmoid(), id="glu"),
+            pytest.param(nn.Identity(), nn.SiLU(), id="swiglu"),
+            pytest.param(nn.SiLU(), nn.Sigmoid(), id="sigsilu"),
+        ],
+    )
+    def test_forward(self, device, activation, gate_activation):
         B, Lq, Dq = 1, 64, 128
         B, Lk, Dk = 1, 128, 32
         q = torch.randn(B, Lq, Dq, device=device)
         k = torch.randn(B, Lk, Dk, device=device)
         nhead = Dq // 16
-        layer = TransformerDecoderLayer(Dq, nhead, Dk).to(device)
+        layer = TransformerDecoderLayer(Dq, nhead, Dk, activation=activation, gate_activation=gate_activation).to(
+            device
+        )
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(q, k)
         assert out.shape == q.shape
+        assert isinstance(layer.activation, type(activation))
+        assert gate_activation is None or (layer.gate is not None and isinstance(layer.gate[-1], type(gate_activation)))
 
     @pytest.mark.parametrize(
         "device",
