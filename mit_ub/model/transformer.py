@@ -1,4 +1,5 @@
 from copy import deepcopy
+from typing import Sequence, cast
 
 import torch
 import torch.nn as nn
@@ -6,6 +7,7 @@ from torch import Tensor
 
 from .kernels.attention import MultiheadAttention
 from .kernels.relu2 import ReLU2
+from .lora import LoRATarget, SupportsLoRA, apply_lora, freeze_non_lora
 
 
 @torch.no_grad()
@@ -13,7 +15,7 @@ def init_alibi(lower: int, upper: int, nhead: int) -> Tensor:
     return torch.logspace(lower, upper, nhead, base=2).reciprocal_().neg_()
 
 
-class TransformerEncoderLayer(nn.Module):
+class TransformerEncoderLayer(nn.Module, SupportsLoRA):
 
     def __init__(
         self,
@@ -89,8 +91,30 @@ class TransformerEncoderLayer(nn.Module):
 
         return x
 
+    def apply_lora(
+        self,
+        target: Sequence[LoRATarget],
+        rank: int,
+        alpha: float,
+        dropout: float = 0.0,
+        use_bias: bool = False,
+        quantize_base: bool = False,
+    ) -> nn.Module:
+        if LoRATarget.ATTENTION in target:
+            raise NotImplementedError("Attention not implemented")
 
-class TransformerDecoderLayer(nn.Module):
+        if LoRATarget.FEEDFORWARD in target:
+            self.linear1 = apply_lora(cast(nn.Linear, self.linear1), rank, alpha, dropout, use_bias, quantize_base)
+            self.linear2 = apply_lora(cast(nn.Linear, self.linear2), rank, alpha, dropout, use_bias, quantize_base)
+            if self.gate is not None:
+                self.gate[0] = apply_lora(cast(nn.Linear, self.gate[0]), rank, alpha, dropout, use_bias, quantize_base)
+
+        # Freeze all non-LoRA matrices/weights
+        freeze_non_lora(self)
+        return self
+
+
+class TransformerDecoderLayer(nn.Module, SupportsLoRA):
 
     def __init__(
         self,
@@ -185,3 +209,25 @@ class TransformerDecoderLayer(nn.Module):
         x = x + y
 
         return x
+
+    def apply_lora(
+        self,
+        target: Sequence[LoRATarget],
+        rank: int,
+        alpha: float,
+        dropout: float = 0.0,
+        use_bias: bool = False,
+        quantize_base: bool = False,
+    ) -> nn.Module:
+        if LoRATarget.ATTENTION in target:
+            raise NotImplementedError("Attention not implemented")
+
+        if LoRATarget.FEEDFORWARD in target:
+            self.linear1 = apply_lora(cast(nn.Linear, self.linear1), rank, alpha, dropout, use_bias, quantize_base)
+            self.linear2 = apply_lora(cast(nn.Linear, self.linear2), rank, alpha, dropout, use_bias, quantize_base)
+            if self.gate is not None:
+                self.gate[0] = apply_lora(cast(nn.Linear, self.gate[0]), rank, alpha, dropout, use_bias, quantize_base)
+
+        # Freeze all non-LoRA matrices/weights
+        freeze_non_lora(self)
+        return self
