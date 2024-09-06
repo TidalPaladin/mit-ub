@@ -1,18 +1,13 @@
 from copy import deepcopy
+from functools import partial
 from typing import Sequence, cast
 
-import torch
 import torch.nn as nn
 from torch import Tensor
 
-from .kernels.attention import MultiheadAttention
+from .gqa import MultiHeadAttention
 from .kernels.relu2 import ReLU2
 from .lora import LoRATarget, SupportsLoRA, apply_lora, freeze_non_lora
-
-
-@torch.no_grad()
-def init_alibi(lower: int, upper: int, nhead: int) -> Tensor:
-    return torch.logspace(lower, upper, nhead, base=2).reciprocal_().neg_()
 
 
 class TransformerEncoderLayer(nn.Module, SupportsLoRA):
@@ -26,21 +21,24 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
         activation: nn.Module = ReLU2(),
         gate_activation: nn.Module | None = None,
         layer_norm_eps: float = 1e-5,
-        alibi_lower: int | None = None,
-        alibi_upper: int | None = None,
+        num_kv_heads: int | None = None,
     ):
         super().__init__()
         self.nhead = nhead
+        self.num_kv_heads = num_kv_heads or nhead
 
-        # Configure ALiBi if bounds are provided
-        if alibi_lower is None and alibi_upper is None:
-            self.alibi = None
-        elif alibi_lower is not None and alibi_upper is not None:
-            self.register_buffer("alibi", init_alibi(alibi_lower, alibi_upper, nhead))
-        else:
-            raise ValueError("Either both `alibi_lower` and `alibi_upper` must be provided, or neither")
-
-        self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.self_attn = MultiHeadAttention(
+            embed_dim=d_model,
+            num_heads=nhead,
+            num_kv_heads=self.num_kv_heads,
+            head_dim=d_model // nhead,
+            q_proj=nn.Linear(d_model, d_model, bias=False),
+            k_proj=nn.Linear(d_model, d_model, bias=False),
+            v_proj=nn.Linear(d_model, d_model, bias=True),
+            output_proj=nn.Linear(d_model, d_model, bias=True),
+            is_causal=False,
+            attn_dropout=dropout,
+        )
 
         # MLP up-project is a GLU-variant -> F.silu(W1x + b1) * F.sigmoid(W2x + b2).
         # Improves probe accuracy, convergence rate, and reduces feature variance
@@ -62,21 +60,11 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
         self.dropout2 = nn.Dropout(dropout)
         self.activation = deepcopy(activation)
 
-    def forward(
-        self,
-        x: Tensor,
-        pos: Tensor | None = None,
-        full_precision: bool = True,
-        mask_threshold: float | None = None,
-    ) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         # Self attention
         y = self.norm1(x)
         B, H = x.shape[0], self.nhead
-        if self.alibi is not None:
-            slopes = self.alibi.view(1, H).expand(B, -1).contiguous()
-            y = self.self_attn(y, y, y, pos, pos, slopes, mask_threshold=mask_threshold)
-        else:
-            y = self.self_attn(y, y, y)
+        y = self.self_attn(y, y)
         x = x + y
 
         # MLP
@@ -100,14 +88,21 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
         use_bias: bool = False,
         quantize_base: bool = False,
     ) -> nn.Module:
+        _apply_lora = partial(
+            apply_lora, rank=rank, alpha=alpha, dropout=dropout, use_bias=use_bias, quantize_base=quantize_base
+        )
+
         if LoRATarget.ATTENTION in target:
-            raise NotImplementedError("Attention not implemented")
+            self.self_attn.q_proj = _apply_lora(cast(nn.Linear, self.self_attn.q_proj))
+            self.self_attn.k_proj = _apply_lora(cast(nn.Linear, self.self_attn.k_proj))
+            self.self_attn.v_proj = _apply_lora(cast(nn.Linear, self.self_attn.v_proj))
+            self.self_attn.output_proj = _apply_lora(cast(nn.Linear, self.self_attn.output_proj))
 
         if LoRATarget.FEEDFORWARD in target:
-            self.linear1 = apply_lora(cast(nn.Linear, self.linear1), rank, alpha, dropout, use_bias, quantize_base)
-            self.linear2 = apply_lora(cast(nn.Linear, self.linear2), rank, alpha, dropout, use_bias, quantize_base)
+            self.linear1 = _apply_lora(cast(nn.Linear, self.linear1))
+            self.linear2 = _apply_lora(cast(nn.Linear, self.linear2))
             if self.gate is not None:
-                self.gate[0] = apply_lora(cast(nn.Linear, self.gate[0]), rank, alpha, dropout, use_bias, quantize_base)
+                self.gate[0] = _apply_lora(cast(nn.Linear, self.gate[0]))
 
         # Freeze all non-LoRA matrices/weights
         freeze_non_lora(self)
@@ -126,23 +121,37 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
         activation: nn.Module = ReLU2(),
         gate_activation: nn.Module | None = None,
         layer_norm_eps: float = 1e-5,
-        alibi_lower: int | None = None,
-        alibi_upper: int | None = None,
+        num_kv_heads: int | None = None,
     ):
         super().__init__()
         d_kv = d_kv or d_model
         self.nhead = nhead
+        self.num_kv_heads = num_kv_heads or nhead
 
-        # Configure ALiBi if bounds are provided
-        if alibi_lower is None and alibi_upper is None:
-            self.alibi = None
-        elif alibi_lower is not None and alibi_upper is not None:
-            self.register_buffer("alibi", init_alibi(alibi_lower, alibi_upper, nhead))
-        else:
-            raise ValueError("Either both `alibi_lower` and `alibi_upper` must be provided, or neither")
-
-        self.cross_attn = MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True, kdim=d_kv, vdim=d_kv)
-        self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.self_attn = MultiHeadAttention(
+            embed_dim=d_model,
+            num_heads=nhead,
+            num_kv_heads=self.num_kv_heads,
+            head_dim=d_model // nhead,
+            q_proj=nn.Linear(d_model, d_model, bias=False),
+            k_proj=nn.Linear(d_model, d_model, bias=False),
+            v_proj=nn.Linear(d_model, d_model, bias=True),
+            output_proj=nn.Linear(d_model, d_model, bias=True),
+            is_causal=False,
+            attn_dropout=dropout,
+        )
+        self.cross_attn = MultiHeadAttention(
+            embed_dim=d_model,
+            num_heads=nhead,
+            num_kv_heads=self.num_kv_heads,
+            head_dim=d_model // nhead,
+            q_proj=nn.Linear(d_model, d_model, bias=False),
+            k_proj=nn.Linear(d_kv, d_model, bias=False),
+            v_proj=nn.Linear(d_kv, d_model, bias=True),
+            output_proj=nn.Linear(d_model, d_model, bias=True),
+            is_causal=False,
+            attn_dropout=dropout,
+        )
 
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         if gate_activation is not None:
@@ -164,38 +173,17 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
         self.dropout3 = nn.Dropout(dropout)
         self.activation = deepcopy(activation)
 
-    @torch.no_grad()
-    def init_alibi(self, lower: int, upper: int) -> Tensor:
-        return torch.logspace(lower, upper, self.nhead, base=2).reciprocal_().neg_()
-
-    def forward(
-        self,
-        q: Tensor,
-        kv: Tensor,
-        pos_q: Tensor | None = None,
-        pos_k: Tensor | None = None,
-        full_precision: bool = True,
-        mask_threshold: float | None = None,
-    ) -> Tensor:
+    def forward(self, q: Tensor, kv: Tensor) -> Tensor:
         # Self attention
         x = q
         y = self.norm1(x)
         B, H = x.shape[0], self.nhead
-        slopes: Tensor | None = None
-        if self.alibi is not None:
-            slopes = self.alibi.view(1, H).expand(B, -1).contiguous()
-            y = self.self_attn(y, y, y, pos_q, pos_q, slopes, mask_threshold=mask_threshold)
-        else:
-            y = self.self_attn(y, y, y)
+        y = self.self_attn(y, y)
         x = x + y
 
         # Cross attention
         y = self.norm2(x)
-        if self.alibi is not None:
-            assert slopes is not None
-            y = self.cross_attn(y, kv, kv, pos_q, pos_k, slopes, mask_threshold=mask_threshold)
-        else:
-            y = self.cross_attn(y, kv, kv)
+        y = self.cross_attn(y, kv)
         x = x + y
 
         # MLP
@@ -219,14 +207,22 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
         use_bias: bool = False,
         quantize_base: bool = False,
     ) -> nn.Module:
+        _apply_lora = partial(
+            apply_lora, rank=rank, alpha=alpha, dropout=dropout, use_bias=use_bias, quantize_base=quantize_base
+        )
+
         if LoRATarget.ATTENTION in target:
-            raise NotImplementedError("Attention not implemented")
+            for layer in (self.self_attn, self.cross_attn):
+                layer.q_proj = _apply_lora(cast(nn.Linear, layer.q_proj))
+                layer.k_proj = _apply_lora(cast(nn.Linear, layer.k_proj))
+                layer.v_proj = _apply_lora(cast(nn.Linear, layer.v_proj))
+                layer.output_proj = _apply_lora(cast(nn.Linear, layer.output_proj))
 
         if LoRATarget.FEEDFORWARD in target:
-            self.linear1 = apply_lora(cast(nn.Linear, self.linear1), rank, alpha, dropout, use_bias, quantize_base)
-            self.linear2 = apply_lora(cast(nn.Linear, self.linear2), rank, alpha, dropout, use_bias, quantize_base)
+            self.linear1 = _apply_lora(cast(nn.Linear, self.linear1))
+            self.linear2 = _apply_lora(cast(nn.Linear, self.linear2))
             if self.gate is not None:
-                self.gate[0] = apply_lora(cast(nn.Linear, self.gate[0]), rank, alpha, dropout, use_bias, quantize_base)
+                self.gate[0] = _apply_lora(cast(nn.Linear, self.gate[0]))
 
         # Freeze all non-LoRA matrices/weights
         freeze_non_lora(self)

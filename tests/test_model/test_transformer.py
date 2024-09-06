@@ -1,31 +1,13 @@
 import pytest
 import torch
 import torch.nn as nn
-from torch.testing import assert_close
 from torchtune.modules.peft.lora import LoRALinear
 
-from mit_ub.model.lora import LoRALinear, LoRATarget
+from mit_ub.model.lora import LoRATarget
 from mit_ub.model.transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
 
 class TestTransformerEncoderLayer:
-
-    @pytest.mark.parametrize(
-        "lower,upper,nhead,exp",
-        [
-            pytest.param(None, 8, 8, None, marks=pytest.mark.xfail(raises=ValueError)),
-            pytest.param(8, None, 8, None, marks=pytest.mark.xfail(raises=ValueError)),
-            (None, None, 8, None),
-            (0, 8, 8, torch.tensor([-1.0000, -0.4529, -0.2051, -0.0929, -0.0421, -0.0190, -0.0086, -0.0039])),
-            (0, 8, 4, torch.tensor([-1.0000, -0.1575, -0.0248, -0.0039])),
-            (-2, 0, 3, torch.tensor([-4.0000, -2.0000, -1.0000])),
-        ],
-    )
-    def test_alibi_slopes(self, lower, upper, nhead, exp):
-        D = nhead
-        layer = TransformerEncoderLayer(D, nhead, D, alibi_lower=lower, alibi_upper=upper)
-        slopes = layer.alibi
-        assert_close(slopes, exp, atol=1e-4, rtol=0)
 
     @pytest.mark.parametrize(
         "device",
@@ -87,22 +69,35 @@ class TestTransformerEncoderLayer:
             pytest.param(nn.SiLU(), nn.Sigmoid(), id="sigsilu"),
         ],
     )
-    def test_lora(self, device, activation, gate_activation):
+    @pytest.mark.parametrize(
+        "target",
+        [
+            [LoRATarget.ATTENTION],
+            [LoRATarget.FEEDFORWARD],
+            [LoRATarget.ATTENTION, LoRATarget.FEEDFORWARD],
+        ],
+    )
+    def test_lora(self, device, activation, gate_activation, target):
         B, L, D = 1, 128, 128
         x = torch.randn(B, L, D, device=device)
         nhead = D // 16
         layer = TransformerEncoderLayer(D, nhead, D, activation=activation, gate_activation=gate_activation).to(device)
-        layer = layer.apply_lora(target=[LoRATarget.FEEDFORWARD], rank=4, alpha=16)
-        assert isinstance(layer.linear1, LoRALinear)
-        assert isinstance(layer.linear2, LoRALinear)
-        if gate_activation is not None:
-            assert isinstance(layer.gate[0], LoRALinear)
+        layer = layer.apply_lora(target=target, rank=4, alpha=16)
+
+        if LoRATarget.FEEDFORWARD in target:
+            assert isinstance(layer.linear1, LoRALinear)
+            assert isinstance(layer.linear2, LoRALinear)
+            if gate_activation is not None:
+                assert isinstance(layer.gate[0], LoRALinear)
+        if LoRATarget.ATTENTION in target:
+            assert isinstance(layer.self_attn.q_proj, LoRALinear)
+            assert isinstance(layer.self_attn.k_proj, LoRALinear)
+            assert isinstance(layer.self_attn.v_proj, LoRALinear)
+            assert isinstance(layer.self_attn.output_proj, LoRALinear)
 
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(x)
         assert out.shape == x.shape
-        assert isinstance(layer.activation, type(activation))
-        assert gate_activation is None or (layer.gate is not None and isinstance(layer.gate[-1], type(gate_activation)))
 
         for name, param in layer.named_parameters():
             assert param.requires_grad == ("lora_a" in name or "lora_b" in name)
@@ -178,7 +173,15 @@ class TestTransformerDecoderLayer:
             pytest.param(nn.SiLU(), nn.Sigmoid(), id="sigsilu"),
         ],
     )
-    def test_lora(self, device, activation, gate_activation):
+    @pytest.mark.parametrize(
+        "target",
+        [
+            LoRATarget.ATTENTION,
+            LoRATarget.FEEDFORWARD,
+            [LoRATarget.ATTENTION, LoRATarget.FEEDFORWARD],
+        ],
+    )
+    def test_lora(self, device, activation, gate_activation, target):
         B, Lq, Dq = 1, 64, 128
         B, Lk, Dk = 1, 128, 32
         q = torch.randn(B, Lq, Dq, device=device)
@@ -187,17 +190,23 @@ class TestTransformerDecoderLayer:
         layer = TransformerDecoderLayer(Dq, nhead, Dk, activation=activation, gate_activation=gate_activation).to(
             device
         )
-        layer = layer.apply_lora(target=[LoRATarget.FEEDFORWARD], rank=4, alpha=16)
-        assert isinstance(layer.linear1, LoRALinear)
-        assert isinstance(layer.linear2, LoRALinear)
-        if gate_activation is not None:
-            assert isinstance(layer.gate[0], LoRALinear)
+        layer = layer.apply_lora(target=target, rank=4, alpha=16)
+
+        if LoRATarget.FEEDFORWARD in target:
+            assert isinstance(layer.linear1, LoRALinear)
+            assert isinstance(layer.linear2, LoRALinear)
+            if gate_activation is not None:
+                assert isinstance(layer.gate[0], LoRALinear)
+        if LoRATarget.ATTENTION in target:
+            for attn in (layer.self_attn, layer.cross_attn):
+                assert isinstance(attn.q_proj, LoRALinear)
+                assert isinstance(attn.k_proj, LoRALinear)
+                assert isinstance(attn.v_proj, LoRALinear)
+                assert isinstance(attn.output_proj, LoRALinear)
 
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(q, k)
         assert out.shape == q.shape
-        assert isinstance(layer.activation, type(activation))
-        assert gate_activation is None or (layer.gate is not None and isinstance(layer.gate[-1], type(gate_activation)))
 
         for name, param in layer.named_parameters():
             assert param.requires_grad == ("lora_a" in name or "lora_b" in name)

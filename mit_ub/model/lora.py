@@ -14,6 +14,7 @@ T = TypeVar("T", bound=nn.Module)
 class LoRATarget(StrEnum):
     ATTENTION = "attention"
     FEEDFORWARD = "feedforward"
+    POSITION = "position"
 
 
 @torch.no_grad()
