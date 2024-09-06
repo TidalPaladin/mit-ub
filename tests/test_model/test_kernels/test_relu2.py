@@ -85,3 +85,22 @@ def test_relu2_module(dtype: torch.dtype, tol: float):
 
     torch.testing.assert_close(triton_output, baseline_output, rtol=0, atol=tol)
     torch.testing.assert_close(triton_grad, baseline_grad, rtol=0, atol=tol)
+
+
+@pytest.mark.parametrize(
+    "dtype,tol",
+    [
+        pytest.param(torch.float32, 1e-3, id="float32"),
+        pytest.param(torch.float16, 1e-2, id="float16"),
+        pytest.param(torch.bfloat16, 5e-1, id="bfloat16"),
+    ],
+)
+def test_relu2_module_forward_cpu(dtype: torch.dtype, tol: float):
+    L = 1024
+    x = torch.randn((L,), dtype=dtype)
+    baseline = nn.ReLU()
+    triton = ReLU2()
+
+    baseline_output = baseline(x) * baseline(x)
+    triton_output = triton(x)
+    torch.testing.assert_close(triton_output, baseline_output, rtol=0, atol=tol)

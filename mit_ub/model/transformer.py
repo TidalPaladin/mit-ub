@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from .kernels.attention import MultiheadAttention
+from .kernels.relu2 import ReLU2
 
 
 @torch.no_grad()
@@ -18,7 +19,7 @@ class TransformerEncoderLayer(nn.Module):
         nhead: int,
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
-        activation: nn.Module = nn.SiLU(),
+        activation: nn.Module = ReLU2(),
         layer_norm_eps: float = 1e-5,
         alibi_lower: int | None = None,
         alibi_upper: int | None = None,
@@ -96,7 +97,7 @@ class TransformerDecoderLayer(nn.Module):
         d_kv: int | None = None,
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
-        activation: nn.Module = nn.SiLU(),
+        activation: nn.Module = ReLU2(),
         layer_norm_eps: float = 1e-5,
         alibi_lower: int | None = None,
         alibi_upper: int | None = None,
