@@ -33,6 +33,18 @@ def test_relu2_forward(dtype: torch.dtype, tol: float, L: int):
 
 
 @pytest.mark.cuda
+def test_relu2_forward_stride():
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    x = torch.randn(2, 32, 16, 16, device="cuda", dtype=dtype)
+    x = x.movedim(1, -1)
+
+    torch_output = reference_forward(x)
+    triton_output = relu2(x)
+    torch.testing.assert_close(triton_output, torch_output, rtol=0, atol=1e-2)
+
+
+@pytest.mark.cuda
 @pytest.mark.parametrize("L", [1, 8, 16, 32])
 @pytest.mark.parametrize(
     "dtype,tol",

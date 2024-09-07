@@ -125,7 +125,9 @@ class ReLU2(Function):
         def grid(META):
             return (triton.cdiv(L, META["BLOCK"]),)
 
+        x = x.contiguous()
         o = torch.empty_like(x)
+
         cast(Any, relu2_kernel)[grid](
             # fmt: off
             x, o,
@@ -157,10 +159,9 @@ class ReLU2(Function):
         return dx
 
 
+@torch.compile
 def relu2(x: Tensor) -> Tensor:
     r"""Computes squared ReLU of an input."""
-    if x.device.type == "cuda":
-        return cast(Tensor, ReLU2.apply(x))
-    else:
-        y = F.relu(x)
-        return y * y
+    # NOTE: This is roughly as fast as the custom triton kernel
+    y = F.relu(x)
+    return y * y
