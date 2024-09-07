@@ -1,4 +1,4 @@
-from typing import Any, Callable, Optional, Sequence, Tuple, cast
+from typing import Any, Callable, Optional, Sequence, Tuple, Type, cast
 
 import torch
 import torch.nn as nn
@@ -10,6 +10,7 @@ from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 
 from .adaptive_tokenizer import AdaptiveTokenizer2d
+from .kernels.relu2 import ReLU2
 from .pos_enc import RelativeFactorizedPosition
 from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
@@ -25,17 +26,18 @@ class ViT(nn.Module):
         nhead: int,
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
-        activation: nn.Module = nn.SiLU(),
+        activation: nn.Module = ReLU2(),
         gate_activation: nn.Module | None = None,
-        alibi: bool = False,
         position_noise: bool = False,
         output_norm: bool = True,
+        num_kv_heads: int | None = None,
+        qk_norm: bool = False,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
     ):
         super().__init__()
         self._dim = dim
         self._nhead = nhead if nhead is not None else self.dim // 32
         self._in_channels = in_channels
-        self._alibi = alibi
         self._dim_feedforward = dim_feedforward = dim_feedforward or 4 * dim
         self._position_noise = position_noise
 
@@ -51,18 +53,18 @@ class ViT(nn.Module):
         self.patch_embed_2d = nn.Sequential(
             nn.Conv2d(in_channels, dim, kernel_size=self.patch_size_2d, stride=self.patch_size_2d),
             Rearrange("b c h w -> b (h w) c"),
-            nn.LayerNorm(dim),
+            norm_layer(dim),
         )
-        # TODO: When patch size is (1, H, W) we can share weight / bias with Conv2d
-        self.patch_embed_3d = nn.Sequential(
-            nn.Conv3d(in_channels, dim, kernel_size=self.patch_size, stride=self.patch_size),
-            Rearrange("b c d h w -> b (d h w) c"),
-            nn.LayerNorm(dim),
-        )
-
-        # Positional encoding
         self.pos_enc_2d = RelativeFactorizedPosition(2, dim)
-        self.pos_enc_3d = RelativeFactorizedPosition(3, dim)
+
+        # TODO: When patch size is (1, H, W) we can share weight / bias with Conv2d
+        # Disabled for now because in DDP this triggers unused params
+        # self.patch_embed_3d = nn.Sequential(
+        #    nn.Conv3d(in_channels, dim, kernel_size=self.patch_size, stride=self.patch_size),
+        #    Rearrange("b c d h w -> b (d h w) c"),
+        #    nn.LayerNorm(dim),
+        # )
+        # self.pos_enc_3d = RelativeFactorizedPosition(3, dim)
 
         # Transformer blocks
         self.blocks = nn.ModuleList(
@@ -74,14 +76,14 @@ class ViT(nn.Module):
                     dropout,
                     activation,
                     gate_activation,
-                    alibi_lower=low,
-                    alibi_upper=high,
+                    num_kv_heads=num_kv_heads,
+                    qk_norm=qk_norm,
+                    norm_layer=norm_layer,
                 )
-                for low, high in map(self.get_alibi_bounds, range(depth))
+                for _ in range(depth)
             ]
         )
-        assert all((block.alibi is None) == (not alibi) for block in self.blocks), "AliBi not configured as expected"
-        self.norm = nn.LayerNorm(dim) if output_norm else nn.Identity()
+        self.norm = norm_layer(dim) if output_norm else nn.Identity()
 
     @property
     def dim(self) -> int:
@@ -111,20 +113,6 @@ class ViT(nn.Module):
         patch_size = self.patch_size[-len(size) :]
         return tuple(s // p for s, p in zip(size, patch_size))
 
-    def get_alibi_bounds(self, depth: int) -> Tuple[int, int] | Tuple[None, None]:
-        r"""Get the ALiBi bounds for a given depth
-
-        Args:
-            depth: Depth of the transformer block
-
-        Returns:
-            Lower and upper bounds for the alibi slopes, or ``None`` if alibi is not used
-        """
-        if self._alibi:
-            return 0, depth
-        else:
-            return None, None
-
     def forward(
         self,
         x: Tensor,
@@ -141,14 +129,7 @@ class ViT(nn.Module):
             dtype = x.dtype
             x = x.to(torch.float32)
             if is_3d := x.ndim == 5:
-                x = self.patch_embed_3d(x)
-                x += self.pos_enc_3d.from_grid(
-                    tokenized_size,
-                    B,
-                    proto=x,
-                    normalize=True,
-                    add_noise=self.pos_enc_3d.training and self._position_noise,
-                )
+                raise NotImplementedError("3D input not supported")
             else:
                 x = self.patch_embed_2d(x)
                 x += self.pos_enc_2d.from_grid(
@@ -163,15 +144,9 @@ class ViT(nn.Module):
         if mask is not None:
             x = mask.apply_to_tokens(x, fill_value=mask_fill_value)
 
-        if self._alibi:
-            alibi_pos = self.create_alibi_positions(x, tokenized_size, mask, mask_fill_value)
-            alibi_pos = alibi_pos.expand(-1, self.nhead, -1, -1)
-        else:
-            alibi_pos = None
-
         # Transformer blocks
         for block in self.blocks:
-            x = block(x, alibi_pos)
+            x = block(x)
 
         x = self.norm(x)
 
@@ -181,56 +156,11 @@ class ViT(nn.Module):
             )
 
         if reshape and is_3d:
-            x = rearrange(x, "b (d h w) c -> b c d h w", d=tokenized_size[0], h=tokenized_size[1], w=tokenized_size[2])
+            raise NotImplementedError("3D reshape not implemented")
         elif reshape:
             x = rearrange(x, "b (h w) c -> b c h w", h=tokenized_size[0], w=tokenized_size[1])
 
         return x
-
-    @torch.no_grad()
-    def create_alibi_positions(
-        self,
-        tokens: Tensor,
-        tokenized_size: Sequence[int],
-        mask: TokenMask | None = None,
-        mask_fill_value: float | Tensor | None = None,
-        normalize: bool = False,
-    ) -> Tensor:
-        r"""Create position values for ALiBi
-
-        Args:
-            tokens: Input tokens. Used only as a proto to extract device info from
-            tokenized_size: Tokenized size of the input
-            mask: Optional token mask
-            mask_fill_value: Fill value for the mask, or ``None`` to drop masked tokens.
-            normalize: Whether to normalize the position values to the range :math:`[-1, 1]`
-
-        Shapes:
-            - Output: :math:`(B, 1, L, C)` where
-                - B: Batch size
-                - L: Number of tokens
-                - C: Number of spatial dimensions
-
-        Returns:
-            ALiBi position values
-        """
-        # Position values for ALiBi
-        # Either pos_enc_3d or pos_enc_2d can be used here
-        B = tokens.shape[0]
-        position = self.pos_enc_3d.create_grid(
-            tokenized_size,
-            proto=tokens,
-            normalize=normalize,
-            requires_grad=False,
-        )
-        if mask is not None:
-            position = position.view(1, -1, len(tokenized_size)).expand(B, -1, -1)
-            position = mask.apply_to_tokens(position, fill_value=mask_fill_value)
-            position = position.contiguous().view(B, 1, -1, len(tokenized_size))
-        else:
-            position = position.contiguous().view(1, 1, -1, len(tokenized_size)).expand(B, -1, -1, -1)
-
-        return position
 
     def register_mask_hook(self, func: Callable, *args, **kwargs) -> RemovableHandle:
         r"""Register a token masking hook to be applied after the patch embedding step.
@@ -258,11 +188,13 @@ class AdaptiveViT(ViT):
         nhead: int,
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
-        activation: nn.Module = nn.SiLU(),
+        activation: nn.Module = ReLU2(),
         gate_activation: nn.Module | None = None,
-        alibi: bool = False,
         position_noise: bool = False,
         output_norm: bool = True,
+        num_kv_heads: int | None = None,
+        qk_norm: bool = False,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
     ):
         # NOTE: The naming of transformer layers follows PyTorch. However, our "encoder" is a TransformerDecoderLayer
         # that cross-attends to high-res input tokens and our "decoder" is a TransformerEncoderLayer that attends only to
@@ -277,25 +209,40 @@ class AdaptiveViT(ViT):
             dropout,
             activation,
             gate_activation,
-            alibi,
             position_noise,
             output_norm,
+            num_kv_heads,
+            qk_norm,
+            norm_layer,
         )
         # These are all provided by the adaptive tokenizer
         delattr(self, "patch_embed_2d")
-        delattr(self, "patch_embed_3d")
+        # delattr(self, "patch_embed_3d")
         delattr(self, "pos_enc_2d")
-        delattr(self, "pos_enc_3d")
+        # delattr(self, "pos_enc_3d")
         if not decoder_depth:
             self.blocks = None
 
         # TODO: For now only a 2D tokenizer is provided. 3D tokenization support is ready via AdaptiveTokenizer3d
         # but there isn't an immediate need for it. Having unused parameters complicates DDP training, so we omit
         # the 3D tokenizer for now.
-        self.tokenizer = AdaptiveTokenizer2d(in_channels, dim, kv_dim, self.patch_size_2d, target_shape)
+        self.tokenizer = AdaptiveTokenizer2d(
+            in_channels, dim, kv_dim, self.patch_size_2d, target_shape, norm_layer=norm_layer
+        )
         self.encoder_blocks = nn.ModuleList(
             [
-                TransformerDecoderLayer(dim, nhead, kv_dim, self.dim_feedforward, dropout, activation, gate_activation)
+                TransformerDecoderLayer(
+                    dim,
+                    nhead,
+                    kv_dim,
+                    self.dim_feedforward,
+                    dropout,
+                    activation,
+                    gate_activation,
+                    num_kv_heads=num_kv_heads,
+                    qk_norm=qk_norm,
+                    norm_layer=norm_layer,
+                )
                 for _ in range(encoder_depth)
             ]
         )
@@ -346,28 +293,15 @@ class AdaptiveViT(ViT):
         else:
             kv_mask = None
 
-        if self._alibi:
-            # Create raw positions
-            alibi_pos_q = self.create_alibi_positions(q, tokenized_size, mask, mask_fill_value)
-            alibi_pos_k = self.create_alibi_positions(kv, kv_tokenized_size, kv_mask, mask_fill_value)
-
-            # Scale the query positions based on the ratio of the input size to the key/value size
-            scale = alibi_pos_q.new_tensor([kv / t for t, kv in zip(tokenized_size, kv_tokenized_size)])
-            alibi_pos_q.mul_(scale)
-            alibi_pos_q = alibi_pos_q.expand(-1, self.nhead, -1, -1)
-            alibi_pos_k = alibi_pos_k.expand(-1, self.nhead, -1, -1)
-        else:
-            alibi_pos_q = alibi_pos_k = None
-
         # Cross attention blocks between fixed backbone tokens and high res input tokens
         for block in self.encoder_blocks:
-            q = block(q, kv, alibi_pos_q, alibi_pos_k)
+            q = block(q, kv)
         x = q
 
         # Transformer blocks
         if self.blocks is not None:
             for block in cast(Any, self.blocks):
-                x = block(x, alibi_pos_q)
+                x = block(x)
 
         x = self.norm(x)
 

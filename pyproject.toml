@@ -35,12 +35,11 @@ dependencies = [
     "nbformat>=4.2.0",
     "tqdm-multiprocessing",
     "ssl-tasks @ git+https://github.com/TidalPaladin/ssl-tasks.git",
+    "torchtune>=0.2.1",
 ]
 readme = "README.md"
 license = {text = "Apache"}
 dynamic = ["version"]
-
-[project.optional-dependencies]
 
 [tool.autoflake]
 remove-all-unused-imports = true
@@ -112,6 +111,12 @@ filterwarnings = [
 
 [tool.pytest_env]
 TRITON_DEBUG = "1"
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "@triton.jit"
+]
 
 # Sample script config
 [project.scripts]

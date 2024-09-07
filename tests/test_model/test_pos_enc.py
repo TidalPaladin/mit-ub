@@ -1,7 +1,9 @@
 import pytest
 import torch
+from torchtune.modules.peft.lora import LoRALinear
 
-from mit_ub.model.pos_enc import PositionEncoder
+from mit_ub.model.lora import LoRATarget
+from mit_ub.model.pos_enc import PositionEncoder, RelativeFactorizedPosition
 
 
 class TestPositionEncoder:
@@ -33,3 +35,44 @@ class TestPositionEncoder:
         grid2 = PositionEncoder.create_grid(size, normalize=True)
         assert grid1.shape == grid2.shape == (1, size[0] * size[1], 2)
         assert ((grid1 - grid2).abs() <= 1 / (max(size) - 1)).all()
+
+
+class TestRelativeFactorizedPosition:
+
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    def test_forward(self, device):
+        B, L, C, D = 2, 32, 2, 16
+        torch.random.manual_seed(0)
+        layer = RelativeFactorizedPosition(C, D).to(device)
+        grid = torch.randn(B, L, C, device=device)
+        out = layer(grid)
+        assert out.shape == (B, L, D)
+
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    def test_lora(self, device):
+        B, L, C, D = 2, 32, 2, 16
+        torch.random.manual_seed(0)
+        layer = RelativeFactorizedPosition(C, D).to(device)
+        grid = torch.randn(B, L, C, device=device, requires_grad=True)
+
+        layer = layer.apply_lora(target=[LoRATarget.POSITION], rank=4, alpha=16)
+        assert isinstance(layer.proj, LoRALinear)
+
+        with torch.autocast(device_type=device, dtype=torch.float16):
+            out = layer(grid)
+        assert out.shape == (B, L, D)
+
+        for name, param in layer.named_parameters():
+            assert param.requires_grad == ("lora_a" in name or "lora_b" in name)

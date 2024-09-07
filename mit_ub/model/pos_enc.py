@@ -1,8 +1,11 @@
-from typing import Final, Optional, Sequence
+from functools import partial
+from typing import Final, Optional, Sequence, cast
 
 import torch
 import torch.nn as nn
 from torch import Tensor
+
+from .lora import LoRATarget, SupportsLoRA, apply_lora, freeze_non_lora
 
 
 # Bound for position noise in grid cell units. This is set slightly below 0.5
@@ -109,7 +112,7 @@ class PositionEncoder(nn.Module):
         return grid
 
 
-class RelativeFactorizedPosition(PositionEncoder):
+class RelativeFactorizedPosition(PositionEncoder, SupportsLoRA):
 
     def __init__(self, d_in: int, d_out: int):
         super().__init__()
@@ -124,3 +127,23 @@ class RelativeFactorizedPosition(PositionEncoder):
             result = self.proj(x.to(torch.float32)).to(x.dtype)
         torch.set_float32_matmul_precision(matmul_precision)
         return result
+
+    def apply_lora(
+        self,
+        target: Sequence[LoRATarget],
+        rank: int,
+        alpha: float,
+        dropout: float = 0.0,
+        use_bias: bool = False,
+        quantize_base: bool = False,
+    ) -> nn.Module:
+        _apply_lora = partial(
+            apply_lora, rank=rank, alpha=alpha, dropout=dropout, use_bias=use_bias, quantize_base=quantize_base
+        )
+
+        if LoRATarget.POSITION in target:
+            self.proj = _apply_lora(cast(nn.Linear, self.proj))
+
+        # Freeze all non-LoRA matrices/weights
+        freeze_non_lora(self)
+        return self

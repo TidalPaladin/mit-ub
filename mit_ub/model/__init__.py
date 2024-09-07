@@ -1,3 +1,5 @@
+from typing import Final
+
 from registry import Registry
 
 from .backbone import AdaptiveViT, ViT
@@ -5,6 +7,8 @@ from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
 
 BACKBONES = Registry("backbones")
+QUERY_GROUPS: Final = 2
+HEAD_DIM: Final = 64
 
 # Small
 BACKBONES(
@@ -14,7 +18,8 @@ BACKBONES(
     dim=512,
     patch_size=16,
     depth=12,
-    nhead=512 // 32,
+    nhead=512 // HEAD_DIM,
+    num_kv_heads=512 // HEAD_DIM // QUERY_GROUPS,
     dropout=0.1,
 )
 BACKBONES(
@@ -27,7 +32,8 @@ BACKBONES(
     target_shape=(16, 12),
     decoder_depth=6,
     encoder_depth=6,
-    nhead=512 // 32,
+    nhead=512 // HEAD_DIM,
+    num_kv_heads=512 // HEAD_DIM // QUERY_GROUPS,
     dropout=0.1,
 )
 BACKBONES(
@@ -40,7 +46,8 @@ BACKBONES(
     target_shape=(32, 24),
     decoder_depth=6,
     encoder_depth=6,
-    nhead=512 // 32,
+    nhead=512 // HEAD_DIM,
+    num_kv_heads=512 // HEAD_DIM // QUERY_GROUPS,
     dropout=0.1,
 )
 
@@ -53,7 +60,8 @@ BACKBONES(
     dim=768,
     patch_size=16,
     depth=24,
-    nhead=768 // 32,
+    nhead=768 // HEAD_DIM,
+    num_kv_heads=768 // HEAD_DIM // QUERY_GROUPS,
     dropout=0.1,
 )
 BACKBONES(
@@ -66,7 +74,8 @@ BACKBONES(
     target_shape=(16, 12),
     decoder_depth=12,
     encoder_depth=12,
-    nhead=768 // 32,
+    nhead=768 // HEAD_DIM,
+    num_kv_heads=256 // HEAD_DIM // QUERY_GROUPS,
     dropout=0.1,
 )
 BACKBONES(
@@ -79,19 +88,25 @@ BACKBONES(
     target_shape=(32, 24),
     decoder_depth=12,
     encoder_depth=12,
-    nhead=768 // 32,
+    nhead=768 // HEAD_DIM,
+    num_kv_heads=256 // HEAD_DIM // QUERY_GROUPS,
     dropout=0.1,
 )
 
+
+CIFAR10_DIM: Final = 384
+CIFAR10_HEAD_DIM: Final = 32
+CIFAR10_ADAPTIVE_DIM: Final = 64
 
 BACKBONES(
     ViT,
     name="vit-cifar10",
     in_channels=3,
-    dim=256,
+    dim=CIFAR10_DIM,
     patch_size=4,
     depth=12,
-    nhead=256 // 32,
+    nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
+    num_kv_heads=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     dropout=0.1,
 )
 
@@ -99,13 +114,14 @@ BACKBONES(
     AdaptiveViT,
     name="vit-cifar10-adaptive",
     in_channels=3,
-    dim=256,
-    kv_dim=64,
+    dim=CIFAR10_DIM,
+    kv_dim=CIFAR10_ADAPTIVE_DIM,
     patch_size=4,
     target_shape=(4, 4),
     encoder_depth=6,
     decoder_depth=6,
-    nhead=256 // 32,
+    nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
+    num_kv_heads=CIFAR10_ADAPTIVE_DIM // CIFAR10_HEAD_DIM,
     dropout=0.1,
 )
 

@@ -15,6 +15,7 @@ from torch.distributed import barrier as dist_barrier
 from torch.distributed import is_initialized as dist_is_initialized
 
 from ..model import BACKBONES, AdaptiveViT, TransformerEncoderLayer, ViT
+from ..model.pos_enc import RelativeFactorizedPosition
 
 
 class NormallyDistributed(nn.Module):
@@ -106,19 +107,16 @@ class JEPA(Task):
         self.jepa_query = nn.Parameter(torch.empty(1, 1, self.backbone.dim))
         torch.nn.init.trunc_normal_(self.jepa_query, mean=0, std=1)
 
-        predictor_dim_ff = self.backbone.dim
-        self.jepa_predictor = nn.ModuleList(
-            [
-                TransformerEncoderLayer(
-                    self.backbone.dim,
-                    self.backbone.nhead,
-                    predictor_dim_ff,
-                    dropout=0.1,
-                    activation=nn.SiLU(),
-                )
-                for _ in range(predictor_depth)
-            ]
-        )
+        self.pos_enc_2d = RelativeFactorizedPosition(2, self.backbone.dim)
+
+        encoder_proto = next(filter(lambda l: isinstance(l, TransformerEncoderLayer), self.backbone.modules()), None)
+        if encoder_proto is None:
+            raise ValueError(
+                "Could not find encoder prototype in backbone. "
+                "Ensure the backbone has a TransformerEncoderLayer module."
+            )
+        self.jepa_predictor = nn.ModuleList([deepcopy(encoder_proto) for _ in range(predictor_depth)])
+
         self.contrastive_loss = PointwiseContrastiveEmbeddingLoss(margin=margin) if margin is not None else None
         self.save_hyperparameters()
 
@@ -174,20 +172,11 @@ class JEPA(Task):
         B, _, D = context.shape
         tokenized_size = self.backbone.tokenized_size(*x.shape[2:])
         if is_3d := x.ndim == 5:
-            query = self.backbone.pos_enc_3d.from_grid(
-                tokenized_size, B, proto=context, normalize=True, requires_grad=False
-            )
+            raise NotImplementedError("3D not implemented")
         else:
-            query = self.backbone.pos_enc_2d.from_grid(
-                tokenized_size, B, proto=context, normalize=True, requires_grad=False
-            )
+            query = self.pos_enc_2d.from_grid(tokenized_size, B, proto=context, normalize=True, requires_grad=False)
         query = query.contiguous()
         query += self.jepa_query.type_as(query)
-
-        # Generate full size ALiBi position encodings for the queries
-        positions = self.backbone.create_alibi_positions(query, tokenized_size, normalize=False).view(
-            B, -1, len(tokenized_size)
-        )
 
         # Use xor mask to inject encoder context into queries that aren't part of the target mask.
         # Query now contains context only at locations that are not part of the target.
@@ -204,16 +193,11 @@ class JEPA(Task):
         mask = TokenMask(mask, context_mask.size, context_mask.patch_size)
         query = mask.apply_to_tokens(query, fill_value=None)
 
-        # Do the same to the ALiBi position encodings, ensuring that we set mask token positions to "inf"
-        positions = mask.apply_to_tokens(positions, fill_value=None, padding_value=float("inf"))
-        assert query.shape[:2] == positions.shape[:2]
-
         # Run the queries and ALiBi positions through the predictor
         B, L = query.shape[:2]
-        position = positions.view(B, 1, L, -1).expand(-1, self.backbone.nhead, -1, -1)
         for block in self.jepa_predictor:
             block = cast(TransformerEncoderLayer, block)
-            query = block(query, position)
+            query = block(query)
 
         # Extract only the target queries from the full set of queries
         query = mask.restore_tokens(query, 0)
