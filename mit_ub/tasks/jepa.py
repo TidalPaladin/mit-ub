@@ -107,20 +107,16 @@ class JEPA(Task):
         self.jepa_query = nn.Parameter(torch.empty(1, 1, self.backbone.dim))
         torch.nn.init.trunc_normal_(self.jepa_query, mean=0, std=1)
 
-        predictor_dim_ff = self.backbone.dim
         self.pos_enc_2d = RelativeFactorizedPosition(2, self.backbone.dim)
-        self.jepa_predictor = nn.ModuleList(
-            [
-                TransformerEncoderLayer(
-                    self.backbone.dim,
-                    self.backbone.nhead,
-                    predictor_dim_ff,
-                    dropout=0.1,
-                    activation=nn.SiLU(),
-                )
-                for _ in range(predictor_depth)
-            ]
-        )
+
+        encoder_proto = next(filter(lambda l: isinstance(l, TransformerEncoderLayer), self.backbone.modules()), None)
+        if encoder_proto is None:
+            raise ValueError(
+                "Could not find encoder prototype in backbone. "
+                "Ensure the backbone has a TransformerEncoderLayer module."
+            )
+        self.jepa_predictor = nn.ModuleList([deepcopy(encoder_proto) for _ in range(predictor_depth)])
+
         self.contrastive_loss = PointwiseContrastiveEmbeddingLoss(margin=margin) if margin is not None else None
         self.save_hyperparameters()
 

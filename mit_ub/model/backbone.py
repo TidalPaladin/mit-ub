@@ -1,4 +1,4 @@
-from typing import Any, Callable, Optional, Sequence, Tuple, cast
+from typing import Any, Callable, Optional, Sequence, Tuple, Type, cast
 
 import torch
 import torch.nn as nn
@@ -10,6 +10,7 @@ from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 
 from .adaptive_tokenizer import AdaptiveTokenizer2d
+from .kernels.relu2 import ReLU2
 from .pos_enc import RelativeFactorizedPosition
 from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
@@ -25,11 +26,13 @@ class ViT(nn.Module):
         nhead: int,
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
-        activation: nn.Module = nn.SiLU(),
+        activation: nn.Module = ReLU2(),
         gate_activation: nn.Module | None = None,
         position_noise: bool = False,
         output_norm: bool = True,
         num_kv_heads: int | None = None,
+        qk_norm: bool = False,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
     ):
         super().__init__()
         self._dim = dim
@@ -50,7 +53,7 @@ class ViT(nn.Module):
         self.patch_embed_2d = nn.Sequential(
             nn.Conv2d(in_channels, dim, kernel_size=self.patch_size_2d, stride=self.patch_size_2d),
             Rearrange("b c h w -> b (h w) c"),
-            nn.LayerNorm(dim),
+            norm_layer(dim),
         )
         self.pos_enc_2d = RelativeFactorizedPosition(2, dim)
 
@@ -74,11 +77,13 @@ class ViT(nn.Module):
                     activation,
                     gate_activation,
                     num_kv_heads=num_kv_heads,
+                    qk_norm=qk_norm,
+                    norm_layer=norm_layer,
                 )
                 for _ in range(depth)
             ]
         )
-        self.norm = nn.LayerNorm(dim) if output_norm else nn.Identity()
+        self.norm = norm_layer(dim) if output_norm else nn.Identity()
 
     @property
     def dim(self) -> int:
@@ -183,11 +188,13 @@ class AdaptiveViT(ViT):
         nhead: int,
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
-        activation: nn.Module = nn.SiLU(),
+        activation: nn.Module = ReLU2(),
         gate_activation: nn.Module | None = None,
         position_noise: bool = False,
         output_norm: bool = True,
         num_kv_heads: int | None = None,
+        qk_norm: bool = False,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
     ):
         # NOTE: The naming of transformer layers follows PyTorch. However, our "encoder" is a TransformerDecoderLayer
         # that cross-attends to high-res input tokens and our "decoder" is a TransformerEncoderLayer that attends only to
@@ -205,6 +212,8 @@ class AdaptiveViT(ViT):
             position_noise,
             output_norm,
             num_kv_heads,
+            qk_norm,
+            norm_layer,
         )
         # These are all provided by the adaptive tokenizer
         delattr(self, "patch_embed_2d")
@@ -217,7 +226,9 @@ class AdaptiveViT(ViT):
         # TODO: For now only a 2D tokenizer is provided. 3D tokenization support is ready via AdaptiveTokenizer3d
         # but there isn't an immediate need for it. Having unused parameters complicates DDP training, so we omit
         # the 3D tokenizer for now.
-        self.tokenizer = AdaptiveTokenizer2d(in_channels, dim, kv_dim, self.patch_size_2d, target_shape)
+        self.tokenizer = AdaptiveTokenizer2d(
+            in_channels, dim, kv_dim, self.patch_size_2d, target_shape, norm_layer=norm_layer
+        )
         self.encoder_blocks = nn.ModuleList(
             [
                 TransformerDecoderLayer(
@@ -229,6 +240,8 @@ class AdaptiveViT(ViT):
                     activation,
                     gate_activation,
                     num_kv_heads=num_kv_heads,
+                    qk_norm=qk_norm,
+                    norm_layer=norm_layer,
                 )
                 for _ in range(encoder_depth)
             ]

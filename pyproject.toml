@@ -112,6 +112,12 @@ filterwarnings = [
 [tool.pytest_env]
 TRITON_DEBUG = "1"
 
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "@triton.jit"
+]
+
 # Sample script config
 [project.scripts]
 train = "deep_helpers.cli:main"

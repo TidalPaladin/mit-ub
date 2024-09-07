@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, Type
 
 import torch.nn as nn
 from einops.layers.torch import Rearrange
@@ -51,6 +51,7 @@ class AdaptiveTokenizer2d(nn.Module):
         patch_size: Tuple[int, int],
         target_shape: Tuple[int, int],
         position_noise: bool = False,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
     ):
         super().__init__()
         self.target_shape = tuple(target_shape)
@@ -68,8 +69,8 @@ class AdaptiveTokenizer2d(nn.Module):
         self.pos_enc_kv = RelativeFactorizedPosition(2, kv_dim)
 
         self.to_seq = Rearrange("b c h w -> b (h w) c")
-        self.norm_q = nn.LayerNorm(d_model)
-        self.norm_kv = nn.LayerNorm(kv_dim)
+        self.norm_q = norm_layer(d_model)
+        self.norm_kv = norm_layer(kv_dim)
 
     def kv_size(self, input_size: Tuple[int, int]) -> Tuple[int, int]:
         return divide_tuple(input_size, self.patch_size)
@@ -98,6 +99,7 @@ class AdaptiveTokenizer3d(nn.Module):
         patch_size: Tuple[int, int, int],
         target_shape: Tuple[int, int, int],
         position_noise: bool = False,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
     ):
         super().__init__()
         self.target_shape = tuple(target_shape)
@@ -115,8 +117,8 @@ class AdaptiveTokenizer3d(nn.Module):
         self.pos_enc_kv = RelativeFactorizedPosition(3, kv_dim)
 
         self.to_seq = Rearrange("b c d h w -> b (d h w) c")
-        self.norm_q = nn.LayerNorm(d_model)
-        self.norm_kv = nn.LayerNorm(kv_dim)
+        self.norm_q = norm_layer(d_model)
+        self.norm_kv = norm_layer(kv_dim)
 
     def kv_size(self, input_size: Tuple[int, int, int]) -> Tuple[int, int, int]:
         return divide_tuple(input_size, self.patch_size)

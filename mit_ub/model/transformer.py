@@ -1,6 +1,6 @@
 from copy import deepcopy
 from functools import partial
-from typing import Sequence, cast
+from typing import Sequence, Type, cast
 
 import torch.nn as nn
 from torch import Tensor
@@ -22,6 +22,8 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
         gate_activation: nn.Module | None = None,
         layer_norm_eps: float = 1e-5,
         num_kv_heads: int | None = None,
+        qk_norm: bool = False,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
     ):
         super().__init__()
         self.nhead = nhead
@@ -37,28 +39,30 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
             head_dim=head_dim,
             q_proj=nn.Linear(d_model, d_model, bias=False),
             k_proj=nn.Linear(d_model, kv_dim, bias=False),
-            v_proj=nn.Linear(d_model, kv_dim, bias=True),
-            output_proj=nn.Linear(d_model, d_model, bias=True),
+            v_proj=nn.Linear(d_model, kv_dim, bias=False),
+            output_proj=nn.Linear(d_model, d_model, bias=False),
             is_causal=False,
             attn_dropout=dropout,
+            q_norm=norm_layer(head_dim, eps=layer_norm_eps) if qk_norm else None,
+            k_norm=norm_layer(head_dim, eps=layer_norm_eps) if qk_norm else None,
         )
 
         # MLP up-project is a GLU-variant -> F.silu(W1x + b1) * F.sigmoid(W2x + b2).
         # Improves probe accuracy, convergence rate, and reduces feature variance
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear1 = nn.Linear(d_model, dim_feedforward, bias=False)
         if gate_activation is not None:
             self.gate = nn.Sequential(
-                nn.Linear(d_model, dim_feedforward),
+                nn.Linear(d_model, dim_feedforward, bias=False),
                 deepcopy(gate_activation),
             )
         else:
             self.gate = None
 
         self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.linear2 = nn.Linear(dim_feedforward, d_model, bias=False)
 
-        self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
-        self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
+        self.norm1 = norm_layer(d_model, eps=layer_norm_eps)
+        self.norm2 = norm_layer(d_model, eps=layer_norm_eps)
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
         self.activation = deepcopy(activation)
@@ -125,6 +129,8 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
         gate_activation: nn.Module | None = None,
         layer_norm_eps: float = 1e-5,
         num_kv_heads: int | None = None,
+        qk_norm: bool = False,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
     ):
         super().__init__()
         d_kv = d_kv or d_model
@@ -140,10 +146,12 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
             head_dim=head_dim,
             q_proj=nn.Linear(d_model, d_model, bias=False),
             k_proj=nn.Linear(d_model, kv_dim, bias=False),
-            v_proj=nn.Linear(d_model, kv_dim, bias=True),
-            output_proj=nn.Linear(d_model, d_model, bias=True),
+            v_proj=nn.Linear(d_model, kv_dim, bias=False),
+            output_proj=nn.Linear(d_model, d_model, bias=False),
             is_causal=False,
             attn_dropout=dropout,
+            q_norm=norm_layer(head_dim, eps=layer_norm_eps) if qk_norm else None,
+            k_norm=norm_layer(head_dim, eps=layer_norm_eps) if qk_norm else None,
         )
         self.cross_attn = MultiHeadAttention(
             embed_dim=d_model,
@@ -152,13 +160,15 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
             head_dim=head_dim,
             q_proj=nn.Linear(d_model, d_model, bias=False),
             k_proj=nn.Linear(d_kv, kv_dim, bias=False),
-            v_proj=nn.Linear(d_kv, kv_dim, bias=True),
-            output_proj=nn.Linear(d_model, d_model, bias=True),
+            v_proj=nn.Linear(d_kv, kv_dim, bias=False),
+            output_proj=nn.Linear(d_model, d_model, bias=False),
             is_causal=False,
             attn_dropout=dropout,
+            q_norm=norm_layer(head_dim, eps=layer_norm_eps) if qk_norm else None,
+            k_norm=norm_layer(head_dim, eps=layer_norm_eps) if qk_norm else None,
         )
 
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear1 = nn.Linear(d_model, dim_feedforward, bias=False)
         if gate_activation is not None:
             self.gate = nn.Sequential(
                 nn.Linear(d_model, dim_feedforward),
@@ -168,11 +178,11 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
             self.gate = None
 
         self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.linear2 = nn.Linear(dim_feedforward, d_model, bias=False)
 
-        self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
-        self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
-        self.norm3 = nn.LayerNorm(d_model, eps=layer_norm_eps)
+        self.norm1 = norm_layer(d_model, eps=layer_norm_eps)
+        self.norm2 = norm_layer(d_model, eps=layer_norm_eps)
+        self.norm3 = norm_layer(d_model, eps=layer_norm_eps)
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
         self.dropout3 = nn.Dropout(dropout)
