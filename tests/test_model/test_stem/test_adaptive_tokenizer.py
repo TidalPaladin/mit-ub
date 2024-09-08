@@ -3,7 +3,7 @@ import math
 import pytest
 import torch
 
-from mit_ub.model.adaptive_tokenizer import AdaptiveTokenizer2d, AdaptiveTokenizer3d
+from mit_ub.model.stem.adaptive_tokenizer import AdaptiveTokenizer2d, AdaptiveTokenizer3d
 
 
 class TestAdaptiveTokenizer2d:
