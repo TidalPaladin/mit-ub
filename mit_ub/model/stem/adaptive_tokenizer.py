@@ -37,19 +37,21 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         self.position_noise = position_noise
         self.autocast = autocast
 
+        # NOTE: We intentionally choose names and structure of parameters to facilitate easy loading
+        # of weights from a PatchEmbed module.
         pool_cls = nn.AdaptiveMaxPool2d if pool_type == PoolType.MAX else nn.AdaptiveAvgPool2d
-        self.query = nn.Sequential(
+        self.patch = nn.Sequential(
             nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size, bias=True),
             pool_cls(target_shape),
             Rearrange("b c h w -> b (h w) c"),
-            norm_layer(embed_dim),
         )
         self.kv = nn.Sequential(
             nn.Conv2d(in_channels, kv_dim, kernel_size=patch_size, stride=patch_size, bias=True),
             Rearrange("b c h w -> b (h w) c"),
-            norm_layer(kv_dim),
         )
-        self.pos_enc_q = RelativeFactorizedPosition(2, embed_dim)
+        self.norm = norm_layer(embed_dim)
+        self.norm_kv = norm_layer(kv_dim)
+        self.pos_enc = RelativeFactorizedPosition(2, embed_dim)
         self.pos_enc_kv = RelativeFactorizedPosition(2, kv_dim)
 
     @property
@@ -73,8 +75,9 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
     def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
         B, _, H, W = x.shape
 
-        q = self.query(x)
-        q = q + self.pos_enc_q.from_grid(
+        q = self.patch(x)
+        q = self.norm(q)
+        q = q + self.pos_enc.from_grid(
             self.tokenized_size((H, W)),
             B,
             proto=q,
@@ -83,6 +86,7 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         )
 
         kv = self.kv(x)
+        kv = self.norm_kv(kv)
         kv = kv + self.pos_enc_kv.from_grid(
             self.kv_size((H, W)), B, proto=kv, normalize=True, add_noise=self.training and self.position_noise
         )
@@ -112,18 +116,18 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         self.autocast = autocast
 
         pool_cls = nn.AdaptiveMaxPool3d if pool_type == PoolType.MAX else nn.AdaptiveAvgPool3d
-        self.query = nn.Sequential(
+        self.patch = nn.Sequential(
             nn.Conv3d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size, bias=False),
             pool_cls(target_shape),
             Rearrange("b c d h w -> b (h w d) c"),
-            norm_layer(embed_dim),
         )
         self.kv = nn.Sequential(
             nn.Conv3d(in_channels, kv_dim, kernel_size=patch_size, stride=patch_size, bias=False),
             Rearrange("b c d h w -> b (h w d) c"),
-            norm_layer(kv_dim),
         )
-        self.pos_enc_q = RelativeFactorizedPosition(3, embed_dim)
+        self.norm = norm_layer(embed_dim)
+        self.norm_kv = norm_layer(kv_dim)
+        self.pos_enc = RelativeFactorizedPosition(3, embed_dim)
         self.pos_enc_kv = RelativeFactorizedPosition(3, kv_dim)
 
     @property
@@ -143,8 +147,9 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
     def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
         B, _, D, H, W = x.shape
 
-        q = self.query(x)
-        q = q + self.pos_enc_q.from_grid(
+        q = self.patch(x)
+        q = self.norm(q)
+        q = q + self.pos_enc.from_grid(
             self.tokenized_size((D, H, W)),
             B,
             proto=q,
@@ -153,6 +158,7 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         )
 
         kv = self.kv(x)
+        kv = self.norm_kv(kv)
         kv = kv + self.pos_enc_kv.from_grid(
             self.kv_size((D, H, W)), B, proto=kv, normalize=True, add_noise=self.training and self.position_noise
         )

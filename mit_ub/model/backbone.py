@@ -139,6 +139,7 @@ class AdaptiveViT(ViT):
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
+        high_res_layer_scale: float | None = 1e-5,
     ):
         super().__init__(
             in_channels,
@@ -177,6 +178,10 @@ class AdaptiveViT(ViT):
                     num_kv_heads=num_kv_heads,
                     qk_norm=qk_norm,
                     norm_layer=norm_layer,
+                    # By default we use layer scale here to limit the high res pathway's contribution.
+                    # Since AdaptiveViT will likely be trained from a ViT checkpoint, this helps set the
+                    # intial condition of the model to the ViT checkpoint.
+                    layer_scale=high_res_layer_scale,
                 )
                 for _ in range(high_res_depth)
             ]

@@ -7,6 +7,7 @@ from torch import Tensor
 
 from .gqa import MultiHeadAttention
 from .kernels.relu2 import ReLU2
+from .layer_scale import LayerScale
 from .lora import LoRATarget, SupportsLoRA, apply_lora, freeze_non_lora
 
 
@@ -24,6 +25,7 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
+        layer_scale: float | None = None,
     ):
         super().__init__()
         self.nhead = nhead
@@ -47,8 +49,6 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
             k_norm=norm_layer(head_dim, eps=layer_norm_eps) if qk_norm else None,
         )
 
-        # MLP up-project is a GLU-variant -> F.silu(W1x + b1) * F.sigmoid(W2x + b2).
-        # Improves probe accuracy, convergence rate, and reduces feature variance
         self.linear1 = nn.Linear(d_model, dim_feedforward, bias=False)
         if gate_activation is not None:
             self.gate = nn.Sequential(
@@ -67,12 +67,15 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
         self.dropout2 = nn.Dropout(dropout)
         self.activation = deepcopy(activation)
 
+        self.layer_scale_attn = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
+        self.layer_scale_mlp = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
+
     def forward(self, x: Tensor) -> Tensor:
         # Self attention
         y = self.norm1(x)
         B, H = x.shape[0], self.nhead
         y = self.self_attn(y, y)
-        x = x + y
+        x = x + self.layer_scale_attn(y)
 
         # MLP
         y = self.norm2(x)
@@ -82,7 +85,7 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
             y = self.activation(self.linear1(y))
         y = self.dropout(y)
         y = self.linear2(y)
-        x = x + y
+        x = x + self.layer_scale_mlp(y)
 
         return x
 
@@ -128,6 +131,7 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
+        layer_scale: float | None = None,
     ):
         super().__init__()
         d_kv = d_kv or d_model
@@ -164,7 +168,6 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
             q_norm=norm_layer(head_dim, eps=layer_norm_eps) if qk_norm else None,
             k_norm=norm_layer(head_dim, eps=layer_norm_eps) if qk_norm else None,
         )
-
         self.linear1 = nn.Linear(d_model, dim_feedforward, bias=False)
         if gate_activation is not None:
             self.gate = nn.Sequential(
@@ -185,18 +188,22 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
         self.dropout3 = nn.Dropout(dropout)
         self.activation = deepcopy(activation)
 
+        self.layer_scale_attn = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
+        self.layer_scale_cross = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
+        self.layer_scale_mlp = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
+
     def forward(self, q: Tensor, kv: Tensor) -> Tensor:
         # Self attention
         x = q
         y = self.norm1(x)
         B, H = x.shape[0], self.nhead
         y = self.self_attn(y, y)
-        x = x + y
+        x = x + self.layer_scale_attn(y)
 
         # Cross attention
         y = self.norm2(x)
         y = self.cross_attn(y, kv)
-        x = x + y
+        x = x + self.layer_scale_cross(y)
 
         # MLP
         y = self.norm3(x)
@@ -206,7 +213,7 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
             y = self.activation(self.linear1(y))
         y = self.dropout(y)
         y = self.linear2(y)
-        x = x + y
+        x = x + self.layer_scale_mlp(y)
 
         return x
 
