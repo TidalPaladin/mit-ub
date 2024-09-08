@@ -46,7 +46,7 @@ class LoRACallback(Callback):
 
     def on_fit_start(self, _: pl.Trainer, pl_module: pl.LightningModule):
         rank_zero_info(
-            f"Applying LoRA to targets: {self.targets}, rank: {self.rank}, "
+            f"Applying LoRA to targets: {[target.value for target in self.targets]}, rank: {self.rank}, "
             f"alpha: {self.alpha}, dropout: {self.dropout}, quantize_base: {self.quantize_base}"
         )
         if not hasattr(pl_module, "backbone"):
