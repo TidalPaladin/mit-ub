@@ -92,12 +92,9 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
         rank: int,
         alpha: float,
         dropout: float = 0.0,
-        use_bias: bool = False,
         quantize_base: bool = False,
     ) -> nn.Module:
-        _apply_lora = partial(
-            apply_lora, rank=rank, alpha=alpha, dropout=dropout, use_bias=use_bias, quantize_base=quantize_base
-        )
+        _apply_lora = partial(apply_lora, rank=rank, alpha=alpha, dropout=dropout, quantize_base=quantize_base)
 
         if LoRATarget.ATTENTION in target:
             self.self_attn.q_proj = _apply_lora(cast(nn.Linear, self.self_attn.q_proj))
@@ -219,12 +216,9 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
         rank: int,
         alpha: float,
         dropout: float = 0.0,
-        use_bias: bool = False,
         quantize_base: bool = False,
     ) -> nn.Module:
-        _apply_lora = partial(
-            apply_lora, rank=rank, alpha=alpha, dropout=dropout, use_bias=use_bias, quantize_base=quantize_base
-        )
+        _apply_lora = partial(apply_lora, rank=rank, alpha=alpha, dropout=dropout, quantize_base=quantize_base)
 
         if LoRATarget.ATTENTION in target:
             for layer in (self.self_attn, self.cross_attn):
