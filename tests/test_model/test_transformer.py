@@ -29,7 +29,9 @@ class TestTransformerEncoderLayer:
         B, L, D = 1, 128, 128
         x = torch.randn(B, L, D, device=device)
         nhead = D // 16
-        layer = TransformerEncoderLayer(D, nhead, D, activation=activation, gate_activation=gate_activation).to(device)
+        layer = TransformerEncoderLayer(
+            D, nhead, D, activation=activation, gate_activation=gate_activation, layer_scale=1e-5
+        ).to(device)
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(x)
         assert out.shape == x.shape
@@ -135,9 +137,9 @@ class TestTransformerDecoderLayer:
         q = torch.randn(B, Lq, Dq, device=device)
         k = torch.randn(B, Lk, Dk, device=device)
         nhead = Dq // 16
-        layer = TransformerDecoderLayer(Dq, nhead, Dk, activation=activation, gate_activation=gate_activation).to(
-            device
-        )
+        layer = TransformerDecoderLayer(
+            Dq, nhead, Dk, activation=activation, gate_activation=gate_activation, layer_scale=1e-5
+        ).to(device)
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(q, k)
         assert out.shape == q.shape

@@ -127,8 +127,8 @@ class AdaptiveViT(ViT):
         kv_dim: int,
         patch_size: int | Tuple[int, int] | Tuple[int, int, int],
         target_shape: Tuple[int, int] | Tuple[int, int, int],
-        encoder_depth: int,
-        decoder_depth: int,
+        depth: int,
+        high_res_depth: int,
         nhead: int,
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
@@ -139,15 +139,13 @@ class AdaptiveViT(ViT):
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
+        high_res_layer_scale: float | None = 1e-5,
     ):
-        # NOTE: The naming of transformer layers follows PyTorch. However, our "encoder" is a TransformerDecoderLayer
-        # that cross-attends to high-res input tokens and our "decoder" is a TransformerEncoderLayer that attends only to
-        # the backbone tokens.
         super().__init__(
             in_channels,
             dim,
             patch_size,
-            decoder_depth,
+            depth,
             nhead,
             dim_feedforward,
             dropout,
@@ -166,12 +164,8 @@ class AdaptiveViT(ViT):
             in_channels, dim, kv_dim, cast(Any, patch_size), cast(Any, target_shape), norm_layer, position_noise
         )
 
-        # Remove decoder if its depth is 0
-        if not decoder_depth:
-            self.blocks = None
-
-        # Cross attention encoder
-        self.encoder_blocks = nn.ModuleList(
+        # Cross attention to high res tokens
+        self.high_res_blocks = nn.ModuleList(
             [
                 TransformerDecoderLayer(
                     dim,
@@ -184,8 +178,12 @@ class AdaptiveViT(ViT):
                     num_kv_heads=num_kv_heads,
                     qk_norm=qk_norm,
                     norm_layer=norm_layer,
+                    # By default we use layer scale here to limit the high res pathway's contribution.
+                    # Since AdaptiveViT will likely be trained from a ViT checkpoint, this helps set the
+                    # intial condition of the model to the ViT checkpoint.
+                    layer_scale=high_res_layer_scale,
                 )
-                for _ in range(encoder_depth)
+                for _ in range(high_res_depth)
             ]
         )
 
@@ -218,16 +216,17 @@ class AdaptiveViT(ViT):
         else:
             kv_mask = None
 
-        # Cross attention blocks between fixed backbone tokens and high res input tokens
-        for block in self.encoder_blocks:
-            q = block(q, kv)
-        x = q
-
-        # Transformer blocks and output norm
+        # Self attention encoder blocks to coarse tokens
         if self.blocks is not None:
             for block in cast(Any, self.blocks):
-                x = block(x)
-        x = self.norm(x)
+                q = block(q)
+
+        # Cross attention blocks between fixed backbone tokens and high res input tokens
+        for block in self.high_res_blocks:
+            q = block(q, kv)
+
+        # Output norm
+        x = self.norm(q)
 
         # Reshape to original grid if requested
         if reshape and mask is not None and mask_fill_value is None:
