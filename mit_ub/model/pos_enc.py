@@ -134,12 +134,11 @@ class RelativeFactorizedPosition(PositionEncoder, SupportsLoRA):
         rank: int,
         alpha: float,
         dropout: float = 0.0,
-        use_bias: bool = False,
         quantize_base: bool = False,
     ) -> nn.Module:
-        _apply_lora = partial(
-            apply_lora, rank=rank, alpha=alpha, dropout=dropout, use_bias=use_bias, quantize_base=quantize_base
-        )
+        # NOTE: Quantization is not supported when using a bias, which this module has.
+        # We force quantize_base to False to avoid issues.
+        _apply_lora = partial(apply_lora, rank=rank, alpha=alpha, dropout=dropout, quantize_base=False)
 
         if LoRATarget.POSITION in target:
             self.proj = _apply_lora(cast(nn.Linear, self.proj))

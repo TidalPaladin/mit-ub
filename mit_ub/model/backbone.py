@@ -36,6 +36,7 @@ class ViT(nn.Module):
         self._in_channels = in_channels
         self._dim_feedforward = dim_feedforward = dim_feedforward or 4 * dim
         self._position_noise = position_noise
+        self._norm_layer = norm_layer
 
         # Stem tokenizer
         stem_type = PatchEmbed2d if isinstance(patch_size, int) or len(patch_size) == 2 else PatchEmbed3d
@@ -75,6 +76,10 @@ class ViT(nn.Module):
     @property
     def in_channels(self) -> int:
         return self._in_channels
+
+    @property
+    def norm_layer(self) -> Type[nn.Module]:
+        return self._norm_layer
 
     def forward(
         self,

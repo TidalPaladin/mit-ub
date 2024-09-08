@@ -67,6 +67,7 @@ class ClassificationTask(Task):
         self.classification_head = nn.Sequential(
             nn.AdaptiveAvgPool2d((1, 1)),
             Rearrange("b c () () -> b c"),
+            nn.LayerNorm(dim),
             nn.Linear(dim, num_classes),
         )
         self.criterion = nn.CrossEntropyLoss()
@@ -173,7 +174,10 @@ class JEPAWithClassification(JEPAWithProbe):
         )
 
     def create_probe_head(self) -> nn.Module:
-        return nn.Linear(self.backbone.dim, self.num_classes)
+        return nn.Sequential(
+            nn.LayerNorm(self.backbone.dim),
+            nn.Linear(self.backbone.dim, self.num_classes),
+        )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
         return tm.MetricCollection(

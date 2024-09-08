@@ -20,6 +20,7 @@ from mit_ub.model.transformer import apply_lora, freeze_non_lora
         (False, True),
         (False, False),
         (True, False),
+        pytest.param(True, True, marks=pytest.mark.xfail(raises=NotImplementedError, strict=True)),
     ],
 )
 def test_apply_lora(quantize_base, use_bias, dtype, device):
@@ -31,7 +32,7 @@ def test_apply_lora(quantize_base, use_bias, dtype, device):
     B, L, D_in, D_out = 2, 10, 256, 512
     x = torch.randn(B, L, D_in, requires_grad=True, device=device)
     linear = nn.Linear(D_in, D_out, bias=use_bias).to(device)
-    linear_lora = apply_lora(linear, rank=4, alpha=16, use_bias=use_bias, quantize_base=quantize_base)
+    linear_lora = apply_lora(linear, rank=4, alpha=16, quantize_base=quantize_base)
 
     with torch.autocast(device_type="cuda", dtype=dtype):
         o1 = linear_lora(x)
@@ -56,7 +57,7 @@ def test_freeze_non_lora(use_bias, quantize_base):
     B, L, D_in, D_out = 2, 10, 256, 512
     x = torch.randn(B, L, D_in, requires_grad=True, device=device)
     linear = nn.Linear(D_in, D_out, bias=use_bias).to(device)
-    linear_lora = apply_lora(linear, rank=4, alpha=16, use_bias=use_bias, quantize_base=quantize_base)
+    linear_lora = apply_lora(linear, rank=4, alpha=16, quantize_base=quantize_base)
     freeze_non_lora(linear_lora)
 
     for name, param in linear_lora.named_parameters():

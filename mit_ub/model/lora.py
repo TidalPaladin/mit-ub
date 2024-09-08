@@ -1,12 +1,15 @@
 from abc import abstractmethod
 from enum import StrEnum
-from typing import Protocol, Sequence, Tuple, TypeVar
+from typing import Final, Protocol, Sequence, Tuple, TypeVar, runtime_checkable
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 from torchtune.modules.peft import LoRALinear
 
+
+# Quantization will fail if the dimension is too small
+MIN_DIM_QUANTIZE: Final = 256
 
 T = TypeVar("T", bound=nn.Module)
 
@@ -23,7 +26,6 @@ def apply_lora(
     rank: int,
     alpha: float,
     dropout: float = 0.0,
-    use_bias: bool = False,
     quantize_base: bool = False,
 ) -> nn.Module:
     """Apply LoRA (Low-Rank Adaptation) to a linear layer or weight tensor.
@@ -33,7 +35,6 @@ def apply_lora(
         rank: Rank of the low-rank approximation.
         alpha: Scaling factor for the LoRA weights.
         dropout: Dropout probability for LoRA layers.
-        use_bias: Whether to use bias in the LoRA layer.
         quantize_base: Whether to quantize the base weights.
 
     Returns:
@@ -42,14 +43,15 @@ def apply_lora(
     if isinstance(target, nn.Linear):
         # Extract w and b from the original linear layer
         w = target.weight
-        b = target.bias if use_bias else None
+        b = target.bias
     else:
         w, b = target
-        b = b if use_bias else None
 
     # Create the LoRA linear layer
+    # TODO: It isn't great to silently change quantization behavior for small dimensions
     d_out, d_in = w.shape
-    lora_linear = LoRALinear(d_in, d_out, rank, alpha, dropout, use_bias, quantize_base)
+    quantize_base = quantize_base and d_in >= MIN_DIM_QUANTIZE and d_out >= MIN_DIM_QUANTIZE
+    lora_linear = LoRALinear(d_in, d_out, rank, alpha, dropout, b is not None, quantize_base)
 
     # Move to device of input linear layer
     lora_linear = lora_linear.to(w.device)
@@ -80,6 +82,7 @@ def freeze_non_lora(model: nn.Module) -> None:
             param.requires_grad = name.endswith("lora_a") or name.endswith("lora_b")
 
 
+@runtime_checkable
 class SupportsLoRA(Protocol):
     """Protocol for classes that support LoRA."""
 
