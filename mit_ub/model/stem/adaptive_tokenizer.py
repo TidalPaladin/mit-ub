@@ -1,3 +1,4 @@
+from enum import StrEnum
 from typing import Tuple, Type, cast
 
 import torch.nn as nn
@@ -8,6 +9,11 @@ from torch import Tensor
 
 from ..pos_enc import RelativeFactorizedPosition
 from .patch_embed import PatchEmbed
+
+
+class PoolType(StrEnum):
+    MAX = "max"
+    AVG = "avg"
 
 
 class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
@@ -22,6 +28,7 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         position_noise: bool = False,
         autocast: bool = False,
+        pool_type: PoolType = PoolType.MAX,
     ):
         super().__init__()
         self._target_shape = to_tuple(target_shape, 2)
@@ -30,14 +37,15 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         self.position_noise = position_noise
         self.autocast = autocast
 
+        pool_cls = nn.AdaptiveMaxPool2d if pool_type == PoolType.MAX else nn.AdaptiveAvgPool2d
         self.query = nn.Sequential(
-            nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size, bias=False),
-            nn.AdaptiveMaxPool2d(target_shape),
+            nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size, bias=True),
+            pool_cls(target_shape),
             Rearrange("b c h w -> b (h w) c"),
             norm_layer(embed_dim),
         )
         self.kv = nn.Sequential(
-            nn.Conv2d(in_channels, kv_dim, kernel_size=patch_size, stride=patch_size, bias=False),
+            nn.Conv2d(in_channels, kv_dim, kernel_size=patch_size, stride=patch_size, bias=True),
             Rearrange("b c h w -> b (h w) c"),
             norm_layer(kv_dim),
         )
@@ -94,6 +102,7 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         position_noise: bool = False,
         autocast: bool = False,
+        pool_type: PoolType = PoolType.MAX,
     ):
         super().__init__()
         self._target_shape = to_tuple(target_shape, 3)
@@ -102,9 +111,10 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         self.position_noise = position_noise
         self.autocast = autocast
 
+        pool_cls = nn.AdaptiveMaxPool3d if pool_type == PoolType.MAX else nn.AdaptiveAvgPool3d
         self.query = nn.Sequential(
             nn.Conv3d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size, bias=False),
-            nn.AdaptiveMaxPool3d(target_shape),
+            pool_cls(target_shape),
             Rearrange("b c d h w -> b (h w d) c"),
             norm_layer(embed_dim),
         )

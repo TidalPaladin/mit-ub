@@ -37,7 +37,7 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
     ):
         super().__init__()
         self.patch = nn.Sequential(
-            nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size, bias=False),
+            nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size, bias=True),
             Rearrange("b c h w -> b (h w) c", c=embed_dim),
         )
         self.norm = norm_layer(embed_dim)
