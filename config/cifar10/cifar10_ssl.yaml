@@ -3,7 +3,7 @@ fit:
   float32_matmul_precision: medium
   trainer:
     accelerator: gpu
-    devices: [2]
+    devices: [1]
     #strategy: "ddp_find_unused_parameters_true"
     precision: "bf16-mixed"
     max_steps: 50000
@@ -33,7 +33,7 @@ fit:
       init_args:
         save_dir: /mnt/flash/mitub
         project: mit-ub
-        name: "cifar10-vit"
+        name: "cifar10-vit-ln"
 
   model:
     class_path: mit_ub.tasks.JEPAWithClassification
@@ -44,7 +44,7 @@ fit:
       loss_fn: "cosine"
       margin: 0.5
 
-      context_scale: 1
+      context_scale: 2
       optimizer_init:
         class_path: torch.optim.AdamW
         init_args:

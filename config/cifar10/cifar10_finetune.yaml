@@ -3,7 +3,7 @@ fit:
   float32_matmul_precision: medium
   trainer:
     accelerator: gpu
-    devices: [2]
+    devices: [1]
     #strategy: "ddp_find_unused_parameters_true"
     precision: "bf16-mixed"
     max_steps: 50000
@@ -24,22 +24,16 @@ fit:
         init_args:
           log_momentum: true
 
-      - class_path: mit_ub.callbacks.LoRACallback
+      - class_path: mit_ub.callbacks.HistogramCallback
         init_args:
-          targets: ["ATTENTION", "POSITION", "FEEDFORWARD"]
-          rank: 32
-          alpha: 32
-          dropout: 0.0
-          quantize_base: false
-          freeze_stem: false
-          freeze_norm: false
+          name: histogram
 
     logger:
       class_path: pytorch_lightning.loggers.wandb.WandbLogger
       init_args:
         save_dir: /mnt/flash/mitub
         project: mit-ub
-        name: "cifar10-vit-lora-norm-stem"
+        name: "cifar10-vit-tune"
 
   model:
     class_path: mit_ub.tasks.ClassificationTask
@@ -49,13 +43,13 @@ fit:
       optimizer_init:
         class_path: torch.optim.AdamW
         init_args:
-          lr: 0.0001
+          lr: 0.00001
           weight_decay: 0.05
       lr_interval: "step"
       lr_scheduler_init:
         class_path: torch.optim.lr_scheduler.OneCycleLR
         init_args:
-          max_lr: 0.0001
+          max_lr: 0.00001
           div_factor: 5
           final_div_factor: 50
           pct_start: 0.10

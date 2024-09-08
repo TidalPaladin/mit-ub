@@ -6,6 +6,7 @@ from mit_ub.model.backbone import AdaptiveViT, ViT
 
 
 class DummyModule(pl.LightningModule):
+    backbone: ViT | AdaptiveViT
 
     def __init__(self, backbone: ViT | AdaptiveViT):
         super().__init__()
@@ -55,7 +56,10 @@ class TestLoRACallback:
     @pytest.mark.parametrize("rank,alpha,dropout", [(8, 16, 0.0), (16, 8, 0.1)])
     @pytest.mark.parametrize("quantize_base", [False, True])
     @pytest.mark.parametrize("freeze_stem", [False, True])
-    def test_on_fit_start(self, mocker, trainer, pl_module, targets, rank, alpha, dropout, quantize_base, freeze_stem):
+    @pytest.mark.parametrize("freeze_norm", [False, True])
+    def test_on_fit_start(
+        self, mocker, trainer, pl_module, targets, rank, alpha, dropout, quantize_base, freeze_stem, freeze_norm
+    ):
         # Spy each LoRA capable module
         spies = {
             name: mocker.spy(module, "apply_lora")
@@ -72,6 +76,7 @@ class TestLoRACallback:
             dropout=dropout,
             quantize_base=quantize_base,
             freeze_stem=freeze_stem,
+            freeze_norm=freeze_norm,
         )
         callback.on_fit_start(trainer, pl_module)
 
@@ -79,5 +84,16 @@ class TestLoRACallback:
         for name, spy in spies.items():
             spy.assert_called_once_with(targets, rank, alpha, dropout, quantize_base)
 
+        # Check that the norm layer is frozen/unfrozen correctly
+        for name, module in pl_module.backbone.named_modules():
+            if "stem" in name:
+                continue
+            if isinstance(module, pl_module.backbone.norm_layer):
+                for param in module.parameters():
+                    assert param.requires_grad == (not freeze_norm)
+
+        # Check that the stem is frozen/unfrozen correctly
         for name, param in pl_module.backbone.stem.named_parameters():
-            assert param.requires_grad == (not freeze_stem) or ("lora_a" in name or "lora_b" in name)
+            module_name = ".".join(name.split(".")[:-1])
+            module = pl_module.backbone.stem.get_submodule(module_name)
+            assert param.requires_grad == (not freeze_stem or ("lora_a" in name or "lora_b" in name))

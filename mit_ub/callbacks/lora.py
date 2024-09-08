@@ -22,6 +22,7 @@ class LoRACallback(Callback):
         dropout: Dropout probability for LoRA layers.
         quantize_base: Whether to quantize the base weights.
         freeze_stem: Whether to freeze the stem parameters.
+        freeze_norm: Whether to freeze the norm parameters.
 
     Raises:
         AttributeError: If the model does not have a `backbone` attribute.
@@ -36,6 +37,7 @@ class LoRACallback(Callback):
         dropout: float = 0.0,
         quantize_base: bool = False,
         freeze_stem: bool = True,
+        freeze_norm: bool = True,
     ):
         self.targets = targets
         self.rank = rank
@@ -43,6 +45,7 @@ class LoRACallback(Callback):
         self.dropout = dropout
         self.quantize_base = quantize_base
         self.freeze_stem = freeze_stem
+        self.freeze_norm = freeze_norm
 
     def on_fit_start(self, _: pl.Trainer, pl_module: pl.LightningModule):
         rank_zero_info(
@@ -60,6 +63,12 @@ class LoRACallback(Callback):
         for module in model.modules():
             if isinstance(module, SupportsLoRA):
                 module.apply_lora(self.targets, self.rank, self.alpha, self.dropout, self.quantize_base)
+
+        # Freeze/unfreeze norm layers
+        for module in model.modules():
+            if isinstance(module, model.norm_layer):
+                for param in module.parameters():
+                    param.requires_grad = not self.freeze_norm
 
         # Handle non-LoRA stem modules
         for name, param in model.stem.named_parameters():
