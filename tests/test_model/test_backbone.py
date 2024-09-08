@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import pytest
 import torch
 from ssl_tasks.tokens import TokenMask
@@ -114,7 +116,7 @@ class TestAdaptiveViT:
         model = ViT(C, D, patch_size, depth, nhead).to(device)
         model = AdaptiveViT(C, D, D_kv, patch_size, target_size, depth, depth, nhead).to(device)
 
-        mask_size = model.equivalent_size_2d(*size)
+        mask_size = model.stem.equivalent_size(cast(Any, size))
         mask = TokenMask.create(size=mask_size, patch_size=patch_size, batch_size=B, mask_ratio=0.25, scale=1)
         kv_mask = mask.resize(size)
         test_mask = kv_mask.resize(mask_size)

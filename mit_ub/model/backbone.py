@@ -1,27 +1,23 @@
-from typing import Any, Callable, Optional, Sequence, Tuple, Type, cast
+from typing import Any, Optional, Tuple, Type, cast
 
-import torch
 import torch.nn as nn
-from deep_helpers.helpers import to_tuple
 from einops import rearrange
-from einops.layers.torch import Rearrange
 from ssl_tasks.tokens import TokenMask
 from torch import Tensor
-from torch.utils.hooks import RemovableHandle
 
-from .adaptive_tokenizer import AdaptiveTokenizer2d
 from .kernels.relu2 import ReLU2
-from .pos_enc import RelativeFactorizedPosition
+from .stem import AdaptiveTokenizer2d, AdaptiveTokenizer3d, PatchEmbed2d, PatchEmbed3d
 from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
 
 class ViT(nn.Module):
+    stem: PatchEmbed2d | PatchEmbed3d
 
     def __init__(
         self,
         in_channels: int,
         dim: int,
-        patch_size: int | Sequence[int],
+        patch_size: int | Tuple[int, int] | Tuple[int, int, int],
         depth: int,
         nhead: int,
         dim_feedforward: Optional[int] = None,
@@ -41,30 +37,9 @@ class ViT(nn.Module):
         self._dim_feedforward = dim_feedforward = dim_feedforward or 4 * dim
         self._position_noise = position_noise
 
-        # Make patch size length 3 (D H W) for 2D or 3D inputs
-        if isinstance(patch_size, int):
-            patch_size = to_tuple(patch_size, 3)
-        elif len(patch_size) == 2:
-            patch_size = (1, *patch_size)
-        self._patch_size = patch_size
-        assert len(self.patch_size) == 3
-
-        # Patch embeddings
-        self.patch_embed_2d = nn.Sequential(
-            nn.Conv2d(in_channels, dim, kernel_size=self.patch_size_2d, stride=self.patch_size_2d),
-            Rearrange("b c h w -> b (h w) c"),
-            norm_layer(dim),
-        )
-        self.pos_enc_2d = RelativeFactorizedPosition(2, dim)
-
-        # TODO: When patch size is (1, H, W) we can share weight / bias with Conv2d
-        # Disabled for now because in DDP this triggers unused params
-        # self.patch_embed_3d = nn.Sequential(
-        #    nn.Conv3d(in_channels, dim, kernel_size=self.patch_size, stride=self.patch_size),
-        #    Rearrange("b c d h w -> b (d h w) c"),
-        #    nn.LayerNorm(dim),
-        # )
-        # self.pos_enc_3d = RelativeFactorizedPosition(3, dim)
+        # Stem tokenizer
+        stem_type = PatchEmbed2d if isinstance(patch_size, int) or len(patch_size) == 2 else PatchEmbed3d
+        self.stem = stem_type(in_channels, dim, cast(Any, patch_size), norm_layer, position_noise)
 
         # Transformer blocks
         self.blocks = nn.ModuleList(
@@ -101,18 +76,6 @@ class ViT(nn.Module):
     def in_channels(self) -> int:
         return self._in_channels
 
-    @property
-    def patch_size(self) -> Tuple[int, int, int]:
-        return cast(Tuple[int, int, int], self._patch_size)
-
-    @property
-    def patch_size_2d(self) -> Tuple[int, int]:
-        return self.patch_size[-2:]
-
-    def tokenized_size(self, *size: int) -> Sequence[int]:
-        patch_size = self.patch_size[-len(size) :]
-        return tuple(s // p for s, p in zip(size, patch_size))
-
     def forward(
         self,
         x: Tensor,
@@ -121,68 +84,44 @@ class ViT(nn.Module):
         mask_fill_value: float | Tensor | None = None,
     ) -> Tensor:
         B, C, *original_size = x.shape
-        tokenized_size = self.tokenized_size(*original_size)
+        tokenized_size = self.stem.tokenized_size(cast(Any, tuple(original_size)))
 
-        # Patch embedding and positional encoding.
-        # Since medical inputs have high dynamic range, we use float32 for the patch embedding
-        with torch.autocast(device_type=x.device.type, dtype=torch.float32):
-            dtype = x.dtype
-            x = x.to(torch.float32)
-            if is_3d := x.ndim == 5:
-                raise NotImplementedError("3D input not supported")
-            else:
-                x = self.patch_embed_2d(x)
-                x += self.pos_enc_2d.from_grid(
-                    tokenized_size,
-                    B,
-                    proto=x,
-                    normalize=True,
-                    add_noise=self.pos_enc_2d.training and self._position_noise,
-                )
-            x = x.to(dtype)
-
+        # Tokenize and apply mask
+        x = self.stem(x)
         if mask is not None:
             x = mask.apply_to_tokens(x, fill_value=mask_fill_value)
 
-        # Transformer blocks
+        # Transformer blocks and output norm
         for block in self.blocks:
             x = block(x)
-
         x = self.norm(x)
 
+        # Reshape to original grid if requested
         if reshape and mask is not None and mask_fill_value is None:
             raise ValueError(
                 "Cannot reshape with mask and no fill value. Either specify `reshape=False` or provide a `mask_fill_value`"
             )
-
-        if reshape and is_3d:
-            raise NotImplementedError("3D reshape not implemented")
+        elif reshape and len(tokenized_size) == 3:
+            D, H, W = tokenized_size
+            x = rearrange(x, "b (d h w) c -> b c d h w", d=D, h=H, w=W)
         elif reshape:
-            x = rearrange(x, "b (h w) c -> b c h w", h=tokenized_size[0], w=tokenized_size[1])
+            assert len(tokenized_size) == 2
+            H, W = tokenized_size
+            x = rearrange(x, "b (h w) c -> b c h w", h=H, w=W)
 
         return x
 
-    def register_mask_hook(self, func: Callable, *args, **kwargs) -> RemovableHandle:
-        r"""Register a token masking hook to be applied after the patch embedding step.
-
-        Args:
-            func: Callable token making hook with signature given in :func:`register_forward_hook`
-
-        Returns:
-            A handle that can be used to remove the added hook by calling ``handle.remove()``.
-        """
-        return self.patch_embed_2d.register_forward_hook(func, *args, **kwargs)
-
 
 class AdaptiveViT(ViT):
+    stem: AdaptiveTokenizer2d | AdaptiveTokenizer3d
 
     def __init__(
         self,
         in_channels: int,
         dim: int,
         kv_dim: int,
-        patch_size: int | Sequence[int],
-        target_shape: Tuple[int, int],
+        patch_size: int | Tuple[int, int] | Tuple[int, int, int],
+        target_shape: Tuple[int, int] | Tuple[int, int, int],
         encoder_depth: int,
         decoder_depth: int,
         nhead: int,
@@ -215,20 +154,18 @@ class AdaptiveViT(ViT):
             qk_norm,
             norm_layer,
         )
-        # These are all provided by the adaptive tokenizer
-        delattr(self, "patch_embed_2d")
-        # delattr(self, "patch_embed_3d")
-        delattr(self, "pos_enc_2d")
-        # delattr(self, "pos_enc_3d")
+
+        # Adaptive stem tokenizer
+        stem_type = AdaptiveTokenizer2d if isinstance(patch_size, int) or len(patch_size) == 2 else AdaptiveTokenizer3d
+        self.stem = stem_type(
+            in_channels, dim, kv_dim, cast(Any, patch_size), cast(Any, target_shape), norm_layer, position_noise
+        )
+
+        # Remove decoder if its depth is 0
         if not decoder_depth:
             self.blocks = None
 
-        # TODO: For now only a 2D tokenizer is provided. 3D tokenization support is ready via AdaptiveTokenizer3d
-        # but there isn't an immediate need for it. Having unused parameters complicates DDP training, so we omit
-        # the 3D tokenizer for now.
-        self.tokenizer = AdaptiveTokenizer2d(
-            in_channels, dim, kv_dim, self.patch_size_2d, target_shape, norm_layer=norm_layer
-        )
+        # Cross attention encoder
         self.encoder_blocks = nn.ModuleList(
             [
                 TransformerDecoderLayer(
@@ -247,19 +184,13 @@ class AdaptiveViT(ViT):
             ]
         )
 
-    def tokenized_size(self, *size: int) -> Sequence[int]:
-        return self.tokenizer.target_shape
-
-    def equivalent_size_2d(self, *size: int) -> Sequence[int]:
-        return tuple(s * p for s, p in zip(self.tokenized_size(*size), self.patch_size_2d))
-
-    @property
-    def pos_enc_2d(self) -> nn.Module:
-        return self.tokenizer.pos_enc_q
-
-    @property
-    def pos_enc_3d(self) -> nn.Module:
-        return self.tokenizer.pos_enc_q
+    def convert_mask_to_kv_mask(
+        self,
+        input_size: Tuple[int, int] | Tuple[int, int, int],
+        mask: TokenMask,
+    ) -> TokenMask:
+        effective_kv_size = self.stem.equivalent_size_kv(cast(Any, input_size))
+        return mask.resize(effective_kv_size)
 
     def forward(
         self,
@@ -269,25 +200,14 @@ class AdaptiveViT(ViT):
         mask_fill_value: float | Tensor | None = None,
     ) -> Tensor:
         B, C, *original_size = x.shape
-        tokenized_size = self.tokenized_size(*original_size)
-        is_3d = x.ndim == 5
-        assert not is_3d, "3D input not supported for AdaptiveViT"
+        tokenized_size = self.stem.tokenized_size(cast(Any, tuple(original_size)))
 
-        # Tokenize (includes position encoding)
-        # Since medical inputs have high dynamic range, we use float32 for the patch embedding
-        with torch.autocast(device_type=x.device.type, dtype=torch.float32):
-            q, kv = self.tokenizer(x.to(torch.float32))
-            q = q.to(x.dtype)
-            kv = kv.to(x.dtype)
-
-        # Determine the grid size of the key/value tokens
-        kv_tokenized_size = self.tokenizer.kv_size(x.shape[2:])
-        # Determine the effective input size of the key/value tokens by scaling up by patch size
-        effective_kv_size = tuple(t * p for t, p in zip(kv_tokenized_size, self.patch_size_2d))
+        # Tokenize to q (pooled tokens) and kv (high-res tokens)
+        q, kv = self.stem(x)
 
         # Apply token mask if given
         if mask is not None:
-            kv_mask = mask.resize(effective_kv_size)
+            kv_mask = self.convert_mask_to_kv_mask(cast(Any, tuple(original_size)), mask)
             q = mask.apply_to_tokens(q, fill_value=mask_fill_value)
             kv = kv_mask.apply_to_tokens(kv, fill_value=mask_fill_value)
         else:
@@ -298,22 +218,23 @@ class AdaptiveViT(ViT):
             q = block(q, kv)
         x = q
 
-        # Transformer blocks
+        # Transformer blocks and output norm
         if self.blocks is not None:
             for block in cast(Any, self.blocks):
                 x = block(x)
-
         x = self.norm(x)
 
+        # Reshape to original grid if requested
         if reshape and mask is not None and mask_fill_value is None:
             raise ValueError(
                 "Cannot reshape with mask and no fill value. Either specify `reshape=False` or provide a `mask_fill_value`"
             )
-
-        if reshape and is_3d:
-            raise NotImplementedError("3D reshape not implemented")
-            # x = rearrange(x, "b (d h w) c -> b c d h w", d=tokenized_size[0], h=tokenized_size[1], w=tokenized_size[2])
+        elif reshape and len(tokenized_size) == 3:
+            D, H, W = tokenized_size
+            x = rearrange(x, "b (d h w) c -> b c d h w", d=D, h=H, w=W)
         elif reshape:
-            x = rearrange(x, "b (h w) c -> b c h w", h=tokenized_size[0], w=tokenized_size[1])
+            assert len(tokenized_size) == 2
+            H, W = tokenized_size
+            x = rearrange(x, "b (h w) c -> b c h w", h=H, w=W)
 
         return x

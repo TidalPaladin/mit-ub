@@ -42,6 +42,8 @@ class NormallyDistributed(nn.Module):
 
 
 class JEPA(Task):
+    backbone: ViT | AdaptiveViT
+
     def __init__(
         self,
         backbone: str,
@@ -91,7 +93,7 @@ class JEPA(Task):
         assert self.activation_clip is None or self.activation_clip > 0
         self.dist_gather = dist_gather
 
-        self.backbone = cast(ViT, self.prepare_backbone(backbone))
+        self.backbone = cast(ViT | AdaptiveViT, self.prepare_backbone(backbone))
         self.ema_backbone = deepcopy(self.backbone)
         for p in self.ema_backbone.parameters():
             p.requires_grad = False
@@ -107,7 +109,7 @@ class JEPA(Task):
         self.jepa_query = nn.Parameter(torch.empty(1, 1, self.backbone.dim))
         torch.nn.init.trunc_normal_(self.jepa_query, mean=0, std=1)
 
-        self.pos_enc_2d = RelativeFactorizedPosition(2, self.backbone.dim)
+        self.pos_enc = RelativeFactorizedPosition(len(self.backbone.stem.patch_size), self.backbone.dim)
 
         encoder_proto = next(filter(lambda l: isinstance(l, TransformerEncoderLayer), self.backbone.modules()), None)
         if encoder_proto is None:
@@ -128,12 +130,12 @@ class JEPA(Task):
         # For AdaptiveViT we choose a token mask that matches the size of the fixed token grid produced
         # by the ViT.
         if isinstance(self.backbone, AdaptiveViT):
-            size = self.backbone.equivalent_size_2d(*size)
+            size = self.backbone.stem.equivalent_size(cast(Any, size))
         batch_size = x.shape[0]
         device = x.device
         return TokenMask.create(
             size,
-            self.backbone.patch_size[-len(size) :],
+            self.backbone.stem.patch_size,
             batch_size,
             device=device,
             # Flip this so we get context_mask unmasked
@@ -146,12 +148,12 @@ class JEPA(Task):
         # For AdaptiveViT we choose a token mask that matches the size of the fixed token grid produced
         # by the ViT.
         if isinstance(self.backbone, AdaptiveViT):
-            size = self.backbone.equivalent_size_2d(*size)
+            size = self.backbone.stem.equivalent_size(cast(Any, size))
         batch_size = x.shape[0]
         device = x.device
         return TokenMask.create(
             size,
-            self.backbone.patch_size[-len(size) :],
+            self.backbone.stem.patch_size,
             batch_size,
             device=device,
             # Flip this so we get target_mask unmasked
@@ -170,11 +172,8 @@ class JEPA(Task):
 
         # Create empty queries w/ position encoding that forms the initial predictor input
         B, _, D = context.shape
-        tokenized_size = self.backbone.tokenized_size(*x.shape[2:])
-        if is_3d := x.ndim == 5:
-            raise NotImplementedError("3D not implemented")
-        else:
-            query = self.pos_enc_2d.from_grid(tokenized_size, B, proto=context, normalize=True, requires_grad=False)
+        tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
+        query = self.pos_enc.from_grid(tokenized_size, B, proto=context, normalize=True, requires_grad=True)
         query = query.contiguous()
         query += self.jepa_query.type_as(query)
 

@@ -4,7 +4,6 @@ fit:
   trainer:
     accelerator: gpu
     devices: [2]
-    #strategy: "ddp_find_unused_parameters_true"
     precision: "bf16-mixed"
     max_steps: 50000
     num_sanity_val_steps: 0
@@ -33,12 +32,12 @@ fit:
       init_args:
         save_dir: /mnt/flash/mitub
         project: mit-ub
-        name: "cifar10-vit"
+        name: "cifar10-vit-adaptive"
 
   model:
     class_path: mit_ub.tasks.JEPAWithClassification
     init_args:
-      backbone: "vit-cifar10"
+      backbone: "vit-cifar10-adaptive"
       num_classes: 10
 
       loss_fn: "cosine"
