@@ -36,8 +36,8 @@ class TestLoRACallback:
                 kv_dim=32,
                 patch_size=4,
                 target_shape=(8, 8),
-                encoder_depth=2,
-                decoder_depth=2,
+                depth=2,
+                high_res_depth=2,
                 nhead=1,
             )
         else:

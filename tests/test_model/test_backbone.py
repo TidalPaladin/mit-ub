@@ -131,6 +131,16 @@ class TestAdaptiveViT:
         assert out1.isnan().any()
         assert not out2.isnan().any()
 
+    def test_load_from_vit(self):
+        C, D, D_kv = 3, 128, 32
+        depth = 3
+        depth_adaptive = 2
+        nhead = 128 // 16
+        model = AdaptiveViT(C, D, D_kv, (16, 16), (4, 4), depth, depth_adaptive, nhead)
+        model2 = ViT(C, D, (16, 16), depth, nhead)
+        for p1, p2 in zip(model.blocks.parameters(), model2.blocks.parameters()):
+            assert p1.shape == p2.shape
+
 
 @pytest.mark.ci_skip
 @pytest.mark.parametrize("model", BACKBONES.available_keys())
