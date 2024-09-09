@@ -191,6 +191,7 @@ class TriageTask(Task):
         self.triage_head = nn.Sequential(
             nn.AdaptiveAvgPool2d((1, 1)),
             Rearrange("b c () () -> b c"),
+            nn.LayerNorm(dim),
             nn.Dropout(0.1),
             nn.Linear(dim, 1),
         )

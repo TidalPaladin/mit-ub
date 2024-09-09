@@ -1,6 +1,7 @@
 from typing import Final
 
 from registry import Registry
+import torch.nn as nn
 
 from .backbone import AdaptiveViT, ViT
 from .convnext import ConvNext
@@ -136,6 +137,18 @@ BACKBONES(
     patch_size=2,
     dropout=0.1,
     kernel_size=3,
+)
+
+BACKBONES(
+    ConvNext,
+    name="convnext-mammo",
+    in_channels=1,
+    depths=(3, 5, 7, 15, 3),
+    dims=(128, 256, 512, 1024, 2048),
+    patch_size=8,
+    dropout=0.1,
+    kernel_size=7,
+    norm_layer=nn.BatchNorm2d,
 )
 
 __all__ = ["BACKBONES", "ViT", "TransformerEncoderLayer", "TransformerDecoderLayer", "AdaptiveViT", "ConvNext"]
