@@ -1,5 +1,7 @@
 import hashlib
 import math
+import sys
+from pathlib import Path
 from typing import Any, Dict, Final, Iterable, List, Optional, Set, Tuple, cast
 
 import torch
@@ -7,8 +9,13 @@ import torch.nn as nn
 import torchmetrics as tm
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
+from dicom_utils.container.collection import iterate_input_path
+from dicom_utils.dicom import has_dicm_prefix
+from dicom_utils.volume import ReduceVolume
 from einops.layers.torch import Rearrange
+from jsonargparse import ActionConfigFile, ArgumentParser, Namespace
 from torch import Tensor
+from torch_dicom.inference.lightning import LightningInferencePipeline
 from torchmetrics.classification import BinaryAccuracy, BinaryAUROC
 from torchmetrics.classification import BinarySensitivityAtSpecificity as BinarySensitivityAtSpecificityBase
 from torchmetrics.classification import BinarySpecificityAtSensitivity as BinarySpecificityAtSensitivityBase
@@ -16,6 +23,7 @@ from torchmetrics.functional.classification.accuracy import binary_accuracy
 from torchmetrics.functional.classification.auroc import _binary_auroc_compute
 from torchmetrics.utilities.data import dim_zero_cat
 from torchvision.ops import sigmoid_focal_loss
+from tqdm import tqdm
 
 from ..model import BACKBONES, ViT
 
@@ -520,3 +528,111 @@ class BreastTriage(TriageTask):
         _check_weights_sum_to_one(baseline_weight)
 
         return baseline_weight
+
+
+def parse_args() -> Namespace:
+    parser = ArgumentParser(prog="mit-ub-breast-triage", description="Triage mammograms for breast cancer.")
+    parser.add_argument("--config", action=ActionConfigFile)
+
+    parser.add_argument(
+        "target",
+        type=Path,
+        help="Target DICOMs or images to process. Can be a file, directory, or text file containing paths.",
+    )
+    BreastTriage.add_args_to_parser(parser, skip={"weights"}, subclass=True)
+
+    parser.add_argument(
+        "-e",
+        "--enumerate",
+        default=False,
+        action="store_true",
+        help="Enumerate the input files. May take time but enables a progress bar.",
+    )
+    parser.add_argument(
+        "-i",
+        "--image-size",
+        type=int,
+        nargs=2,
+        help="Image size for inference, or omit to infer from checkopint.",
+    )
+    parser.add_argument("-b", "--batch-size", type=int, default=1, help="Batch size for processing")
+    parser.add_argument("--num-workers", type=int, default=4, help="Number of workers for data loading.")
+    parser.add_argument(
+        "--uid-from-stem",
+        default=False,
+        action="store_true",
+        help="Use the file stem as the SOPInstanceUID when it is not available in the metadata.",
+    )
+
+    cfg = parser.parse_args()
+    cfg = parser.instantiate_classes(cfg)
+    cfg = BreastTriage.on_after_parse(cfg)
+    return cfg
+
+
+def main(args: Namespace) -> None:
+    # Prepare model
+    # TODO: This is coupled to breast triage for now, but should support arbitrary triage
+    model: BreastTriage = args.model
+    model = model.to(args.device)
+    checkpoint: Path = Path(args.checkpoint)
+    model.checkpoint = checkpoint.absolute()
+    model.setup()
+
+    def is_dicom(path: Path) -> bool:
+        # Try to avoid slow opening the file if possible by checking the suffix
+        if path.suffix.lower() == ".dcm":
+            return True
+        return has_dicm_prefix(path)
+
+    # Filter paths for processing
+    dicom_paths = filter(is_dicom, iterate_input_path(args.target, ignore_missing=True))
+    image_paths = filter(
+        lambda p: p.suffix.lower() in (".png", ".tiff"), iterate_input_path(args.target, ignore_missing=True)
+    )
+
+    # Determine image size for inference
+    if hasattr(model, "img_size"):
+        img_size = model.img_size
+    elif args.image_size:
+        img_size = args.image_size
+    else:
+        raise ValueError("Image size for inference not specified in CLI or checkpoint.")
+
+    pipeline = LightningInferencePipeline(
+        dicom_paths=dicom_paths,
+        image_paths=image_paths,
+        device=args.device,
+        batch_size=args.batch_size,
+        dataloader_kwargs={"num_workers": args.num_workers},
+        volume_handler=ReduceVolume(skip_edge_frames=5),
+        models=[model],
+        transform=LightningInferencePipeline.create_default_transform(img_size=img_size),
+        enumerate_inputs=args.enumerate,
+    )
+
+    header = None
+    for example, pred in pipeline:
+        # Example keys are different for DICOM and PNG. We also support falling back to the path for the SOPInstanceUID
+        path = example["record"].path if "record" in example else example["path"]
+        sop = example["record"].SOPInstanceUID if "record" in example else path.stem if args.uid_from_stem else ""
+        result = {
+            "path": path,
+            "sop_instance_uid": sop,
+            "triage_score": float(pred["triage_score"].item()),
+        }
+        with tqdm.external_write_mode():
+            if header is None:
+                header = ",".join(result.keys())
+                print(header)
+            print(",".join(str(v) for v in result.values()))
+            sys.stdout.flush()
+            sys.stderr.flush()
+
+
+def entrypoint():
+    main(parse_args())
+
+
+if __name__ == "__main__":
+    entrypoint()
