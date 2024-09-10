@@ -1,7 +1,7 @@
 from typing import Final
 
-from registry import Registry
 import torch.nn as nn
+from registry import Registry
 
 from .backbone import AdaptiveViT, ViT
 from .convnext import ConvNext
