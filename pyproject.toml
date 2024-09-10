@@ -121,3 +121,4 @@ exclude_lines = [
 # Sample script config
 [project.scripts]
 train = "deep_helpers.cli:main"
+triage = "mit_ub.tasks.triage:entrypoint"
