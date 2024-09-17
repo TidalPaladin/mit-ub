@@ -65,6 +65,28 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
         self.layer_scale_attn = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
         self.layer_scale_mlp = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
 
+    def reset_parameters(self):
+        # Self attn
+        for proj in (self.self_attn.q_proj, self.self_attn.k_proj, self.self_attn.v_proj, self.self_attn.output_proj):
+            proj.reset_parameters()
+        if self.self_attn.q_norm is not None and hasattr(self.self_attn.q_norm, "reset_parameters"):
+            self.self_attn.q_norm.reset_parameters()
+        if self.self_attn.k_norm is not None and hasattr(self.self_attn.k_norm, "reset_parameters"):
+            self.self_attn.k_norm.reset_parameters()
+
+        # MLP
+        self.mlp.reset_parameters()
+
+        # Layer scale
+        for scale in (self.layer_scale_attn, self.layer_scale_mlp):
+            if hasattr(scale, "reset_parameters"):
+                scale.reset_parameters()
+
+        # Norm
+        for norm in (self.norm1, self.norm2):
+            if hasattr(norm, "reset_parameters"):
+                norm.reset_parameters()
+
     def forward(self, x: Tensor) -> Tensor:
         # Self attention
         y = self.norm1(x)
@@ -173,6 +195,29 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
         self.layer_scale_attn = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
         self.layer_scale_cross = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
         self.layer_scale_mlp = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
+
+    def reset_parameters(self):
+        # Attention
+        for attn in (self.self_attn, self.cross_attn):
+            for proj in (attn.q_proj, attn.k_proj, attn.v_proj, attn.output_proj):
+                proj.reset_parameters()
+            if attn.q_norm is not None and hasattr(attn.q_norm, "reset_parameters"):
+                attn.q_norm.reset_parameters()
+            if attn.k_norm is not None and hasattr(attn.k_norm, "reset_parameters"):
+                attn.k_norm.reset_parameters()
+
+        # MLP
+        self.mlp.reset_parameters()
+
+        # Layer scale
+        for scale in (self.layer_scale_attn, self.layer_scale_mlp):
+            if hasattr(scale, "reset_parameters"):
+                scale.reset_parameters()
+
+        # Norm
+        for norm in (self.norm1, self.norm2):
+            if hasattr(norm, "reset_parameters"):
+                norm.reset_parameters()
 
     def forward(self, q: Tensor, kv: Tensor) -> Tensor:
         # Self attention

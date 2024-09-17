@@ -114,6 +114,49 @@ class TestTransformerEncoderLayer:
         for name, param in layer.named_parameters():
             assert param.requires_grad == ("lora_a" in name or "lora_b" in name)
 
+    @pytest.mark.parametrize("gate_activation", [None, nn.ReLU()])
+    def test_reset_parameters(self, gate_activation):
+        torch.random.manual_seed(0)
+        D = 32
+        nhead = 2
+        layer = TransformerEncoderLayer(D, nhead, D, gate_activation=gate_activation)
+
+        # Clone weights and biases before resetting parameters
+        attn_weights = {
+            "q_proj": layer.self_attn.q_proj.weight.clone(),
+            "k_proj": layer.self_attn.k_proj.weight.clone(),
+            "v_proj": layer.self_attn.v_proj.weight.clone(),
+            "output_proj": layer.self_attn.output_proj.weight.clone(),
+        }
+        attn_biases = {
+            "q_proj": layer.self_attn.q_proj.bias.clone() if layer.self_attn.q_proj.bias is not None else None,
+            "k_proj": layer.self_attn.k_proj.bias.clone() if layer.self_attn.k_proj.bias is not None else None,
+            "v_proj": layer.self_attn.v_proj.bias.clone() if layer.self_attn.v_proj.bias is not None else None,
+            "output_proj": (
+                layer.self_attn.output_proj.bias.clone() if layer.self_attn.output_proj.bias is not None else None
+            ),
+        }
+        mlp_weights = {"fc1": layer.mlp.fc1.weight.clone(), "fc2": layer.mlp.fc2.weight.clone()}
+        mlp_biases = {
+            "fc1": layer.mlp.fc1.bias.clone() if layer.mlp.fc1.bias is not None else None,
+            "fc2": layer.mlp.fc2.bias.clone() if layer.mlp.fc2.bias is not None else None,
+        }
+        # NOTE: Norm weights aren't tested because they reset to 1.0
+
+        layer.reset_parameters()
+
+        # Check that weights and biases have been reset
+        for name, weight in attn_weights.items():
+            assert not torch.allclose(weight, getattr(layer.self_attn, name).weight)
+        for name, bias in attn_biases.items():
+            if bias is not None:
+                assert not torch.allclose(bias, getattr(layer.self_attn, name).bias)
+        for name, weight in mlp_weights.items():
+            assert not torch.allclose(weight, getattr(layer.mlp, name).weight)
+        for name, bias in mlp_biases.items():
+            if bias is not None:
+                assert not torch.allclose(bias, getattr(layer.mlp, name).bias)
+
 
 class TestTransformerDecoderLayer:
 
@@ -234,3 +277,65 @@ class TestTransformerDecoderLayer:
 
         for name, param in layer.named_parameters():
             assert param.requires_grad == ("lora_a" in name or "lora_b" in name)
+
+    @pytest.mark.parametrize("gate_activation", [None, nn.ReLU()])
+    def test_reset_parameters(self, gate_activation):
+        torch.random.manual_seed(0)
+        D = 32
+        nhead = 2
+        layer = TransformerDecoderLayer(D, nhead, D, D, gate_activation=gate_activation)
+
+        # Clone weights and biases before resetting parameters
+        attn_weights = {
+            "q_proj": layer.self_attn.q_proj.weight.clone(),
+            "k_proj": layer.self_attn.k_proj.weight.clone(),
+            "v_proj": layer.self_attn.v_proj.weight.clone(),
+            "output_proj": layer.self_attn.output_proj.weight.clone(),
+        }
+        attn_biases = {
+            "q_proj": layer.self_attn.q_proj.bias.clone() if layer.self_attn.q_proj.bias is not None else None,
+            "k_proj": layer.self_attn.k_proj.bias.clone() if layer.self_attn.k_proj.bias is not None else None,
+            "v_proj": layer.self_attn.v_proj.bias.clone() if layer.self_attn.v_proj.bias is not None else None,
+            "output_proj": (
+                layer.self_attn.output_proj.bias.clone() if layer.self_attn.output_proj.bias is not None else None
+            ),
+        }
+        cross_attn_weights = {
+            "q_proj": layer.cross_attn.q_proj.weight.clone(),
+            "k_proj": layer.cross_attn.k_proj.weight.clone(),
+            "v_proj": layer.cross_attn.v_proj.weight.clone(),
+            "output_proj": layer.cross_attn.output_proj.weight.clone(),
+        }
+        cross_attn_biases = {
+            "q_proj": layer.cross_attn.q_proj.bias.clone() if layer.cross_attn.q_proj.bias is not None else None,
+            "k_proj": layer.cross_attn.k_proj.bias.clone() if layer.cross_attn.k_proj.bias is not None else None,
+            "v_proj": layer.cross_attn.v_proj.bias.clone() if layer.cross_attn.v_proj.bias is not None else None,
+            "output_proj": (
+                layer.cross_attn.output_proj.bias.clone() if layer.cross_attn.output_proj.bias is not None else None
+            ),
+        }
+        mlp_weights = {"fc1": layer.mlp.fc1.weight.clone(), "fc2": layer.mlp.fc2.weight.clone()}
+        mlp_biases = {
+            "fc1": layer.mlp.fc1.bias.clone() if layer.mlp.fc1.bias is not None else None,
+            "fc2": layer.mlp.fc2.bias.clone() if layer.mlp.fc2.bias is not None else None,
+        }
+        # NOTE: Norm weights aren't tested because they reset to 1.0
+
+        layer.reset_parameters()
+
+        # Check that weights and biases have been reset
+        for name, weight in attn_weights.items():
+            assert not torch.allclose(weight, getattr(layer.self_attn, name).weight)
+        for name, bias in attn_biases.items():
+            if bias is not None:
+                assert not torch.allclose(bias, getattr(layer.self_attn, name).bias)
+        for name, weight in cross_attn_weights.items():
+            assert not torch.allclose(weight, getattr(layer.cross_attn, name).weight)
+        for name, bias in cross_attn_biases.items():
+            if bias is not None:
+                assert not torch.allclose(bias, getattr(layer.cross_attn, name).bias)
+        for name, weight in mlp_weights.items():
+            assert not torch.allclose(weight, getattr(layer.mlp, name).weight)
+        for name, bias in mlp_biases.items():
+            if bias is not None:
+                assert not torch.allclose(bias, getattr(layer.mlp, name).bias)
