@@ -39,7 +39,7 @@ class MLP(nn.Module, SupportsLoRA):
         activation: nn.Module = ReLU2(),
         gate_activation: nn.Module | None = None,
         bias: bool = True,
-        output_dropout: bool = True,
+        output_dropout: bool = False,
     ):
         super().__init__()
         self.fc1 = nn.Linear(in_features, hidden_features, bias=bias)
