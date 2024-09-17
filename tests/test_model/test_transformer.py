@@ -1,6 +1,7 @@
 import pytest
 import torch
 import torch.nn as nn
+from torch.testing import assert_close
 from torchtune.modules.peft.lora import LoRALinear
 
 from mit_ub.model.lora import LoRATarget
@@ -157,6 +158,34 @@ class TestTransformerEncoderLayer:
             if bias is not None:
                 assert not torch.allclose(bias, getattr(layer.mlp, name).bias)
 
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    @pytest.mark.parametrize("gate_activation", [None, nn.ReLU()])
+    def test_forward_deterministic(self, device, gate_activation):
+        B, L, D = 1, 128, 128
+        x = torch.randn(B, L, D, device=device)
+        nhead = D // 16
+        layer = TransformerEncoderLayer(D, nhead, D, gate_activation=gate_activation).to(device)
+
+        # Training, non-determinstic
+        layer.train()
+        with torch.autocast(device_type=device, dtype=torch.float16):
+            out1 = layer(x)
+            out2 = layer(x)
+            assert not torch.allclose(out1, out2)
+
+        # Evaluation, deterministic
+        layer.eval()
+        with torch.autocast(device_type=device, dtype=torch.float16):
+            out1 = layer(x)
+            out2 = layer(x)
+            assert_close(out1, out2)
+
 
 class TestTransformerDecoderLayer:
 
@@ -199,7 +228,7 @@ class TestTransformerDecoderLayer:
         q = torch.randn(B, Lq, Dq)
         k = torch.randn(B, Lk, Dk)
         nhead = Dq // 16
-        layer = TransformerDecoderLayer(Dq, nhead, Dk, num_kv_heads=nhead // 2)
+        layer = TransformerDecoderLayer(Dq, nhead, Dk, Dq, num_kv_heads=nhead // 2)
         out = layer(q, k)
         assert out.shape == q.shape
 
@@ -216,7 +245,7 @@ class TestTransformerDecoderLayer:
         q = torch.randn(B, Lq, Dq, device=device, requires_grad=True)
         k = torch.randn(B, Lk, Dk, device=device, requires_grad=True)
         nhead = Dq // 16
-        layer = TransformerDecoderLayer(Dq, nhead, Dk).to(device)
+        layer = TransformerDecoderLayer(Dq, nhead, Dk, Dq).to(device)
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(q, k)
             out = out.sum()
@@ -339,3 +368,33 @@ class TestTransformerDecoderLayer:
         for name, bias in mlp_biases.items():
             if bias is not None:
                 assert not torch.allclose(bias, getattr(layer.mlp, name).bias)
+
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    @pytest.mark.parametrize("gate_activation", [None, nn.ReLU()])
+    def test_forward_deterministic(self, device, gate_activation):
+        B, Lq, Dq = 1, 64, 128
+        B, Lk, Dk = 1, 128, 32
+        q = torch.randn(B, Lq, Dq, device=device)
+        k = torch.randn(B, Lk, Dk, device=device)
+        nhead = Dq // 16
+        layer = TransformerDecoderLayer(Dq, nhead, Dk, Dq, gate_activation=gate_activation).to(device)
+
+        # Training, non-determinstic
+        layer.train()
+        with torch.autocast(device_type=device, dtype=torch.float16):
+            out1 = layer(q, k)
+            out2 = layer(q, k)
+            assert not torch.allclose(out1, out2)
+
+        # Evaluation, deterministic
+        layer.eval()
+        with torch.autocast(device_type=device, dtype=torch.float16):
+            out1 = layer(q, k)
+            out2 = layer(q, k)
+            assert_close(out1, out2)

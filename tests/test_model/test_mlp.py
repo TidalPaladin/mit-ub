@@ -1,6 +1,7 @@
 import pytest
 import torch
 import torch.nn as nn
+from torch.testing import assert_close
 from torchtune.modules.peft.lora import LoRALinear
 
 from mit_ub.model.lora import LoRATarget
@@ -82,3 +83,31 @@ class TestMLP:
 
         for name, param in layer.named_parameters():
             assert param.requires_grad == ("lora_a" in name or "lora_b" in name)
+
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    @pytest.mark.parametrize("gate_activation", [None, nn.ReLU()])
+    def test_forward_deterministic(self, device, gate_activation):
+        B, L, D = 2, 8, 32
+        torch.random.manual_seed(0)
+        layer = MLP(D, 2 * D, D, dropout=0.1, gate_activation=gate_activation).to(device)
+        x = torch.randn(B, L, D, device=device)
+
+        # Training, non-determinstic
+        layer.train()
+        with torch.autocast(device_type=device, dtype=torch.float16):
+            out1 = layer(x)
+            out2 = layer(x)
+            assert not torch.allclose(out1, out2)
+
+        # Evaluation, deterministic
+        layer.eval()
+        with torch.autocast(device_type=device, dtype=torch.float16):
+            out1 = layer(x)
+            out2 = layer(x)
+            assert_close(out1, out2)
