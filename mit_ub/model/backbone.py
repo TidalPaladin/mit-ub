@@ -1,4 +1,4 @@
-from typing import Any, Optional, Tuple, Type, cast
+from typing import Any, List, Optional, Tuple, Type, cast
 
 import torch.nn as nn
 from einops import rearrange
@@ -29,6 +29,10 @@ class ViT(nn.Module):
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
+        num_experts: int | None = None,
+        num_slots: int | None = None,
+        moe_layers: List[int] = [],
+        layer_scale: float | None = None,
     ):
         super().__init__()
         self._dim = dim
@@ -55,8 +59,11 @@ class ViT(nn.Module):
                     num_kv_heads=num_kv_heads,
                     qk_norm=qk_norm,
                     norm_layer=norm_layer,
+                    num_experts=num_experts if i in moe_layers else None,
+                    num_slots=num_slots if i in moe_layers else None,
+                    layer_scale=layer_scale,
                 )
-                for _ in range(depth)
+                for i in range(depth)
             ]
         )
         self.norm = norm_layer(dim) if output_norm else nn.Identity()
@@ -140,6 +147,11 @@ class AdaptiveViT(ViT):
         qk_norm: bool = False,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         high_res_layer_scale: float | None = 1e-5,
+        num_experts: int | None = None,
+        num_slots: int | None = None,
+        moe_layers: List[int] = [],
+        high_res_moe_layers: List[int] = [],
+        layer_scale: float | None = None,
     ):
         super().__init__(
             in_channels,
@@ -156,6 +168,10 @@ class AdaptiveViT(ViT):
             num_kv_heads,
             qk_norm,
             norm_layer,
+            num_experts,
+            num_slots,
+            moe_layers,
+            layer_scale,
         )
 
         # Adaptive stem tokenizer
@@ -182,8 +198,10 @@ class AdaptiveViT(ViT):
                     # Since AdaptiveViT will likely be trained from a ViT checkpoint, this helps set the
                     # intial condition of the model to the ViT checkpoint.
                     layer_scale=high_res_layer_scale,
+                    num_experts=num_experts if i in high_res_moe_layers else None,
+                    num_slots=num_slots if i in high_res_moe_layers else None,
                 )
-                for _ in range(high_res_depth)
+                for i in range(high_res_depth)
             ]
         )
 

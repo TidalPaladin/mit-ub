@@ -113,6 +113,41 @@ BACKBONES(
     dropout=0.1,
 )
 
+
+BACKBONES(
+    ViT,
+    name="vit-cifar10-moe",
+    in_channels=3,
+    dim=CIFAR10_DIM,
+    patch_size=4,
+    depth=12,
+    nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
+    num_kv_heads=CIFAR10_DIM // CIFAR10_HEAD_DIM,
+    dropout=0.1,
+    num_experts=64,
+    # 1 slot per token
+    num_slots=64,
+    moe_start_depth=11,
+)
+
+
+BACKBONES(
+    ViT,
+    name="vit-cifar10-moe-small",
+    in_channels=3,
+    dim=CIFAR10_DIM // 2,
+    patch_size=4,
+    depth=12,
+    nhead=CIFAR10_DIM // 2 // CIFAR10_HEAD_DIM,
+    num_kv_heads=CIFAR10_DIM // 2 // CIFAR10_HEAD_DIM,
+    dropout=0.1,
+    num_experts=64,
+    # 1 slot per token
+    num_slots=64,
+    moe_start_depth=10,
+)
+
+
 BACKBONES(
     AdaptiveViT,
     name="vit-cifar10-adaptive",

@@ -9,6 +9,7 @@ from .kernels.relu2 import ReLU2
 from .layer_scale import LayerScale
 from .lora import LoRATarget, SupportsLoRA, apply_lora, freeze_non_lora
 from .mlp import MLP
+from .soft_moe import SoftMoE
 
 
 class TransformerEncoderLayer(nn.Module, SupportsLoRA):
@@ -26,6 +27,8 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
         qk_norm: bool = False,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         layer_scale: float | None = None,
+        num_experts: int | None = None,
+        num_slots: int | None = None,
     ):
         super().__init__()
         self.nhead = nhead
@@ -49,7 +52,7 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
             k_norm=norm_layer(head_dim, eps=layer_norm_eps) if qk_norm else None,
         )
 
-        self.mlp = MLP(
+        mlp = MLP(
             d_model,
             dim_feedforward,
             d_model,
@@ -58,6 +61,12 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
             gate_activation,
             bias=False,
         )
+        if (num_experts is None) != (num_slots is None):
+            raise ValueError("num_experts and num_slots must be both set or both None")
+        elif num_experts is not None and num_slots is not None:
+            self.mlp = SoftMoE(mlp, d_model, num_experts, num_slots, nhead, dropout=dropout)
+        else:
+            self.mlp = mlp
 
         self.norm1 = norm_layer(d_model, eps=layer_norm_eps)
         self.norm2 = norm_layer(d_model, eps=layer_norm_eps)
@@ -141,6 +150,8 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
         qk_norm: bool = False,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         layer_scale: float | None = None,
+        num_experts: int | None = None,
+        num_slots: int | None = None,
     ):
         super().__init__()
         d_kv = d_kv or d_model
@@ -178,7 +189,7 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
             k_norm=norm_layer(head_dim, eps=layer_norm_eps) if qk_norm else None,
         )
 
-        self.mlp = MLP(
+        mlp = MLP(
             d_model,
             dim_feedforward,
             d_model,
@@ -187,6 +198,12 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
             gate_activation,
             bias=False,
         )
+        if (num_experts is None) != (num_slots is None):
+            raise ValueError("num_experts and num_slots must be both set or both None")
+        elif num_experts is not None and num_slots is not None:
+            self.mlp = SoftMoE(mlp, d_model, num_experts, num_slots, nhead, dropout=dropout)
+        else:
+            self.mlp = mlp
 
         self.norm1 = norm_layer(d_model, eps=layer_norm_eps)
         self.norm2 = norm_layer(d_model, eps=layer_norm_eps)
@@ -210,12 +227,12 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
         self.mlp.reset_parameters()
 
         # Layer scale
-        for scale in (self.layer_scale_attn, self.layer_scale_mlp):
+        for scale in (self.layer_scale_attn, self.layer_scale_cross, self.layer_scale_mlp):
             if hasattr(scale, "reset_parameters"):
                 scale.reset_parameters()
 
         # Norm
-        for norm in (self.norm1, self.norm2):
+        for norm in (self.norm1, self.norm2, self.norm3):
             if hasattr(norm, "reset_parameters"):
                 norm.reset_parameters()
 
