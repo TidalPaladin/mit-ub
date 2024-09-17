@@ -35,8 +35,10 @@ class TestTransformerEncoderLayer:
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(x)
         assert out.shape == x.shape
-        assert isinstance(layer.activation, type(activation))
-        assert gate_activation is None or (layer.gate is not None and isinstance(layer.gate[-1], type(gate_activation)))
+        assert isinstance(layer.mlp.activation, type(activation))
+        assert gate_activation is None or (
+            layer.mlp.gate is not None and isinstance(layer.mlp.gate[-1], type(gate_activation))
+        )
 
     def test_forward_multi_query(self):
         B, L, D = 1, 128, 128
@@ -95,10 +97,10 @@ class TestTransformerEncoderLayer:
         layer = layer.apply_lora(target=target, rank=4, alpha=16)
 
         if LoRATarget.FEEDFORWARD in target:
-            assert isinstance(layer.linear1, LoRALinear)
-            assert isinstance(layer.linear2, LoRALinear)
+            assert isinstance(layer.mlp.fc1, LoRALinear)
+            assert isinstance(layer.mlp.fc2, LoRALinear)
             if gate_activation is not None:
-                assert isinstance(layer.gate[0], LoRALinear)
+                assert isinstance(layer.mlp.gate[0], LoRALinear)
         if LoRATarget.ATTENTION in target:
             assert isinstance(layer.self_attn.q_proj, LoRALinear)
             assert isinstance(layer.self_attn.k_proj, LoRALinear)
@@ -143,8 +145,10 @@ class TestTransformerDecoderLayer:
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(q, k)
         assert out.shape == q.shape
-        assert isinstance(layer.activation, type(activation))
-        assert gate_activation is None or (layer.gate is not None and isinstance(layer.gate[-1], type(gate_activation)))
+        assert isinstance(layer.mlp.activation, type(activation))
+        assert gate_activation is None or (
+            layer.mlp.gate is not None and isinstance(layer.mlp.gate[-1], type(gate_activation))
+        )
 
     def test_forward_multi_query(self):
         B, Lq, Dq = 1, 64, 128
@@ -213,10 +217,10 @@ class TestTransformerDecoderLayer:
         layer = layer.apply_lora(target=target, rank=4, alpha=16)
 
         if LoRATarget.FEEDFORWARD in target:
-            assert isinstance(layer.linear1, LoRALinear)
-            assert isinstance(layer.linear2, LoRALinear)
+            assert isinstance(layer.mlp.fc1, LoRALinear)
+            assert isinstance(layer.mlp.fc2, LoRALinear)
             if gate_activation is not None:
-                assert isinstance(layer.gate[0], LoRALinear)
+                assert isinstance(layer.mlp.gate[0], LoRALinear)
         if LoRATarget.ATTENTION in target:
             for attn in (layer.self_attn, layer.cross_attn):
                 assert isinstance(attn.q_proj, LoRALinear)
