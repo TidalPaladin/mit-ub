@@ -1,6 +1,6 @@
 from abc import abstractmethod
 from enum import StrEnum
-from typing import Final, Protocol, Sequence, Tuple, TypeVar, runtime_checkable
+from typing import Final, Protocol, Sequence, Tuple, TypeVar, cast, runtime_checkable
 
 import torch
 import torch.nn as nn
@@ -22,7 +22,7 @@ class LoRATarget(StrEnum):
 
 @torch.no_grad()
 def apply_lora(
-    target: nn.Linear | Tuple[Tensor, Tensor | None],
+    target: nn.Linear | LoRALinear | Tuple[Tensor, Tensor | None],
     rank: int,
     alpha: float,
     dropout: float = 0.0,
@@ -44,6 +44,8 @@ def apply_lora(
         # Extract w and b from the original linear layer
         w = target.weight
         b = target.bias
+    elif isinstance(target, LoRALinear):
+        return cast(nn.Module, target)
     else:
         w, b = target
 

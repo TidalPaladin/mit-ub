@@ -82,7 +82,7 @@ class TestLoRACallback:
 
         # Check that each LoRA capable module has an apply_lora call
         for name, spy in spies.items():
-            spy.assert_called_once_with(targets, rank, alpha, dropout, quantize_base)
+            spy.assert_called_with(targets, rank, alpha, dropout, quantize_base)
 
         # Check that the norm layer is frozen/unfrozen correctly
         for name, module in pl_module.backbone.named_modules():

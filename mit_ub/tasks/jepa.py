@@ -118,6 +118,8 @@ class JEPA(Task):
                 "Ensure the backbone has a TransformerEncoderLayer module."
             )
         self.jepa_predictor = nn.ModuleList([deepcopy(encoder_proto) for _ in range(predictor_depth)])
+        for block in self.jepa_predictor:
+            block.reset_parameters()
 
         self.contrastive_loss = PointwiseContrastiveEmbeddingLoss(margin=margin) if margin is not None else None
         self.save_hyperparameters()
