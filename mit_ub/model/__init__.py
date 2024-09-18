@@ -127,7 +127,7 @@ BACKBONES(
     num_experts=64,
     # 1 slot per token
     num_slots=64,
-    moe_start_depth=11,
+    moe_layers=[11],
 )
 
 
@@ -144,7 +144,7 @@ BACKBONES(
     num_experts=64,
     # 1 slot per token
     num_slots=64,
-    moe_start_depth=10,
+    moe_layers=[10, 11],
 )
 
 

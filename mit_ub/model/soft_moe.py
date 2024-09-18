@@ -69,24 +69,27 @@ class AttentionRouter(nn.Module):
     def head_dim(self) -> int:
         return self.dim // self.nhead
 
-    def forward(self, tokens: Tensor, expert_out: Tensor | None = None) -> Tensor:
+    def _dispatch(self, tokens: Tensor) -> Tensor:
         # Dispatch, queries are slots and key-values are tokens
-        if expert_out is None:
-            q = self.slot_query
-            k = self.dispatch_k_proj(tokens)
-            k = rearrange(k, "b l (h d) -> b h l d", h=self.nhead)
-            v = rearrange(tokens, "b l (h d) -> b h l d", h=self.nhead)
-            o = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0)
-            return rearrange(o, "b h l d -> b l (h d)")
+        q = self.slot_query
+        k = self.dispatch_k_proj(tokens)
+        k = rearrange(k, "b l (h d) -> b h l d", h=self.nhead)
+        v = rearrange(tokens, "b l (h d) -> b h l d", h=self.nhead)
+        o = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0)
+        return rearrange(o, "b h l d -> b l (h d)")
 
+    def _combine(self, tokens: Tensor, expert_out: Tensor) -> Tensor:
         # Combine, queries are tokens, keys are slots, values are slot expert outputs
-        else:
-            q = self.combine_q_proj(tokens)
-            q = rearrange(q, "b l (h d) -> b h l d", h=self.nhead)
-            k = self.slot_key
-            v = rearrange(expert_out, "b l (h d) -> b h l d", h=self.nhead)
-            o = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0)
-            return rearrange(o, "b h l d -> b l (h d)")
+        q = self.combine_q_proj(tokens)
+        q = rearrange(q, "b l (h d) -> b h l d", h=self.nhead)
+        k = self.slot_key
+        v = rearrange(expert_out, "b l (h d) -> b h l d", h=self.nhead)
+        o = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0)
+        o = rearrange(o, "b h l d -> b l (h d)")
+        return o
+
+    def forward(self, tokens: Tensor, expert_out: Tensor | None = None) -> Tensor:
+        return self._dispatch(tokens) if expert_out is None else self._combine(tokens, expert_out)
 
 
 class SoftMoE(nn.Module):
