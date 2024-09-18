@@ -16,6 +16,7 @@ from torch.distributed import is_initialized as dist_is_initialized
 
 from ..model import BACKBONES, AdaptiveViT, TransformerEncoderLayer, ViT
 from ..model.pos_enc import RelativeFactorizedPosition
+from ..model.soft_moe import SoftMoE
 
 
 class NormallyDistributed(nn.Module):
@@ -118,6 +119,9 @@ class JEPA(Task):
                 "Ensure the backbone has a TransformerEncoderLayer module."
             )
         self.jepa_predictor = nn.ModuleList([deepcopy(encoder_proto) for _ in range(predictor_depth)])
+        if isinstance(self.backbone.blocks[-1].mlp, SoftMoE):
+            self.jepa_predictor[-1] = deepcopy(self.backbone.blocks[-1])
+
         for block in self.jepa_predictor:
             block.reset_parameters()
 

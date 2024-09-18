@@ -171,7 +171,13 @@ class SoftMoE(nn.Module):
         assert slots[0].shape == (B, P, D)
 
         # Run each expert on its respective slots
-        output = torch.cat([expert(slot) for expert, slot in zip(self.experts, slots)], dim=-2)
+        output = torch.cat(
+            [
+                expert(slot) + slot 
+                for expert, slot in zip(self.experts, slots)
+            ], 
+            dim=-2,
+        )
         assert output.shape == (B, S, D)
 
         # Combine slots to tokens
