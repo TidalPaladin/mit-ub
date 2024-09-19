@@ -41,6 +41,24 @@ class NormallyDistributed(nn.Module):
         return total_loss
 
 
+def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: int, eps: float = 1e-6) -> Tensor:
+    r"""Compute the average pairwise cosine similarity without manifesting the full pairwise matrix.
+
+    To avoid quadratic memory usage we compute average cosine similarity as the squared norm of the mean vector.
+
+    Args:
+        x: The input tensor.
+        pairwise_dim: The dimension over which to compute the average pairwise cosine similarity.
+        embed_dim: The dimension to normalize the vectors to before computing the cosine similarity.
+        eps: A small constant to avoid division by zero.
+    """
+    N = x.shape[pairwise_dim]
+    x = x / x.norm(dim=embed_dim, keepdim=True) + eps
+    y = x.mean(pairwise_dim, keepdim=True).norm(dim=embed_dim, keepdim=True).pow(2).squeeze(embed_dim, pairwise_dim)
+    y.sub(1 / N).mul(N / (N - 1))
+    return y
+
+
 class JEPA(Task):
     backbone: ViT | AdaptiveViT
 
@@ -250,6 +268,8 @@ class JEPA(Task):
         metrics: Optional[tm.MetricCollection] = None,
     ) -> Dict[str, Any]:
         x: Tensor = batch["img"]
+        N = x.shape[0]
+        self.backbone.dim
 
         # ema update from previous step when training
         if state.mode == Mode.TRAIN:
@@ -276,7 +296,6 @@ class JEPA(Task):
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
         if isinstance(self.jepa_loss, nn.CosineEmbeddingLoss):
-            N = pred.shape[0]
             loss = self.jepa_loss(pred.view(N, -1), target.view(N, -1), target.new_full((N,), 1, dtype=torch.long))
         elif isinstance(self.jepa_loss, nn.MSELoss):
             loss = self.jepa_loss(pred, target)
@@ -299,11 +318,13 @@ class JEPA(Task):
         else:
             loss_contrastive = None
 
-        # calculate descriptive statistics for target
+        # Feature vector diversity metrics
         with torch.no_grad():
-            target_var, target_mean = torch.var_mean(target.view(-1, self.backbone.dim), dim=-1)
-            target_var = target_var.mean()
-            target_mean = target_mean.mean()
+            example_sim = average_pairwise_cosine_similarity(target.mean(1), 0, 1)
+            assert example_sim.numel() == 1
+
+            token_sim = average_pairwise_cosine_similarity(target, 1, 2).mean()
+            assert token_sim.numel() == 1
 
         # combine prediction and target into a single tensor that requires grad.
         # this can be used with a supervised loss to backprop through the backbone.
@@ -312,8 +333,8 @@ class JEPA(Task):
         output = {
             "log": {
                 "loss_jepa": loss,
-                "var": target_var,
-                "mean": target_mean,
+                "example_sim": example_sim,
+                "token_sim": token_sim,
             },
             "jepa_pred": pred,
             "target": target,
