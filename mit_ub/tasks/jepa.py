@@ -19,29 +19,6 @@ from ..model import BACKBONES, AdaptiveViT, TransformerEncoderLayer, ViT
 from ..model.pos_enc import RelativeFactorizedPosition
 
 
-class NormallyDistributed(nn.Module):
-    r"""Criterion that measures if a tensor is normally distributed.
-
-    The following factors are considered:
-        - Zero-mean
-        - Unit variance
-
-    Args:
-        dim: The dimension to measure the distribution of.
-    """
-
-    def __init__(self, dim: int | None = -1):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, x: Tensor) -> Tensor:
-        var, mean = torch.var_mean(x, dim=self.dim, unbiased=False, keepdim=True)
-        mean_loss = mean.abs().mean()
-        var_loss = (var - 1).abs().mean()
-        total_loss = mean_loss + var_loss
-        return total_loss
-
-
 def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: int, eps: float = 1e-6) -> Tensor:
     r"""Compute the average pairwise cosine similarity without manifesting the full pairwise matrix.
 
@@ -123,7 +100,6 @@ class JEPA(Task):
         activation_clip: float | None = None,
         margin: float | None = 0.5,
         loss_fn: str = "cosine",
-        distribution_loss: bool = False,
         predictor_depth: int = 4,
         dist_gather: bool = False,
         optimizer_init: Dict[str, Any] = {},
@@ -174,7 +150,6 @@ class JEPA(Task):
             case _:
                 raise ValueError(f"Unknown loss function: {loss_fn}, expected 'cosine' or 'mse'")
 
-        self.normally_distributed = NormallyDistributed() if distribution_loss else None
         self.jepa_query = nn.Parameter(torch.empty(1, 1, self.backbone.dim))
         torch.nn.init.trunc_normal_(self.jepa_query, mean=0, std=1)
 
@@ -348,9 +323,6 @@ class JEPA(Task):
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
         loss = self.jepa_loss(pred, target)
 
-        # compute distribution loss
-        loss_distribution = self.normally_distributed(pred) if self.normally_distributed is not None else None
-
         # compute contrastive loss for collapse mitigation
         if self.contrastive_loss is not None:
             # NOTE: It is empirically better to compute contrastive loss on the predictions
@@ -390,8 +362,6 @@ class JEPA(Task):
         }
         if loss_contrastive is not None:
             output["log"]["loss_contrastive"] = loss_contrastive
-        if loss_distribution is not None:
-            output["log"]["loss_distribution"] = loss_distribution
 
         if self.trainer.global_step % 100 == 0 or (not self.training and batch_idx == 0):
             with torch.no_grad():
@@ -425,7 +395,6 @@ class JEPAWithProbe(JEPA, ABC):
         activation_clip: float | None = None,
         margin: float | None = 0.5,
         loss_fn: str = "cosine",
-        distribution_loss: bool = False,
         predictor_depth: int = 4,
         dist_gather: bool = False,
         optimizer_init: Dict[str, Any] = {},
@@ -449,7 +418,6 @@ class JEPAWithProbe(JEPA, ABC):
             activation_clip,
             margin,
             loss_fn,
-            distribution_loss,
             predictor_depth,
             dist_gather,
             optimizer_init,
