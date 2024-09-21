@@ -101,6 +101,14 @@ def contrastive_loss(x: Tensor, margin: float = 0.0, eps: float = 1e-6) -> Tenso
     return cosine_sim
 
 
+def cosine_similarity_loss(x: Tensor, y: Tensor, eps: float = 1e-6) -> Tensor:
+    # NOTE: It is empirically better to compute cosine similarity by treating each example
+    # as an entire vector, vs using each feature vector individually.
+    N = x.shape[0]
+    y = 1 - F.cosine_similarity(x.view(N, -1), y.view(N, -1), dim=-1, eps=eps)
+    return y.mean()
+
+
 class JEPA(Task):
     backbone: ViT | AdaptiveViT
 
@@ -158,12 +166,13 @@ class JEPA(Task):
         for p in self.ema_backbone.parameters():
             p.requires_grad = False
 
-        if loss_fn == "cosine":
-            self.jepa_loss = nn.CosineEmbeddingLoss()
-        elif loss_fn == "mse":
-            self.jepa_loss = nn.MSELoss()
-        else:
-            raise ValueError(f"Unknown loss function: {loss_fn}, expected 'cosine' or 'mse'")
+        match loss_fn:
+            case "cosine":
+                self.jepa_loss = cosine_similarity_loss
+            case "mse":
+                self.jepa_loss = F.mse_loss
+            case _:
+                raise ValueError(f"Unknown loss function: {loss_fn}, expected 'cosine' or 'mse'")
 
         self.normally_distributed = NormallyDistributed() if distribution_loss else None
         self.jepa_query = nn.Parameter(torch.empty(1, 1, self.backbone.dim))
@@ -310,7 +319,7 @@ class JEPA(Task):
         metrics: Optional[tm.MetricCollection] = None,
     ) -> Dict[str, Any]:
         x: Tensor = batch["img"]
-        N = x.shape[0]
+        x.shape[0]
         self.backbone.dim
 
         # ema update from previous step when training
@@ -337,12 +346,7 @@ class JEPA(Task):
 
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
-        if isinstance(self.jepa_loss, nn.CosineEmbeddingLoss):
-            loss = self.jepa_loss(pred.view(N, -1), target.view(N, -1), target.new_full((N,), 1, dtype=torch.long))
-        elif isinstance(self.jepa_loss, nn.MSELoss):
-            loss = self.jepa_loss(pred, target)
-        else:
-            raise ValueError(f"Unknown loss function: {self.jepa_loss}")
+        loss = self.jepa_loss(pred, target)
 
         # compute distribution loss
         loss_distribution = self.normally_distributed(pred) if self.normally_distributed is not None else None
