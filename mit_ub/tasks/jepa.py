@@ -97,7 +97,6 @@ class JEPA(Task):
         target_ratio: float = 0.25,
         target_scale: int = 2,
         ema_alpha: float = 0.95,
-        activation_clip: float | None = None,
         margin: float | None = 0.5,
         loss_fn: str = "cosine",
         predictor_depth: int = 4,
@@ -125,7 +124,6 @@ class JEPA(Task):
             log_train_metrics_on_epoch,
             weight_decay_exemptions,
         )
-
         self.context_ratio = context_ratio
         self.context_scale = context_scale
         self.target_ratio = target_ratio
@@ -133,28 +131,16 @@ class JEPA(Task):
         assert self.context_ratio > 0
         assert self.target_ratio > 0
         self.ema_alpha = ema_alpha
-        self.activation_clip = activation_clip
-        assert self.activation_clip is None or self.activation_clip > 0
         self.dist_gather = dist_gather
 
+        # Backbone and EMA weights
         self.backbone = cast(ViT | AdaptiveViT, self.prepare_backbone(backbone))
         self.ema_backbone = deepcopy(self.backbone)
         for p in self.ema_backbone.parameters():
             p.requires_grad = False
 
-        match loss_fn:
-            case "cosine":
-                self.jepa_loss = cosine_similarity_loss
-            case "mse":
-                self.jepa_loss = F.mse_loss
-            case _:
-                raise ValueError(f"Unknown loss function: {loss_fn}, expected 'cosine' or 'mse'")
-
-        self.jepa_query = nn.Parameter(torch.empty(1, 1, self.backbone.dim))
-        torch.nn.init.trunc_normal_(self.jepa_query, mean=0, std=1)
-
+        # JEPA predictor, position encoding to initialize queries
         self.pos_enc = RelativeFactorizedPosition(len(self.backbone.stem.patch_size), self.backbone.dim)
-
         encoder_proto = next(filter(lambda l: isinstance(l, TransformerEncoderLayer), self.backbone.modules()), None)
         if encoder_proto is None:
             raise ValueError(
@@ -165,7 +151,18 @@ class JEPA(Task):
         for block in self.jepa_predictor:
             block.reset_parameters()
 
+        # Primary JEPA loss
+        match loss_fn:
+            case "cosine":
+                self.jepa_loss = cosine_similarity_loss
+            case "mse":
+                self.jepa_loss = F.mse_loss
+            case _:
+                raise ValueError(f"Unknown loss function: {loss_fn}, expected 'cosine' or 'mse'")
+
+        # Contrastive loss for collapse mitigation
         self.contrastive_loss = partial(contrastive_loss, margin=margin) if margin is not None else None
+
         self.save_hyperparameters()
 
     def prepare_backbone(self, name: str) -> nn.Module:
@@ -227,7 +224,6 @@ class JEPA(Task):
         tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
         query = self.pos_enc.from_grid(tokenized_size, B, proto=context, normalize=True, requires_grad=True)
         query = query.contiguous()
-        query += self.jepa_query.type_as(query)
 
         # Use xor mask to inject encoder context into queries that aren't part of the target mask.
         # Query now contains context only at locations that are not part of the target.
@@ -257,14 +253,22 @@ class JEPA(Task):
         return {"jepa": query, "jepa_context": dense_context}
 
     @torch.no_grad()
-    def update_ema(self):
+    def update_ema(self) -> None:
+        """Update the Exponential Moving Average (EMA) of the backbone parameters."""
         for i, (ema_param, param) in enumerate(zip(self.ema_backbone.parameters(), self.backbone.parameters())):
             ema_param.data.mul_(self.ema_alpha).add_(param.data, alpha=1 - self.ema_alpha)
             assert not ema_param.requires_grad
         self.synchronize_ema_weights()
 
     @torch.no_grad()
-    def synchronize_ema_weights(self):
+    def synchronize_ema_weights(self) -> None:
+        """
+        Synchronize the Exponential Moving Average (EMA) weights across all processes.
+
+        This method ensures that the EMA weights are consistent across all processes
+        in a distributed training setup. It uses barriers to avoid sporadic deadlocks
+        in Distributed Data Parallel (DDP) training.
+        """
         if self.trainer.world_size > 1:
             for ema_param in self.ema_backbone.parameters():
                 # There seems to be sporadic deadlocks in DDP, so we use barriers to keep things synchronized
@@ -272,11 +276,6 @@ class JEPA(Task):
                 all_reduce(ema_param.data, op=ReduceOp.SUM)
                 ema_param.data /= self.trainer.world_size
             dist_barrier()
-
-    def clip_activations(self, x: Tensor) -> Tensor:
-        if self.activation_clip is None:
-            return x
-        return torch.clip(x, -self.activation_clip, self.activation_clip)
 
     def step(
         self,
@@ -303,7 +302,6 @@ class JEPA(Task):
             self.ema_backbone.eval()
             full_target: Tensor = self.ema_backbone(x, reshape=False)
             target = target_mask.apply_to_tokens(full_target, fill_value=None)
-            target = self.clip_activations(target)
 
         # generate predictions by encoding the context and then running the encoded context
         # plus the positional target queries through the predictor
@@ -374,7 +372,6 @@ class JEPAWithProbe(JEPA, ABC):
         target_ratio: float = 0.25,
         target_scale: int = 2,
         ema_alpha: float = 0.95,
-        activation_clip: float | None = None,
         margin: float | None = 0.5,
         loss_fn: str = "cosine",
         predictor_depth: int = 4,
@@ -397,7 +394,6 @@ class JEPAWithProbe(JEPA, ABC):
             target_ratio,
             target_scale,
             ema_alpha,
-            activation_clip,
             margin,
             loss_fn,
             predictor_depth,
