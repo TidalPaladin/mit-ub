@@ -87,6 +87,40 @@ def cosine_similarity_loss(x: Tensor, y: Tensor, eps: float = 1e-6) -> Tensor:
 
 
 class JEPA(Task):
+    """
+    Joint Embedding Predictive Architecture (JEPA) Task.
+
+    This class implements the JEPA task, which involves predicting target embeddings
+    from context embeddings using a backbone model. The task also includes an Exponential
+    Moving Average (EMA) of the backbone parameters for stable target generation.
+
+    Args:
+        backbone: Name of the backbone to use for the task.
+        context_ratio: Ratio of the input to sample as context.
+        context_scale: Integer scale at which to sample contiguous blocks of context tokens.
+            Increasing this ensures more adjacent tokens appear together in the context.
+        target_ratio: Ratio of the input to sample as a prediction target.
+        target_scale: Integer scale at which to sample contiguous blocks of target tokens.
+            Increasing this ensures more adjacent tokens appear together in the target.
+        ema_alpha: Smoothing factor for EMA updates.
+        margin: If not ``None``, a margin between `0` and `1` controlling the desired
+            minimum cosine similarity between embeddings. A value of ``0.5`` is recommended.
+        loss_fn: Loss function to use for training. Can be ``"cosine"`` or ``"mse"``.
+            Cosine similarity loss is recommended.
+        predictor_depth: Depth of the predictor network.
+        dist_gather: Whether to gather tensors from all GPUs when computing the contrastive loss.
+        optimizer_init: Initial configuration for the optimizer.
+        lr_scheduler_init: Initial configuration for the learning rate scheduler.
+        lr_interval: Frequency of learning rate update. Can be 'step' or 'epoch'.
+        lr_monitor: Quantity to monitor for learning rate scheduler.
+        named_datasets: If True, datasets are named, else they are indexed by integers.
+        checkpoint: Path to the checkpoint file to initialize the model.
+        strict_checkpoint: If True, the model must exactly match the checkpoint.
+        log_train_metrics_interval: Interval (in steps) at which to log training metrics.
+        log_train_metrics_on_epoch: If True, log training metrics at the end of each epoch.
+        weight_decay_exemptions: Set of parameter names to exempt from weight decay.
+    """
+
     backbone: ViT | AdaptiveViT
 
     def __init__(
