@@ -60,7 +60,7 @@ def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: 
     return y
 
 
-@torch.compile(fullgraph=True, mode="max-autotune")
+@torch.compile(fullgraph=True)
 def contrastive_loss(x: Tensor, margin: float = 0.0, eps: float = 1e-6) -> Tensor:
     r"""Compute the pairwise contrastive loss for a set of embeddings.
 
