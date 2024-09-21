@@ -349,6 +349,8 @@ class JEPA(Task):
 
         # compute contrastive loss for collapse mitigation
         if self.contrastive_loss is not None:
+            # NOTE: It is empirically better to compute contrastive loss on the predictions
+            # rather than the context, though the difference is small.
             pred_pool = pred.mean(1)
 
             # Gather average-pooled predictions from all GPUs if requested
