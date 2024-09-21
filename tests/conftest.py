@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 import torch
 from pytorch_lightning.loggers import WandbLogger
+from torch._dynamo import config
 from torch_dicom.preprocessing.datamodule import PreprocessedDataModule
 from torch_dicom.testing import MammogramTestFactory
 from torchvision.datasets import CIFAR10
@@ -99,3 +100,8 @@ def cifar10_datamodule(tmp_path, mock_cifar10):
         batch_size=4,
         num_workers=0,
     )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def torch_compile_cache_size():
+    config.cache_size_limit = 64

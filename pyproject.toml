@@ -111,6 +111,7 @@ filterwarnings = [
 
 [tool.pytest_env]
 TRITON_DEBUG = "1"
+TORCH_LOGS = "recompiles,dynamic"
 
 [tool.coverage.report]
 exclude_lines = [
