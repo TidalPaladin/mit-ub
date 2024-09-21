@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from functools import partial
-from typing import Any, Dict, Optional, Set, Tuple, cast
+from typing import Any, Dict, Optional, Set, cast
 
 import torch
 import torch.nn as nn
@@ -209,7 +209,13 @@ class JEPA(Task):
 
     def create_metrics(self, state: State) -> tm.MetricCollection:
         r"""Gets a MetricCollection for a given state"""
-        return tm.MetricCollection({})
+        return tm.MetricCollection(
+            {
+                "example_sim": tm.MeanMetric(),
+                "token_sim": tm.MeanMetric(),
+                "variance": tm.MeanMetric(),
+            }
+        )
 
     def forward(self, x: Tensor, context_mask: TokenMask, target_mask: TokenMask) -> Dict[str, Tensor]:
         # Run encoder on context and broadcast back to full size with 0 padding
@@ -266,20 +272,6 @@ class JEPA(Task):
                 all_reduce(ema_param.data, op=ReduceOp.SUM)
                 ema_param.data /= self.trainer.world_size
             dist_barrier()
-
-    @torch.no_grad()
-    def weight_histogram(self, module: nn.Module, bins: int = 100) -> Tuple[Tensor, Tensor]:
-        r"""Create a histogram of weights in a given module."""
-        weights = torch.cat([p.detach().float().ravel() for p in module.parameters() if p.requires_grad])
-        result = tuple(t.cpu().numpy() for t in torch.histogram(weights.cpu(), bins=bins))
-        return cast(Tuple[Tensor, Tensor], result)
-
-    @torch.no_grad()
-    def tensor_histogram(self, tensor: Tensor, bins: int = 100) -> Tuple[Tensor, Tensor]:
-        r"""Create a histogram of weights in a given module."""
-        tensor = tensor[~tensor.isnan()].detach().float().ravel()
-        result = tuple(t.cpu().numpy() for t in torch.histogram(tensor.cpu(), bins=bins))
-        return cast(Tuple[Tensor, Tensor], result)
 
     def clip_activations(self, x: Tensor) -> Tensor:
         if self.activation_clip is None:
@@ -338,13 +330,15 @@ class JEPA(Task):
         else:
             loss_contrastive = None
 
-        # Feature vector diversity metrics
+        # Compute metrics
         with torch.no_grad():
-            example_sim = average_pairwise_cosine_similarity(target.mean(1), 0, 1)
-            assert example_sim.numel() == 1
-
-            token_sim = average_pairwise_cosine_similarity(target, 1, 2).mean()
-            assert token_sim.numel() == 1
+            assert metrics is not None
+            example_sim = average_pairwise_cosine_similarity(full_target.mean(1), 0, 1)
+            metrics["example_sim"].update(example_sim)
+            token_sim = average_pairwise_cosine_similarity(full_target, 1, 2)
+            metrics["token_sim"].update(token_sim)
+            variance = full_target.var(-1)
+            metrics["variance"].update(variance)
 
         # combine prediction and target into a single tensor that requires grad.
         # this can be used with a supervised loss to backprop through the backbone.
@@ -353,8 +347,6 @@ class JEPA(Task):
         output = {
             "log": {
                 "loss_jepa": loss,
-                "example_sim": example_sim,
-                "token_sim": token_sim,
             },
             "jepa_pred": pred,
             "target": target,
@@ -362,16 +354,6 @@ class JEPA(Task):
         }
         if loss_contrastive is not None:
             output["log"]["loss_contrastive"] = loss_contrastive
-
-        if self.trainer.global_step % 100 == 0 or (not self.training and batch_idx == 0):
-            with torch.no_grad():
-                target_std = target.std(dim=0)
-                histograms = {
-                    "target_hist": self.tensor_histogram(target),
-                    "pred_hist": self.tensor_histogram(pred),
-                    "std_hist": self.tensor_histogram(target_std),
-                }
-                output.update(**histograms)
 
         return output
 
@@ -435,10 +417,6 @@ class JEPAWithProbe(JEPA, ABC):
 
     @abstractmethod
     def create_probe_head(self) -> nn.Module:
-        raise NotImplementedError  # pragma: no cover
-
-    @abstractmethod
-    def create_metrics(self, state: State) -> tm.MetricCollection:
         raise NotImplementedError  # pragma: no cover
 
     @abstractmethod

@@ -179,11 +179,9 @@ class JEPAWithClassification(JEPAWithProbe):
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
-        return tm.MetricCollection(
-            {
-                "acc": tm.Accuracy(task="multiclass", num_classes=self.num_classes),
-            }
-        )
+        metrics = super().create_metrics(*args, **kwargs)
+        metrics.add_metrics({"acc": tm.Accuracy(task="multiclass", num_classes=self.num_classes)})
+        return metrics
 
     @torch.no_grad()
     def create_gt(self, batch: Dict[str, Any]) -> Tensor:

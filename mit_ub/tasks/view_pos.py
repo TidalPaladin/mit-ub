@@ -64,7 +64,9 @@ class JEPAWithViewPosition(JEPAWithProbe):
         return nn.Linear(self.backbone.dim, 1)
 
     def create_metrics(self, state: State) -> tm.MetricCollection:
-        return tm.MetricCollection({"view_pos_acc": tm.Accuracy(task="binary")})
+        metrics = super().create_metrics(state)
+        metrics.add_metrics({"view_pos_acc": tm.Accuracy(task="binary")})
+        return metrics
 
     @torch.no_grad()
     def create_view_pos_gt(self, batch: Dict[str, Any]) -> Tensor:
