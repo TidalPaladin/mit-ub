@@ -50,7 +50,7 @@ def _check_weights_sum_to_one(weights: Tensor, tol: float = 0.01) -> None:
 
 
 def _str_or_bool(value: Any) -> bool:
-    return value.lower() == "true" if isinstance(value, str) else bool(value)
+    return value.lower() in ("true", "malignant") if isinstance(value, str) else bool(value)
 
 
 def _get_case_metric_state(studies: Tensor, preds: Tensor, target: Tensor) -> Tuple[Tensor, Tensor]:
@@ -143,7 +143,6 @@ class TriageTask(Task):
 
     Args:
         backbone: Name of the backbone to use for the task.
-        crop_adjust: If True, adjust the global label for crops using the presence of malignant traces.
         optimizer_init: Initial configuration for the optimizer.
         lr_scheduler_init: Initial configuration for the learning rate scheduler.
         lr_interval: Frequency of learning rate update. Can be 'step' or 'epoch'.
@@ -159,7 +158,6 @@ class TriageTask(Task):
     def __init__(
         self,
         backbone: str,
-        crop_adjust: bool = False,
         focal_loss: bool = False,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
@@ -184,7 +182,6 @@ class TriageTask(Task):
             log_train_metrics_on_epoch,
             weight_decay_exemptions,
         )
-        self.crop_adjust = crop_adjust
 
         self.backbone = cast(ViT, self.prepare_backbone(backbone))
         dim = self.backbone.dim
@@ -211,22 +208,6 @@ class TriageTask(Task):
                 "auroc_case": CaseAUROC(dist_sync_on_step=state.mode != Mode.TRAIN),
                 "acc_case": CaseAccuracy(dist_sync_on_step=state.mode != Mode.TRAIN),
             }
-        )
-
-    @torch.no_grad()
-    def get_crop_mask(self, batch: Dict[str, Any]) -> Tensor:
-        """
-        Determines which examples in the batch are crops.
-
-        Args:
-            batch: The batch of examples.
-
-        Returns:
-            Mask of shape :math:`(B,)`, where :math:`B` is the batch size.
-        """
-        return torch.tensor(
-            ["_crop" in str(path) for path in batch["path"]],
-            device=self.device,
         )
 
     @torch.no_grad()
@@ -282,7 +263,7 @@ class TriageTask(Task):
         return batch
 
     @torch.no_grad()
-    def get_tensor_label(self, batch: Dict[str, Any], crop_adjust: bool = True) -> Tensor:
+    def get_tensor_label(self, batch: Dict[str, Any]) -> Tensor:
         """
         Extracts the label from the batch and converts it into a tensor.
 
@@ -294,57 +275,34 @@ class TriageTask(Task):
 
         Args:
             batch: The batch of examples.
-            crop_adjust: If True, adjust the label for crops.
 
         Returns:
             The tensor of labels of shape :math:`(B,)`, where :math:`B` is the batch size.
         """
         # Get the original label
         label = torch.tensor(
-            [_str_or_bool((example or {}).get("malignant", None)) for example in batch["annotation"]],
+            [_str_or_bool((example or {}).get("trait", None)) for example in batch["annotation"]],
             dtype=torch.float32,
             device=self.device,
         )
-        label[self.get_unknown_label_mask(batch, crop_adjust=False)] = UNKNOWN_INT
-
-        # Apply adjustment to crops
-        if crop_adjust:
-            # Determine which examples are crops and which examples have malignant traces
-            is_crop = self.get_crop_mask(batch)
-            has_malignant_trace = self.get_malignant_trace_mask(batch)
-            assert is_crop.shape == has_malignant_trace.shape == label.shape
-
-            # For examples that are crops we need to update the label.
-            # The following update is applied:
-            # - If the original label is positive and no malignant bounding box is present, the crop label is updated to unknown.
-            # Other cases are left unchanged.
-            label[is_crop & (label == 1) & (~has_malignant_trace)] = UNKNOWN_INT
-            assert not (
-                is_crop & (label == 1) & (~has_malignant_trace)
-            ).any(), "Crops with no malignant trace should have unknown label"
-
+        label[self.get_unknown_label_mask(batch)] = UNKNOWN_INT
         return label.float()
 
     @torch.no_grad()
-    def get_unknown_label_mask(self, batch: Dict[str, Any], crop_adjust: bool = True) -> Tensor:
+    def get_unknown_label_mask(self, batch: Dict[str, Any]) -> Tensor:
         r"""Returns a boolean mask indicating which examples have an unknown label.
 
         Args:
             batch: The batch of examples.
-            crop_adjust: If True, adjust the mask for crops.
 
         Returns:
             The boolean mask indicating which examples have an unknown label, with shape :math:`(B,)`,
             where :math:`B` is the batch size.
         """
         mask = torch.tensor(
-            [(example or {}).get("malignant", None) is None for example in batch["annotation"]],
+            [(example or {}).get("trait", None) in (None, "unknown") for example in batch["annotation"]],
             device=self.device,
         )
-
-        if crop_adjust:
-            label = self.get_tensor_label(batch)
-            mask = torch.where(label == UNKNOWN_INT, label, mask)
 
         return mask.bool()
 
@@ -379,7 +337,7 @@ class TriageTask(Task):
     ) -> Dict[str, Any]:
         batch = self.sanitize_boxes(batch)
         x = batch["img"]
-        y = self.get_tensor_label(batch, crop_adjust=self.crop_adjust)
+        y = self.get_tensor_label(batch)
 
         # forward pass
         result = self(x)
@@ -440,7 +398,6 @@ class BreastTriage(TriageTask):
     def __init__(
         self,
         backbone: str,
-        crop_adjust: bool = False,
         focal_loss: bool = False,
         pos_weight: float = 1.0,
         standard_view_weight: float = 1.0,
@@ -458,7 +415,6 @@ class BreastTriage(TriageTask):
     ):
         super().__init__(
             backbone,
-            crop_adjust,
             focal_loss,
             optimizer_init,
             lr_scheduler_init,

@@ -9,7 +9,7 @@ import yaml
 from deep_helpers.testing import checkpoint_factory
 from dicom_utils.dicom_factory import CompleteMammographyStudyFactory
 
-from mit_ub.tasks.triage import BreastTriage, entrypoint
+from mit_ub.tasks.triage import BreastTriage, TriageTask, entrypoint
 
 
 @pytest.fixture(scope="module")
@@ -65,12 +65,25 @@ def checkpoint(tmp_path, task, config):
     return path
 
 
+class TestTriageTask:
+    @pytest.fixture
+    def task(self, optimizer_init, backbone):
+        return TriageTask(backbone, optimizer_init=optimizer_init)
+
+    def test_fit(self, task, datamodule, logger):
+        trainer = pl.Trainer(
+            accelerator="cpu",
+            fast_dev_run=True,
+            logger=logger,
+        )
+        trainer.fit(task, datamodule=datamodule)
+
+
 class TestBreastTriage:
     @pytest.fixture
     def task(self, optimizer_init, backbone):
         return BreastTriage(backbone, optimizer_init=optimizer_init)
 
-    @pytest.mark.skip(reason="'malignant' key will be renamed soon")
     def test_fit(self, task, datamodule, logger):
         trainer = pl.Trainer(
             accelerator="cpu",
