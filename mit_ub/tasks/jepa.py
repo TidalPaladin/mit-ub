@@ -1,13 +1,14 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
+from functools import partial
 from typing import Any, Dict, Optional, Set, Tuple, cast
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
-from ssl_tasks.contrastive.loss import PointwiseContrastiveEmbeddingLoss
 from ssl_tasks.tokens import TokenMask
 from torch import Tensor
 from torch.distributed import ReduceOp, all_gather, all_reduce
@@ -57,6 +58,47 @@ def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: 
     y = x.mean(pairwise_dim, keepdim=True).norm(dim=embed_dim, keepdim=True).pow(2).squeeze(embed_dim, pairwise_dim)
     y.sub(1 / N).mul(N / (N - 1))
     return y
+
+
+@torch.compile(fullgraph=True, mode="max-autotune")
+def contrastive_loss(x: Tensor, margin: float = 0.0, eps: float = 1e-6) -> Tensor:
+    r"""Compute the pairwise contrastive loss for a set of embeddings.
+
+    Cosine similarity, with a margin, is computed between all pairs of embeddings in the input.
+    The diagonal is discarded since the loss should only be computed between unique pairs.
+    A margin between 0 and 1 is required because the output is clipped to avoid negative values,
+    which can exist for margin < 0.
+
+    Args:
+        x: Input embeddings.
+        margin: Clipping margin for cosine similarity. Should be between 0 and 1.
+        eps: A small constant to avoid division by zero.
+
+    Shapes:
+        - x: :math:`(..., L, D)` where :math:`L` is the sequence length and :math:`D` is the embedding dimension.
+        - Output: :math:`(...)`
+
+    Returns:
+        The computed contrastive loss.
+    """
+    if not 0 <= margin <= 1:
+        raise ValueError(f"Margin must be between 0 and 1, got {margin}")
+
+    L = x.shape[-2]
+    x = F.normalize(x, dim=-1, eps=eps)
+
+    # This is quadratic in the input length, but can be accelerated with a custom kernel.
+    # However, it seems to be very efficient with torch.compile so we'll leave as is.
+    cosine_sim = torch.einsum("...mk,...nk->...mn", x, x)
+    cosine_sim = cosine_sim.sub(margin).relu()
+
+    # Discard the diagonal (same-pairs)
+    diagonal_sum = (1 - margin) * L
+    cosine_sim = cosine_sim.sum(dim=(-1, -2)) - diagonal_sum
+
+    # Normalize by the number of unique pairs
+    cosine_sim = cosine_sim / (L * (L - 1))
+    return cosine_sim
 
 
 class JEPA(Task):
@@ -139,7 +181,7 @@ class JEPA(Task):
         for block in self.jepa_predictor:
             block.reset_parameters()
 
-        self.contrastive_loss = PointwiseContrastiveEmbeddingLoss(margin=margin) if margin is not None else None
+        self.contrastive_loss = partial(contrastive_loss, margin=margin) if margin is not None else None
         self.save_hyperparameters()
 
     def prepare_backbone(self, name: str) -> nn.Module:
@@ -314,7 +356,7 @@ class JEPA(Task):
                 gathered_preds = [torch.zeros_like(pred_pool) for _ in range(self.trainer.world_size)]
                 all_gather(gathered_preds, pred_pool)
                 pred_pool = torch.cat(gathered_preds, dim=0)
-            loss_contrastive = self.contrastive_loss(pred_pool, pred_pool).sum()
+            loss_contrastive = self.contrastive_loss(pred_pool)
         else:
             loss_contrastive = None
 
