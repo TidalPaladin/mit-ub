@@ -467,7 +467,7 @@ class JEPAWithProbe(JEPA, ABC):
         raise NotImplementedError  # pragma: no cover
 
     def get_probe_features_from_output(self, output: Dict[str, Any]) -> Tensor:
-        features: Tensor = output["combined"]
+        features: Tensor = output["full_target"]
         features = features.detach() if self.stop_grad else features
         assert features.requires_grad == (not self.stop_grad)
         return features
