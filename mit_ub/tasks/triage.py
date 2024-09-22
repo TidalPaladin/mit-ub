@@ -322,6 +322,9 @@ class TriageTask(Task):
         """
         unknown_label = self.get_unknown_label_mask(batch)
         num_known = (~unknown_label).sum().item()
+        if num_known == 0:
+            raise ValueError("No known labels in batch, cannot compute loss weight.")
+
         weight = torch.full_like(unknown_label, fill_value=1 / num_known, dtype=torch.float32)
         weight[unknown_label] = 0
         _check_weights_sum_to_one(weight)
