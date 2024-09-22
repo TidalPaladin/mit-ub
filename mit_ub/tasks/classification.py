@@ -146,7 +146,6 @@ class JEPAWithClassification(JEPAWithProbe):
         weight_decay_exemptions: Set[str] = set(),
     ):
         self.num_classes = num_classes
-        self.stop_grad = stop_grad
         super().__init__(
             backbone,
             context_ratio,
@@ -158,6 +157,7 @@ class JEPAWithClassification(JEPAWithProbe):
             loss_fn,
             predictor_depth,
             dist_gather,
+            stop_grad,
             optimizer_init,
             lr_scheduler_init,
             lr_interval,
@@ -190,7 +190,8 @@ class JEPAWithClassification(JEPAWithProbe):
         self, batch: Dict[str, Any], output: Dict[str, Any], metrics: tm.MetricCollection | None
     ) -> Dict[str, Any]:
         # Forward pass of linear probe using target features
-        features: Tensor = output["target"] if self.stop_grad else output["combined"]
+        features = self.get_probe_features_from_output(output)
+
         assert self.linear_probe is not None
         N = features.shape[0]
         linprobe_logits = self.linear_probe(features.mean(1).view(N, -1)).view(N, -1)

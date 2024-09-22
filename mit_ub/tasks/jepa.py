@@ -175,6 +175,7 @@ class JEPA(Task):
 
         # JEPA predictor, position encoding to initialize queries
         self.pos_enc = RelativeFactorizedPosition(len(self.backbone.stem.patch_size), self.backbone.dim)
+        nn.init.trunc_normal_(self.pos_enc.proj.bias)
         encoder_proto = next(filter(lambda l: isinstance(l, TransformerEncoderLayer), self.backbone.modules()), None)
         if encoder_proto is None:
             raise ValueError(
@@ -374,14 +375,21 @@ class JEPA(Task):
 
         # combine prediction and target into a single tensor that requires grad.
         # this can be used with a supervised loss to backprop through the backbone.
-        combined = full_target + context_mask.restore_tokens(context, 0)
+        combined = (
+            # EMA backbone outpu tis used as the baseline
+            context_mask.apply_to_tokens(full_target, fill_value=0.0)
+            # Add online context at relevant locations
+            + context_mask.restore_tokens(context, 0)
+        )
 
         output = {
             "log": {
                 "loss_jepa": loss,
             },
+            "context": context,
             "jepa_pred": pred,
             "target": target,
+            "full_target": full_target,
             "combined": combined,
         }
         if loss_contrastive is not None:
@@ -410,6 +418,7 @@ class JEPAWithProbe(JEPA, ABC):
         loss_fn: str = "cosine",
         predictor_depth: int = 4,
         dist_gather: bool = False,
+        stop_grad: bool = True,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -444,6 +453,7 @@ class JEPAWithProbe(JEPA, ABC):
             weight_decay_exemptions,
         )
         self.linear_probe = self.create_probe_head()
+        self.stop_grad = stop_grad
 
     @abstractmethod
     def create_probe_head(self) -> nn.Module:
@@ -455,6 +465,12 @@ class JEPAWithProbe(JEPA, ABC):
     ) -> Dict[str, Any]:
         r"""Compute the linear probe loss and update the metrics"""
         raise NotImplementedError  # pragma: no cover
+
+    def get_probe_features_from_output(self, output: Dict[str, Any]) -> Tensor:
+        features: Tensor = output["combined"]
+        features = features.detach() if self.stop_grad else features
+        assert features.requires_grad == (not self.stop_grad)
+        return features
 
     def step(
         self,

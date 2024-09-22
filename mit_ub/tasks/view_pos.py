@@ -24,6 +24,7 @@ class JEPAWithViewPosition(JEPAWithProbe):
         loss_fn: str = "cosine",
         predictor_depth: int = 4,
         dist_gather: bool = False,
+        stop_grad: bool = True,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -46,6 +47,7 @@ class JEPAWithViewPosition(JEPAWithProbe):
             loss_fn,
             predictor_depth,
             dist_gather,
+            stop_grad,
             optimizer_init,
             lr_scheduler_init,
             lr_interval,
@@ -76,7 +78,7 @@ class JEPAWithViewPosition(JEPAWithProbe):
         self, batch: Dict[str, Any], output: Dict[str, Any], metrics: tm.MetricCollection | None
     ) -> Dict[str, Any]:
         # Forward pass of linear probe using target features
-        features: Tensor = output["target"]
+        features = self.get_probe_features_from_output(output)
         assert self.linear_probe is not None
         N = features.shape[0]
         linprobe_logits = self.linear_probe(features.mean(1).view(N, -1)).view(N)
