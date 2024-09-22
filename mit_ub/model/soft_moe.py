@@ -6,6 +6,8 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
+from .layer_scale import LayerScale
+
 
 class AttentionRouter(nn.Module):
     """
@@ -40,6 +42,7 @@ class AttentionRouter(nn.Module):
         # Dispatch
         self.slot_query = nn.Parameter(torch.empty(1, nhead, num_slots, self.head_dim))
         self.dispatch_k_proj = nn.Linear(dim, dim, bias=False)
+        self.dispatch_v_proj = nn.Linear(dim, dim, bias=False)
 
         # Combine
         self.slot_key = nn.Parameter(torch.empty(1, nhead, num_slots, self.head_dim))
@@ -73,8 +76,9 @@ class AttentionRouter(nn.Module):
         # Dispatch, queries are slots and key-values are tokens
         q = self.slot_query
         k = self.dispatch_k_proj(tokens)
+        v = self.dispatch_v_proj(tokens)
         k = rearrange(k, "b l (h d) -> b h l d", h=self.nhead)
-        v = rearrange(tokens, "b l (h d) -> b h l d", h=self.nhead)
+        v = rearrange(v, "b l (h d) -> b h l d", h=self.nhead)
         o = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0)
         return rearrange(o, "b h l d -> b l (h d)")
 
@@ -90,6 +94,16 @@ class AttentionRouter(nn.Module):
 
     def forward(self, tokens: Tensor, expert_out: Tensor | None = None) -> Tensor:
         return self._dispatch(tokens) if expert_out is None else self._combine(tokens, expert_out)
+
+
+def _forward_experts(experts: nn.ModuleList, slots: Tensor) -> Tensor:
+    return torch.cat(
+        [
+            expert(slot)
+            for expert, slot in zip(experts, slots)
+        ], 
+        dim=-2,
+    )
 
 
 class SoftMoE(nn.Module):
@@ -171,13 +185,7 @@ class SoftMoE(nn.Module):
         assert slots[0].shape == (B, P, D)
 
         # Run each expert on its respective slots
-        output = torch.cat(
-            [
-                expert(slot) + slot 
-                for expert, slot in zip(self.experts, slots)
-            ], 
-            dim=-2,
-        )
+        output = _forward_experts(self.experts, slots)
         assert output.shape == (B, S, D)
 
         # Combine slots to tokens
