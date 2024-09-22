@@ -107,16 +107,26 @@ filterwarnings = [
   "ignore:.*GPU available but not used.*:UserWarning",
   "ignore:.*Invalid value for VR UI.*:UserWarning",
   "ignore:.*The length of the pixel data in the dataset .* indicates it contains excess padding.*:UserWarning",
+  "ignore:.*samples in targets,.*"
 ]
 
 [tool.pytest_env]
 TRITON_DEBUG = "1"
+TORCH_LOGS = "recompiles,dynamic"
+
+[tool.coverage.run]
+omit = [
+    "mit_ub/data/rotation.py",
+    "mit_ub/model/gqa.py",
+]
 
 [tool.coverage.report]
 exclude_lines = [
     "pragma: no cover",
     "@triton.jit"
 ]
+
+
 
 # Sample script config
 [project.scripts]

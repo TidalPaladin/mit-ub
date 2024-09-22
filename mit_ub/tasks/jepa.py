@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from functools import partial
-from typing import Any, Dict, Optional, Set, Tuple, cast
+from typing import Any, Dict, Optional, Set, cast
 
 import torch
 import torch.nn as nn
@@ -17,29 +17,6 @@ from torch.distributed import is_initialized as dist_is_initialized
 
 from ..model import BACKBONES, AdaptiveViT, TransformerEncoderLayer, ViT
 from ..model.pos_enc import RelativeFactorizedPosition
-
-
-class NormallyDistributed(nn.Module):
-    r"""Criterion that measures if a tensor is normally distributed.
-
-    The following factors are considered:
-        - Zero-mean
-        - Unit variance
-
-    Args:
-        dim: The dimension to measure the distribution of.
-    """
-
-    def __init__(self, dim: int | None = -1):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, x: Tensor) -> Tensor:
-        var, mean = torch.var_mean(x, dim=self.dim, unbiased=False, keepdim=True)
-        mean_loss = mean.abs().mean()
-        var_loss = (var - 1).abs().mean()
-        total_loss = mean_loss + var_loss
-        return total_loss
 
 
 def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: int, eps: float = 1e-6) -> Tensor:
@@ -101,7 +78,49 @@ def contrastive_loss(x: Tensor, margin: float = 0.0, eps: float = 1e-6) -> Tenso
     return cosine_sim
 
 
+def cosine_similarity_loss(x: Tensor, y: Tensor, eps: float = 1e-6) -> Tensor:
+    # NOTE: It is empirically better to compute cosine similarity by treating each example
+    # as an entire vector, vs using each feature vector individually.
+    N = x.shape[0]
+    y = 1 - F.cosine_similarity(x.view(N, -1), y.view(N, -1), dim=-1, eps=eps)
+    return y.mean()
+
+
 class JEPA(Task):
+    """
+    Joint Embedding Predictive Architecture (JEPA) Task.
+
+    This class implements the JEPA task, which involves predicting target embeddings
+    from context embeddings using a backbone model. The task also includes an Exponential
+    Moving Average (EMA) of the backbone parameters for stable target generation.
+
+    Args:
+        backbone: Name of the backbone to use for the task.
+        context_ratio: Ratio of the input to sample as context.
+        context_scale: Integer scale at which to sample contiguous blocks of context tokens.
+            Increasing this ensures more adjacent tokens appear together in the context.
+        target_ratio: Ratio of the input to sample as a prediction target.
+        target_scale: Integer scale at which to sample contiguous blocks of target tokens.
+            Increasing this ensures more adjacent tokens appear together in the target.
+        ema_alpha: Smoothing factor for EMA updates.
+        margin: If not ``None``, a margin between `0` and `1` controlling the desired
+            minimum cosine similarity between embeddings. A value of ``0.5`` is recommended.
+        loss_fn: Loss function to use for training. Can be ``"cosine"`` or ``"mse"``.
+            Cosine similarity loss is recommended.
+        predictor_depth: Depth of the predictor network.
+        dist_gather: Whether to gather tensors from all GPUs when computing the contrastive loss.
+        optimizer_init: Initial configuration for the optimizer.
+        lr_scheduler_init: Initial configuration for the learning rate scheduler.
+        lr_interval: Frequency of learning rate update. Can be 'step' or 'epoch'.
+        lr_monitor: Quantity to monitor for learning rate scheduler.
+        named_datasets: If True, datasets are named, else they are indexed by integers.
+        checkpoint: Path to the checkpoint file to initialize the model.
+        strict_checkpoint: If True, the model must exactly match the checkpoint.
+        log_train_metrics_interval: Interval (in steps) at which to log training metrics.
+        log_train_metrics_on_epoch: If True, log training metrics at the end of each epoch.
+        weight_decay_exemptions: Set of parameter names to exempt from weight decay.
+    """
+
     backbone: ViT | AdaptiveViT
 
     def __init__(
@@ -112,10 +131,8 @@ class JEPA(Task):
         target_ratio: float = 0.25,
         target_scale: int = 2,
         ema_alpha: float = 0.95,
-        activation_clip: float | None = None,
         margin: float | None = 0.5,
         loss_fn: str = "cosine",
-        distribution_loss: bool = False,
         predictor_depth: int = 4,
         dist_gather: bool = False,
         optimizer_init: Dict[str, Any] = {},
@@ -141,7 +158,6 @@ class JEPA(Task):
             log_train_metrics_on_epoch,
             weight_decay_exemptions,
         )
-
         self.context_ratio = context_ratio
         self.context_scale = context_scale
         self.target_ratio = target_ratio
@@ -149,28 +165,17 @@ class JEPA(Task):
         assert self.context_ratio > 0
         assert self.target_ratio > 0
         self.ema_alpha = ema_alpha
-        self.activation_clip = activation_clip
-        assert self.activation_clip is None or self.activation_clip > 0
         self.dist_gather = dist_gather
 
+        # Backbone and EMA weights
         self.backbone = cast(ViT | AdaptiveViT, self.prepare_backbone(backbone))
         self.ema_backbone = deepcopy(self.backbone)
         for p in self.ema_backbone.parameters():
             p.requires_grad = False
 
-        if loss_fn == "cosine":
-            self.jepa_loss = nn.CosineEmbeddingLoss()
-        elif loss_fn == "mse":
-            self.jepa_loss = nn.MSELoss()
-        else:
-            raise ValueError(f"Unknown loss function: {loss_fn}, expected 'cosine' or 'mse'")
-
-        self.normally_distributed = NormallyDistributed() if distribution_loss else None
-        self.jepa_query = nn.Parameter(torch.empty(1, 1, self.backbone.dim))
-        torch.nn.init.trunc_normal_(self.jepa_query, mean=0, std=1)
-
+        # JEPA predictor, position encoding to initialize queries
         self.pos_enc = RelativeFactorizedPosition(len(self.backbone.stem.patch_size), self.backbone.dim)
-
+        nn.init.trunc_normal_(self.pos_enc.proj.bias)
         encoder_proto = next(filter(lambda l: isinstance(l, TransformerEncoderLayer), self.backbone.modules()), None)
         if encoder_proto is None:
             raise ValueError(
@@ -181,7 +186,18 @@ class JEPA(Task):
         for block in self.jepa_predictor:
             block.reset_parameters()
 
+        # Primary JEPA loss
+        match loss_fn:
+            case "cosine":
+                self.jepa_loss = cosine_similarity_loss
+            case "mse":
+                self.jepa_loss = F.mse_loss
+            case _:
+                raise ValueError(f"Unknown loss function: {loss_fn}, expected 'cosine' or 'mse'")
+
+        # Contrastive loss for collapse mitigation
         self.contrastive_loss = partial(contrastive_loss, margin=margin) if margin is not None else None
+
         self.save_hyperparameters()
 
     def prepare_backbone(self, name: str) -> nn.Module:
@@ -225,7 +241,13 @@ class JEPA(Task):
 
     def create_metrics(self, state: State) -> tm.MetricCollection:
         r"""Gets a MetricCollection for a given state"""
-        return tm.MetricCollection({})
+        return tm.MetricCollection(
+            {
+                "example_sim": tm.MeanMetric(),
+                "token_sim": tm.MeanMetric(),
+                "variance": tm.MeanMetric(),
+            }
+        )
 
     def forward(self, x: Tensor, context_mask: TokenMask, target_mask: TokenMask) -> Dict[str, Tensor]:
         # Run encoder on context and broadcast back to full size with 0 padding
@@ -237,7 +259,6 @@ class JEPA(Task):
         tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
         query = self.pos_enc.from_grid(tokenized_size, B, proto=context, normalize=True, requires_grad=True)
         query = query.contiguous()
-        query += self.jepa_query.type_as(query)
 
         # Use xor mask to inject encoder context into queries that aren't part of the target mask.
         # Query now contains context only at locations that are not part of the target.
@@ -267,14 +288,22 @@ class JEPA(Task):
         return {"jepa": query, "jepa_context": dense_context}
 
     @torch.no_grad()
-    def update_ema(self):
+    def update_ema(self) -> None:
+        """Update the Exponential Moving Average (EMA) of the backbone parameters."""
         for i, (ema_param, param) in enumerate(zip(self.ema_backbone.parameters(), self.backbone.parameters())):
             ema_param.data.mul_(self.ema_alpha).add_(param.data, alpha=1 - self.ema_alpha)
             assert not ema_param.requires_grad
         self.synchronize_ema_weights()
 
     @torch.no_grad()
-    def synchronize_ema_weights(self):
+    def synchronize_ema_weights(self) -> None:
+        """
+        Synchronize the Exponential Moving Average (EMA) weights across all processes.
+
+        This method ensures that the EMA weights are consistent across all processes
+        in a distributed training setup. It uses barriers to avoid sporadic deadlocks
+        in Distributed Data Parallel (DDP) training.
+        """
         if self.trainer.world_size > 1:
             for ema_param in self.ema_backbone.parameters():
                 # There seems to be sporadic deadlocks in DDP, so we use barriers to keep things synchronized
@@ -282,25 +311,6 @@ class JEPA(Task):
                 all_reduce(ema_param.data, op=ReduceOp.SUM)
                 ema_param.data /= self.trainer.world_size
             dist_barrier()
-
-    @torch.no_grad()
-    def weight_histogram(self, module: nn.Module, bins: int = 100) -> Tuple[Tensor, Tensor]:
-        r"""Create a histogram of weights in a given module."""
-        weights = torch.cat([p.detach().float().ravel() for p in module.parameters() if p.requires_grad])
-        result = tuple(t.cpu().numpy() for t in torch.histogram(weights.cpu(), bins=bins))
-        return cast(Tuple[Tensor, Tensor], result)
-
-    @torch.no_grad()
-    def tensor_histogram(self, tensor: Tensor, bins: int = 100) -> Tuple[Tensor, Tensor]:
-        r"""Create a histogram of weights in a given module."""
-        tensor = tensor[~tensor.isnan()].detach().float().ravel()
-        result = tuple(t.cpu().numpy() for t in torch.histogram(tensor.cpu(), bins=bins))
-        return cast(Tuple[Tensor, Tensor], result)
-
-    def clip_activations(self, x: Tensor) -> Tensor:
-        if self.activation_clip is None:
-            return x
-        return torch.clip(x, -self.activation_clip, self.activation_clip)
 
     def step(
         self,
@@ -310,7 +320,7 @@ class JEPA(Task):
         metrics: Optional[tm.MetricCollection] = None,
     ) -> Dict[str, Any]:
         x: Tensor = batch["img"]
-        N = x.shape[0]
+        x.shape[0]
         self.backbone.dim
 
         # ema update from previous step when training
@@ -327,7 +337,6 @@ class JEPA(Task):
             self.ema_backbone.eval()
             full_target: Tensor = self.ema_backbone(x, reshape=False)
             target = target_mask.apply_to_tokens(full_target, fill_value=None)
-            target = self.clip_activations(target)
 
         # generate predictions by encoding the context and then running the encoded context
         # plus the positional target queries through the predictor
@@ -337,15 +346,7 @@ class JEPA(Task):
 
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
-        if isinstance(self.jepa_loss, nn.CosineEmbeddingLoss):
-            loss = self.jepa_loss(pred.view(N, -1), target.view(N, -1), target.new_full((N,), 1, dtype=torch.long))
-        elif isinstance(self.jepa_loss, nn.MSELoss):
-            loss = self.jepa_loss(pred, target)
-        else:
-            raise ValueError(f"Unknown loss function: {self.jepa_loss}")
-
-        # compute distribution loss
-        loss_distribution = self.normally_distributed(pred) if self.normally_distributed is not None else None
+        loss = self.jepa_loss(pred, target)
 
         # compute contrastive loss for collapse mitigation
         if self.contrastive_loss is not None:
@@ -362,42 +363,37 @@ class JEPA(Task):
         else:
             loss_contrastive = None
 
-        # Feature vector diversity metrics
+        # Compute metrics
         with torch.no_grad():
-            example_sim = average_pairwise_cosine_similarity(target.mean(1), 0, 1)
-            assert example_sim.numel() == 1
-
-            token_sim = average_pairwise_cosine_similarity(target, 1, 2).mean()
-            assert token_sim.numel() == 1
+            assert metrics is not None
+            example_sim = average_pairwise_cosine_similarity(full_target.mean(1), 0, 1)
+            metrics["example_sim"].update(example_sim)
+            token_sim = average_pairwise_cosine_similarity(full_target, 1, 2)
+            metrics["token_sim"].update(token_sim)
+            variance = full_target.var(-1)
+            metrics["variance"].update(variance)
 
         # combine prediction and target into a single tensor that requires grad.
         # this can be used with a supervised loss to backprop through the backbone.
-        combined = full_target + context_mask.restore_tokens(context, 0)
+        combined = (
+            # EMA backbone outpu tis used as the baseline
+            context_mask.apply_to_tokens(full_target, fill_value=0.0)
+            # Add online context at relevant locations
+            + context_mask.restore_tokens(context, 0)
+        )
 
         output = {
             "log": {
                 "loss_jepa": loss,
-                "example_sim": example_sim,
-                "token_sim": token_sim,
             },
+            "context": context,
             "jepa_pred": pred,
             "target": target,
+            "full_target": full_target,
             "combined": combined,
         }
         if loss_contrastive is not None:
             output["log"]["loss_contrastive"] = loss_contrastive
-        if loss_distribution is not None:
-            output["log"]["loss_distribution"] = loss_distribution
-
-        if self.trainer.global_step % 100 == 0 or (not self.training and batch_idx == 0):
-            with torch.no_grad():
-                target_std = target.std(dim=0)
-                histograms = {
-                    "target_hist": self.tensor_histogram(target),
-                    "pred_hist": self.tensor_histogram(pred),
-                    "std_hist": self.tensor_histogram(target_std),
-                }
-                output.update(**histograms)
 
         return output
 
@@ -418,10 +414,8 @@ class JEPAWithProbe(JEPA, ABC):
         target_ratio: float = 0.25,
         target_scale: int = 2,
         ema_alpha: float = 0.95,
-        activation_clip: float | None = None,
         margin: float | None = 0.5,
         loss_fn: str = "cosine",
-        distribution_loss: bool = False,
         predictor_depth: int = 4,
         dist_gather: bool = False,
         optimizer_init: Dict[str, Any] = {},
@@ -442,10 +436,8 @@ class JEPAWithProbe(JEPA, ABC):
             target_ratio,
             target_scale,
             ema_alpha,
-            activation_clip,
             margin,
             loss_fn,
-            distribution_loss,
             predictor_depth,
             dist_gather,
             optimizer_init,
@@ -466,15 +458,15 @@ class JEPAWithProbe(JEPA, ABC):
         raise NotImplementedError  # pragma: no cover
 
     @abstractmethod
-    def create_metrics(self, state: State) -> tm.MetricCollection:
-        raise NotImplementedError  # pragma: no cover
-
-    @abstractmethod
     def step_linear_probe(
         self, batch: Dict[str, Any], output: Dict[str, Any], metrics: tm.MetricCollection | None
     ) -> Dict[str, Any]:
         r"""Compute the linear probe loss and update the metrics"""
         raise NotImplementedError  # pragma: no cover
+
+    def get_probe_features_from_output(self, output: Dict[str, Any]) -> Tensor:
+        features: Tensor = output["full_target"].detach()
+        return features
 
     def step(
         self,

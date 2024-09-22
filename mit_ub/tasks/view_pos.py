@@ -20,10 +20,8 @@ class JEPAWithViewPosition(JEPAWithProbe):
         target_ratio: float = 0.25,
         target_scale: int = 2,
         ema_alpha: float = 0.95,
-        activation_clip: float | None = None,
         margin: float | None = 0.5,
         loss_fn: str = "cosine",
-        distribution_loss: bool = False,
         predictor_depth: int = 4,
         dist_gather: bool = False,
         optimizer_init: Dict[str, Any] = {},
@@ -44,10 +42,8 @@ class JEPAWithViewPosition(JEPAWithProbe):
             target_ratio,
             target_scale,
             ema_alpha,
-            activation_clip,
             margin,
             loss_fn,
-            distribution_loss,
             predictor_depth,
             dist_gather,
             optimizer_init,
@@ -66,7 +62,9 @@ class JEPAWithViewPosition(JEPAWithProbe):
         return nn.Linear(self.backbone.dim, 1)
 
     def create_metrics(self, state: State) -> tm.MetricCollection:
-        return tm.MetricCollection({"view_pos_acc": tm.Accuracy(task="binary")})
+        metrics = super().create_metrics(state)
+        metrics.add_metrics({"view_pos_acc": tm.Accuracy(task="binary")})
+        return metrics
 
     @torch.no_grad()
     def create_view_pos_gt(self, batch: Dict[str, Any]) -> Tensor:
@@ -78,7 +76,7 @@ class JEPAWithViewPosition(JEPAWithProbe):
         self, batch: Dict[str, Any], output: Dict[str, Any], metrics: tm.MetricCollection | None
     ) -> Dict[str, Any]:
         # Forward pass of linear probe using target features
-        features: Tensor = output["target"]
+        features = self.get_probe_features_from_output(output)
         assert self.linear_probe is not None
         N = features.shape[0]
         linprobe_logits = self.linear_probe(features.mean(1).view(N, -1)).view(N)

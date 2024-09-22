@@ -2,11 +2,26 @@ from copy import deepcopy
 from functools import partial
 from typing import Sequence, cast
 
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
-from .kernels.relu2 import ReLU2
 from .lora import LoRATarget, SupportsLoRA, apply_lora, freeze_non_lora
+
+
+@torch.compile(fullgraph=True)
+def relu2(x: Tensor) -> Tensor:
+    r"""Computes squared ReLU of an input."""
+    # NOTE: This is roughly as fast as the custom triton kernel
+    y = F.relu(x)
+    return y * y
+
+
+class ReLU2(nn.Module):
+
+    def forward(self, x: Tensor) -> Tensor:
+        return relu2(x)
 
 
 class MLP(nn.Module, SupportsLoRA):
