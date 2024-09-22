@@ -418,7 +418,6 @@ class JEPAWithProbe(JEPA, ABC):
         loss_fn: str = "cosine",
         predictor_depth: int = 4,
         dist_gather: bool = False,
-        stop_grad: bool = True,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -453,7 +452,6 @@ class JEPAWithProbe(JEPA, ABC):
             weight_decay_exemptions,
         )
         self.linear_probe = self.create_probe_head()
-        self.stop_grad = stop_grad
 
     @abstractmethod
     def create_probe_head(self) -> nn.Module:
@@ -467,9 +465,7 @@ class JEPAWithProbe(JEPA, ABC):
         raise NotImplementedError  # pragma: no cover
 
     def get_probe_features_from_output(self, output: Dict[str, Any]) -> Tensor:
-        features: Tensor = output["full_target"]
-        features = features.detach() if self.stop_grad else features
-        assert features.requires_grad == (not self.stop_grad)
+        features: Tensor = output["full_target"].detach()
         return features
 
     def step(
