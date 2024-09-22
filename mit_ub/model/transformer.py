@@ -5,10 +5,9 @@ import torch.nn as nn
 from torch import Tensor
 
 from .gqa import MultiHeadAttention
-from .kernels.relu2 import ReLU2
 from .layer_scale import LayerScale
 from .lora import LoRATarget, SupportsLoRA, apply_lora, freeze_non_lora
-from .mlp import MLP
+from .mlp import MLP, ReLU2
 from .soft_moe import SoftMoE
 
 

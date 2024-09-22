@@ -1,7 +1,42 @@
 import pytest
 import pytorch_lightning as pl
+import torch
+import torch.nn.functional as F
+from torch.testing import assert_close
 
-from mit_ub.tasks.jepa import JEPA
+from mit_ub.tasks.jepa import JEPA, average_pairwise_cosine_similarity, contrastive_loss
+
+
+def test_average_pairwise_cosine_similarity():
+    B, L, D = 10, 128, 32
+    torch.manual_seed(0)
+    x = torch.randn(B, L, D)
+
+    actual = average_pairwise_cosine_similarity(x, 1, 2)
+    expected = F.cosine_similarity(x.view(B, L, 1, D), x.view(B, 1, L, D), dim=-1).mean(dim=(1, 2))
+    assert_close(expected, actual)
+
+
+@pytest.mark.parametrize("margin", [0.0, 0.5])
+def test_contrastive_loss(margin):
+    B, L, D = 10, 128, 32
+    torch.manual_seed(0)
+    x = torch.randn(B, L, D)
+
+    expected = (
+        F.cosine_similarity(
+            x.view(B, L, 1, D),
+            x.view(B, 1, L, D),
+            dim=-1,
+            eps=1e-6,
+        )
+        .sub(margin)
+        .relu()
+    )
+    diagonal_sum = (1 - margin) * L
+    expected = (expected.sum(dim=(-1, -2)) - diagonal_sum) / (L * (L - 1))
+    actual = contrastive_loss(x, margin)
+    assert_close(expected, actual)
 
 
 class TestJEPA:

@@ -5,7 +5,7 @@ from einops import rearrange
 from ssl_tasks.tokens import TokenMask
 from torch import Tensor
 
-from .kernels.relu2 import ReLU2
+from .mlp import ReLU2
 from .stem import AdaptiveTokenizer2d, AdaptiveTokenizer3d, PatchEmbed2d, PatchEmbed3d
 from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
