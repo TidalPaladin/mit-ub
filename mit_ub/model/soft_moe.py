@@ -42,7 +42,6 @@ class AttentionRouter(nn.Module):
         # Dispatch
         self.slot_query = nn.Parameter(torch.empty(1, nhead, num_slots, self.head_dim))
         self.dispatch_k_proj = nn.Linear(dim, dim, bias=False)
-        self.dispatch_v_proj = nn.Linear(dim, dim, bias=False)
 
         # Combine
         self.slot_key = nn.Parameter(torch.empty(1, nhead, num_slots, self.head_dim))
@@ -76,7 +75,7 @@ class AttentionRouter(nn.Module):
         # Dispatch, queries are slots and key-values are tokens
         q = self.slot_query
         k = self.dispatch_k_proj(tokens)
-        v = self.dispatch_v_proj(tokens)
+        v = tokens
         k = rearrange(k, "b l (h d) -> b h l d", h=self.nhead)
         v = rearrange(v, "b l (h d) -> b h l d", h=self.nhead)
         o = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0)
@@ -99,7 +98,8 @@ class AttentionRouter(nn.Module):
 def _forward_experts(experts: nn.ModuleList, slots: Tensor) -> Tensor:
     return torch.cat(
         [
-            expert(slot)
+            # Residual connections seem to provide stability and improve performance
+            expert(slot) + slot
             for expert, slot in zip(experts, slots)
         ], 
         dim=-2,

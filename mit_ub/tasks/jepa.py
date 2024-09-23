@@ -176,7 +176,7 @@ class JEPA(Task):
 
         # JEPA predictor, position encoding to initialize queries
         self.pos_enc = RelativeFactorizedPosition(len(self.backbone.stem.patch_size), self.backbone.dim)
-        nn.init.trunc_normal_(self.pos_enc.proj.bias)
+        nn.init.trunc_normal_(self.pos_enc.proj.bias, std=0.02)
         encoder_proto = next(filter(lambda l: isinstance(l, TransformerEncoderLayer), self.backbone.modules()), None)
         if encoder_proto is None:
             raise ValueError(
@@ -184,6 +184,9 @@ class JEPA(Task):
                 "Ensure the backbone has a TransformerEncoderLayer module."
             )
         self.jepa_predictor = nn.ModuleList([deepcopy(encoder_proto) for _ in range(predictor_depth)])
+        #if isinstance(self.backbone.blocks[-1].mlp, SoftMoE):
+        #    self.jepa_predictor[-1] = deepcopy(self.backbone.blocks[-1])
+        #    self.jepa_predictor[-2] = deepcopy(self.backbone.blocks[-1])
 
         for block in self.jepa_predictor:
             block.reset_parameters()
@@ -264,9 +267,12 @@ class JEPA(Task):
 
         # Use xor mask to inject encoder context into queries that aren't part of the target mask.
         # Query now contains context only at locations that are not part of the target.
-        with torch.no_grad():
-            xor_mask = (context_mask.mask ^ target_mask.mask).unsqueeze_(-1)
-        query = torch.where(xor_mask, query, context)
+        #with torch.no_grad():
+        #    xor_mask = (context_mask.mask ^ target_mask.mask).unsqueeze_(-1)
+        #query = torch.where(xor_mask, query, context)
+        #query = torch.where(context_mask.mask.unsqueeze(-1), context, query)
+        query = torch.where(target_mask.mask.unsqueeze(-1), query, context)
+        #query = query + context
 
         # Create a context or target mask.
         # Since context and target may overlap, we may end up with an inconsistent number of tokens
