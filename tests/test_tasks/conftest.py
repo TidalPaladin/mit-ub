@@ -50,4 +50,10 @@ def vit_adaptive_dummy():
 
 @pytest.fixture(scope="session", params=["vit-dummy", "vit-adaptive-dummy"])
 def backbone(request):
+    if request.param == "vit-dummy":
+        request.getfixturevalue("vit_dummy")
+    elif request.param == "vit-adaptive-dummy":
+        request.getfixturevalue("vit_adaptive_dummy")
+    else:
+        pytest.fail(f"Unsupported backbone: {request.param}")
     return request.param
