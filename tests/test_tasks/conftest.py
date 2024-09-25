@@ -11,8 +11,8 @@ def optimizer_init():
     }
 
 
-@pytest.fixture(scope="session", params=["vit-dummy", "vit-adaptive-dummy"])
-def backbone(request):
+@pytest.fixture(scope="session")
+def vit_dummy():
     dim = 128
     BACKBONES(
         ViT,
@@ -25,6 +25,12 @@ def backbone(request):
         dropout=0.1,
         override=True,
     )
+    return "vit-dummy"
+
+
+@pytest.fixture(scope="session")
+def vit_adaptive_dummy():
+    dim = 128
     BACKBONES(
         AdaptiveViT,
         name="vit-adaptive-dummy",
@@ -39,4 +45,15 @@ def backbone(request):
         dropout=0.1,
         override=True,
     )
+    return "vit-adaptive-dummy"
+
+
+@pytest.fixture(scope="session", params=["vit-dummy", "vit-adaptive-dummy"])
+def backbone(request):
+    if request.param == "vit-dummy":
+        request.getfixturevalue("vit_dummy")
+    elif request.param == "vit-adaptive-dummy":
+        request.getfixturevalue("vit_adaptive_dummy")
+    else:
+        pytest.fail(f"Unsupported backbone: {request.param}")
     return request.param

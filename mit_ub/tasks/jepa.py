@@ -287,12 +287,26 @@ class JEPA(Task):
 
         return {"jepa": query, "jepa_context": dense_context}
 
+    def get_ema_momentum(self) -> float:
+        r"""Get the momentum for the EMA update based on the current step or epoch."""
+        # Try to determine a momentum schedule from ema_alpha to 1.0 over the course of training
+        if self.trainer.max_steps:
+            current = self.trainer.global_step
+            total = self.trainer.max_steps
+        elif self.trainer.max_epochs:
+            current = self.trainer.current_epoch
+            total = self.trainer.max_epochs
+        # Otherwise we can fall back to constant self.ema_alpha
+        else:
+            current = total = 1.0
+        return self.ema_alpha + (1 - self.ema_alpha) * (current / total)
+
     @torch.no_grad()
     def update_ema(self) -> None:
         """Update the Exponential Moving Average (EMA) of the backbone parameters."""
-        for i, (ema_param, param) in enumerate(zip(self.ema_backbone.parameters(), self.backbone.parameters())):
-            ema_param.data.mul_(self.ema_alpha).add_(param.data, alpha=1 - self.ema_alpha)
-            assert not ema_param.requires_grad
+        momentum = self.get_ema_momentum()
+        for ema_param, param in zip(self.ema_backbone.parameters(), self.backbone.parameters()):
+            ema_param.lerp_(param, 1 - momentum)
         self.synchronize_ema_weights()
 
     @torch.no_grad()
@@ -385,6 +399,7 @@ class JEPA(Task):
         output = {
             "log": {
                 "loss_jepa": loss,
+                "ema_momentum": self.get_ema_momentum(),
             },
             "context": context,
             "jepa_pred": pred,
