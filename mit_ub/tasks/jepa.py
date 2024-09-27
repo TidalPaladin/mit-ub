@@ -116,6 +116,7 @@ class JEPA(Task):
         assert self.context_ratio > 0
         assert self.target_ratio > 0
         self.ema_alpha = ema_alpha
+        self.min
 
         # Backbone and EMA weights
         self.backbone = cast(ViT | AdaptiveViT, self.prepare_backbone(backbone))
