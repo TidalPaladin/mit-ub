@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from typing import Any, Dict, Final, Optional, Set, cast
+from typing import Any, Dict, Final, Optional, Set, cast, Tuple
 
 import torch
 import torch.nn as nn
@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
+from deep_helpers.helpers import to_tuple
 from ssl_tasks.tokens import TokenMask
 from torch import Tensor
 from torch.distributed import ReduceOp, all_reduce
@@ -43,6 +44,25 @@ def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: 
 def cosine_similarity_loss(x: Tensor, y: Tensor, eps: float = EPS) -> Tensor:
     y = 1 - F.cosine_similarity(x, y, dim=-1, eps=eps)
     return y.mean()
+
+
+def sample_tokens(x: Tensor, ratio: float) -> Tensor:
+    B, L_in, _ = x.shape
+    L_out = int(L_in * ratio)
+
+    # Create array of token indices
+    token_idx = torch.arange(L_in).unsqueeze_(0).expand(B, -1)
+
+    # Create a random sort order for each example
+    sort_order = torch.rand_like(token_idx, dtype=torch.float32)
+
+    # Sort each example's tokens by it's random sort order
+    indices = torch.argsort(sort_order, dim=-1)[..., :L_out]
+    token_idx = torch.gather(token_idx, dim=-1, index=indices)
+
+    # Build final result with
+    batch_idx = torch.arange(B).view(B, 1).expand(-1, L_out)
+    return x[batch_idx.flatten(), token_idx.flatten()].view(B, L_out, -1).contiguous()
 
 
 class JEPA(Task):
@@ -84,6 +104,7 @@ class JEPA(Task):
         context_scale: int = 4,
         target_ratio: float = 0.25,
         target_scale: int = 2,
+        context_subsample_ratio: float = 0.5,
         ema_alpha: float = 0.95,
         predictor_depth: int = 4,
         optimizer_init: Dict[str, Any] = {},
@@ -113,10 +134,11 @@ class JEPA(Task):
         self.context_scale = context_scale
         self.target_ratio = target_ratio
         self.target_scale = target_scale
+        self.context_subsample_ratio = context_subsample_ratio
         assert self.context_ratio > 0
         assert self.target_ratio > 0
+        assert self.context_subsample_ratio > 0
         self.ema_alpha = ema_alpha
-        self.min
 
         # Backbone and EMA weights
         self.backbone = cast(ViT | AdaptiveViT, self.prepare_backbone(backbone))
@@ -126,12 +148,12 @@ class JEPA(Task):
 
         # Position encoding / initialization for prediction queries.
         self.pos_enc = RelativeFactorizedPosition(len(self.backbone.stem.patch_size), self.backbone.dim)
-        nn.init.trunc_normal_(self.pos_enc.proj.bias, std=0.02)
 
         # Projections for the input context and output predictions
         self.context_proj = nn.Linear(self.backbone.dim, self.backbone.dim)
         self.out_proj = nn.Sequential(
             nn.LayerNorm(self.backbone.dim),
+            nn.Dropout(0.1),
             nn.Linear(self.backbone.dim, self.backbone.dim),
         )
 
@@ -189,6 +211,9 @@ class JEPA(Task):
     def forward(self, x: Tensor, context_mask: TokenMask, target_mask: TokenMask) -> Dict[str, Tensor]:
         # Run encoder on context
         context: Tensor = self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
+
+        # Sample a subset of the context as input to the predictor and project
+        context = sample_tokens(context, self.context_subsample_ratio)
         context = self.context_proj(context)
 
         # Prepare positional encoding for target queries
@@ -316,6 +341,7 @@ class JEPAWithProbe(JEPA, ABC):
         context_scale: int = 4,
         target_ratio: float = 0.25,
         target_scale: int = 2,
+        context_subsample_ratio: float = 0.5,
         ema_alpha: float = 0.95,
         predictor_depth: int = 4,
         optimizer_init: Dict[str, Any] = {},
@@ -335,6 +361,7 @@ class JEPAWithProbe(JEPA, ABC):
             context_scale,
             target_ratio,
             target_scale,
+            context_subsample_ratio,
             ema_alpha,
             predictor_depth,
             optimizer_init,
