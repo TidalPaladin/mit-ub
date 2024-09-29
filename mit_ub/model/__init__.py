@@ -111,6 +111,8 @@ BACKBONES(
     nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     num_kv_heads=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     dropout=0.1,
+    position_noise=False,
+    stochastic_depth=0.1,
 )
 
 

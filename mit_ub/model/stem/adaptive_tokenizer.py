@@ -7,6 +7,7 @@ from einops.layers.torch import Rearrange
 from ssl_tasks.helpers import divide_tuple
 from torch import Tensor
 
+from ..mlp import ReLU2
 from ..pos_enc import RelativeFactorizedPosition
 from .patch_embed import PatchEmbed
 
@@ -29,6 +30,8 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         position_noise: bool = False,
         autocast: bool = False,
         pool_type: PoolType = PoolType.MAX,
+        dropout: float = 0.0,
+        activation: nn.Module = ReLU2(),
     ):
         super().__init__()
         self._target_shape = to_tuple(target_shape, 2)
@@ -51,8 +54,8 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         )
         self.norm = norm_layer(embed_dim)
         self.norm_kv = norm_layer(kv_dim)
-        self.pos_enc = RelativeFactorizedPosition(2, embed_dim)
-        self.pos_enc_kv = RelativeFactorizedPosition(2, kv_dim)
+        self.pos_enc = RelativeFactorizedPosition(2, embed_dim, dropout=dropout, activation=activation)
+        self.pos_enc_kv = RelativeFactorizedPosition(2, kv_dim, dropout=dropout, activation=activation)
 
     @property
     def patch_size(self) -> Tuple[int, int]:
@@ -107,6 +110,8 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         position_noise: bool = False,
         autocast: bool = False,
         pool_type: PoolType = PoolType.MAX,
+        dropout: float = 0.0,
+        activation: nn.Module = ReLU2(),
     ):
         super().__init__()
         self._target_shape = to_tuple(target_shape, 3)
@@ -127,8 +132,8 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         )
         self.norm = norm_layer(embed_dim)
         self.norm_kv = norm_layer(kv_dim)
-        self.pos_enc = RelativeFactorizedPosition(3, embed_dim)
-        self.pos_enc_kv = RelativeFactorizedPosition(3, kv_dim)
+        self.pos_enc = RelativeFactorizedPosition(3, embed_dim, dropout=dropout, activation=activation)
+        self.pos_enc_kv = RelativeFactorizedPosition(3, kv_dim, dropout=dropout, activation=activation)
 
     @property
     def patch_size(self) -> Tuple[int, int, int]:

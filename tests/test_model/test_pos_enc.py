@@ -68,7 +68,8 @@ class TestRelativeFactorizedPosition:
         grid = torch.randn(B, L, C, device=device, requires_grad=True)
 
         layer = layer.apply_lora(target=[LoRATarget.POSITION], rank=4, alpha=16)
-        assert isinstance(layer.proj, LoRALinear)
+        assert isinstance(layer.proj.fc1, LoRALinear)
+        assert isinstance(layer.proj.fc2, LoRALinear)
 
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(grid)

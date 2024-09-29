@@ -3,6 +3,7 @@ from typing import Sequence, Type, cast
 
 import torch.nn as nn
 from torch import Tensor
+from torchvision.ops import StochasticDepth
 
 from .gqa import MultiHeadAttention
 from .layer_scale import LayerScale
@@ -28,6 +29,7 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
         layer_scale: float | None = None,
         num_experts: int | None = None,
         num_slots: int | None = None,
+        stochastic_depth: float = 0.0,
     ):
         super().__init__()
         self.nhead = nhead
@@ -67,6 +69,7 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
         else:
             self.mlp = mlp
 
+        self.stochastic_depth = StochasticDepth(stochastic_depth, mode="row")
         self.norm1 = norm_layer(d_model, eps=layer_norm_eps)
         self.norm2 = norm_layer(d_model, eps=layer_norm_eps)
 
@@ -100,12 +103,12 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
         y = self.norm1(x)
         B, H = x.shape[0], self.nhead
         y = self.self_attn(y, y)
-        x = x + self.layer_scale_attn(y)
+        x = x + self.stochastic_depth(self.layer_scale_attn(y))
 
         # MLP
         y = self.norm2(x)
         y = self.mlp(y)
-        x = x + self.layer_scale_mlp(y)
+        x = x + self.stochastic_depth(self.layer_scale_mlp(y))
 
         return x
 
@@ -151,6 +154,7 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
         layer_scale: float | None = None,
         num_experts: int | None = None,
         num_slots: int | None = None,
+        stochastic_depth: float = 0.0,
     ):
         super().__init__()
         d_kv = d_kv or d_model
@@ -204,6 +208,7 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
         else:
             self.mlp = mlp
 
+        self.stochastic_depth = StochasticDepth(stochastic_depth, mode="row")
         self.norm1 = norm_layer(d_model, eps=layer_norm_eps)
         self.norm2 = norm_layer(d_model, eps=layer_norm_eps)
         self.norm3 = norm_layer(d_model, eps=layer_norm_eps)
@@ -241,17 +246,17 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
         y = self.norm1(x)
         B, H = x.shape[0], self.nhead
         y = self.self_attn(y, y)
-        x = x + self.layer_scale_attn(y)
+        x = x + self.stochastic_depth(self.layer_scale_attn(y))
 
         # Cross attention
         y = self.norm2(x)
         y = self.cross_attn(y, kv)
-        x = x + self.layer_scale_cross(y)
+        x = x + self.stochastic_depth(self.layer_scale_cross(y))
 
         # MLP
         y = self.norm3(x)
         y = self.mlp(y)
-        x = x + self.layer_scale_mlp(y)
+        x = x + self.stochastic_depth(self.layer_scale_mlp(y))
 
         return x
 

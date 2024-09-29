@@ -19,11 +19,9 @@ class JEPAWithViewPosition(JEPAWithProbe):
         context_scale: int = 4,
         target_ratio: float = 0.25,
         target_scale: int = 2,
+        context_subsample_ratio: float = 0.5,
         ema_alpha: float = 0.95,
-        margin: float | None = 0.5,
-        loss_fn: str = "cosine",
         predictor_depth: int = 4,
-        dist_gather: bool = False,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -34,6 +32,7 @@ class JEPAWithViewPosition(JEPAWithProbe):
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
         weight_decay_exemptions: Set[str] = set(),
+        weight_decay_final: float | None = None,
     ):
         super().__init__(
             backbone,
@@ -41,11 +40,9 @@ class JEPAWithViewPosition(JEPAWithProbe):
             context_scale,
             target_ratio,
             target_scale,
+            context_subsample_ratio,
             ema_alpha,
-            margin,
-            loss_fn,
             predictor_depth,
-            dist_gather,
             optimizer_init,
             lr_scheduler_init,
             lr_interval,
@@ -56,6 +53,7 @@ class JEPAWithViewPosition(JEPAWithProbe):
             log_train_metrics_interval,
             log_train_metrics_on_epoch,
             weight_decay_exemptions,
+            weight_decay_final,
         )
 
     def create_probe_head(self) -> nn.Module:

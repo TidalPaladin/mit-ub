@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from functools import partial
-from typing import Any, Dict, Optional, Set, cast
+from typing import Any, Dict, Final, List, Optional, Set, cast
 
 import torch
 import torch.nn as nn
@@ -11,16 +10,20 @@ from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
 from ssl_tasks.tokens import TokenMask
 from torch import Tensor
-from torch.distributed import ReduceOp, all_gather, all_reduce
+from torch.distributed import ReduceOp, all_reduce
 from torch.distributed import barrier as dist_barrier
-from torch.distributed import is_initialized as dist_is_initialized
+from torch.optim.optimizer import Optimizer
 
 from ..model import BACKBONES, AdaptiveViT, TransformerEncoderLayer, ViT
 from ..model.pos_enc import RelativeFactorizedPosition
 from ..model.soft_moe import SoftMoE
 
 
-def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: int, eps: float = 1e-6) -> Tensor:
+EPS: Final = 1e-8
+
+
+@torch.compile(fullgraph=True)
+def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: int, eps: float = EPS) -> Tensor:
     r"""Compute the average pairwise cosine similarity without manifesting the full pairwise matrix.
 
     To avoid quadratic memory usage we compute average cosine similarity as the squared norm of the mean vector.
@@ -32,59 +35,36 @@ def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: 
         eps: A small constant to avoid division by zero.
     """
     N = x.shape[pairwise_dim]
-    x = x / x.norm(dim=embed_dim, keepdim=True) + eps
+    x = F.normalize(x, dim=embed_dim, eps=eps)
     y = x.mean(pairwise_dim, keepdim=True).norm(dim=embed_dim, keepdim=True).pow(2).squeeze(embed_dim, pairwise_dim)
     y.sub(1 / N).mul(N / (N - 1))
     return y
 
 
 @torch.compile(fullgraph=True)
-def contrastive_loss(x: Tensor, margin: float = 0.0, eps: float = 1e-6) -> Tensor:
-    r"""Compute the pairwise contrastive loss for a set of embeddings.
-
-    Cosine similarity, with a margin, is computed between all pairs of embeddings in the input.
-    The diagonal is discarded since the loss should only be computed between unique pairs.
-    A margin between 0 and 1 is required because the output is clipped to avoid negative values,
-    which can exist for margin < 0.
-
-    Args:
-        x: Input embeddings.
-        margin: Clipping margin for cosine similarity. Should be between 0 and 1.
-        eps: A small constant to avoid division by zero.
-
-    Shapes:
-        - x: :math:`(..., L, D)` where :math:`L` is the sequence length and :math:`D` is the embedding dimension.
-        - Output: :math:`(...)`
-
-    Returns:
-        The computed contrastive loss.
-    """
-    if not 0 <= margin <= 1:
-        raise ValueError(f"Margin must be between 0 and 1, got {margin}")
-
-    L = x.shape[-2]
-    x = F.normalize(x, dim=-1, eps=eps)
-
-    # This is quadratic in the input length, but can be accelerated with a custom kernel.
-    # However, it seems to be very efficient with torch.compile so we'll leave as is.
-    cosine_sim = torch.einsum("...mk,...nk->...mn", x, x)
-    cosine_sim = cosine_sim.sub(margin).relu()
-
-    # Discard the diagonal (same-pairs)
-    diagonal_sum = (1 - margin) * L
-    cosine_sim = cosine_sim.sum(dim=(-1, -2)) - diagonal_sum
-
-    # Normalize by the number of unique pairs
-    cosine_sim = cosine_sim / (L * (L - 1))
-    return cosine_sim
-
-
-def cosine_similarity_loss(x: Tensor, y: Tensor, eps: float = 1e-6) -> Tensor:
-    # NOTE: It is empirically better to compute cosine similarity by treating each example
-    # as an entire vector, vs using each feature vector individually.
-    N = x.shape[0]
-    y = 1 - F.cosine_similarity(x.view(N, -1), y.view(N, -1), dim=-1, eps=eps)
+def cosine_similarity_loss(x: Tensor, y: Tensor, eps: float = EPS) -> Tensor:
+    y = 1 - F.cosine_similarity(x, y, dim=-1, eps=eps)
     return y.mean()
+
+
+@torch.compile(fullgraph=True)
+def sample_tokens(x: Tensor, ratio: float) -> Tensor:
+    B, L_in, _ = x.shape
+    L_out = int(L_in * ratio)
+
+    # Create array of token indices
+    token_idx = torch.arange(L_in).unsqueeze_(0).expand(B, -1)
+
+    # Create a random sort order for each example
+    sort_order = torch.rand_like(token_idx, dtype=torch.float32)
+
+    # Sort each example's tokens by it's random sort order
+    indices = torch.argsort(sort_order, dim=-1)[..., :L_out]
+    token_idx = torch.gather(token_idx, dim=-1, index=indices)
+
+    # Build final result with
+    batch_idx = torch.arange(B).view(B, 1).expand(-1, L_out)
+    return x[batch_idx.flatten(), token_idx.flatten()].view(B, L_out, -1).contiguous()
 
 
 class JEPA(Task):
@@ -103,13 +83,10 @@ class JEPA(Task):
         target_ratio: Ratio of the input to sample as a prediction target.
         target_scale: Integer scale at which to sample contiguous blocks of target tokens.
             Increasing this ensures more adjacent tokens appear together in the target.
+        context_subsample_ratio: Sampling ratio for encoded context just before passing
+            it to the predictor.
         ema_alpha: Smoothing factor for EMA updates.
-        margin: If not ``None``, a margin between `0` and `1` controlling the desired
-            minimum cosine similarity between embeddings. A value of ``0.5`` is recommended.
-        loss_fn: Loss function to use for training. Can be ``"cosine"`` or ``"mse"``.
-            Cosine similarity loss is recommended.
         predictor_depth: Depth of the predictor network.
-        dist_gather: Whether to gather tensors from all GPUs when computing the contrastive loss.
         optimizer_init: Initial configuration for the optimizer.
         lr_scheduler_init: Initial configuration for the learning rate scheduler.
         lr_interval: Frequency of learning rate update. Can be 'step' or 'epoch'.
@@ -120,6 +97,8 @@ class JEPA(Task):
         log_train_metrics_interval: Interval (in steps) at which to log training metrics.
         log_train_metrics_on_epoch: If True, log training metrics at the end of each epoch.
         weight_decay_exemptions: Set of parameter names to exempt from weight decay.
+        weight_decay_final: Final weight decay value. If set, the weight decay will be linearly
+            annealed from the current value to this value over the course of training.
     """
 
     backbone: ViT | AdaptiveViT
@@ -131,11 +110,9 @@ class JEPA(Task):
         context_scale: int = 4,
         target_ratio: float = 0.25,
         target_scale: int = 2,
+        context_subsample_ratio: float = 0.5,
         ema_alpha: float = 0.95,
-        margin: float | None = 0.5,
-        loss_fn: str = "cosine",
         predictor_depth: int = 4,
-        dist_gather: bool = False,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -146,6 +123,7 @@ class JEPA(Task):
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
         weight_decay_exemptions: Set[str] = set(),
+        weight_decay_final: float | None = None,
     ):
         super().__init__(
             optimizer_init,
@@ -163,10 +141,12 @@ class JEPA(Task):
         self.context_scale = context_scale
         self.target_ratio = target_ratio
         self.target_scale = target_scale
+        self.context_subsample_ratio = context_subsample_ratio
         assert self.context_ratio > 0
         assert self.target_ratio > 0
+        assert self.context_subsample_ratio > 0
         self.ema_alpha = ema_alpha
-        self.dist_gather = dist_gather
+        self.weight_decay_final = weight_decay_final
 
         # Backbone and EMA weights
         self.backbone = cast(ViT | AdaptiveViT, self.prepare_backbone(backbone))
@@ -174,9 +154,21 @@ class JEPA(Task):
         for p in self.ema_backbone.parameters():
             p.requires_grad = False
 
-        # JEPA predictor, position encoding to initialize queries
-        self.pos_enc = RelativeFactorizedPosition(len(self.backbone.stem.patch_size), self.backbone.dim)
-        nn.init.trunc_normal_(self.pos_enc.proj.bias, std=0.02)
+        # Position encoding / initialization for prediction queries.
+        self.pos_enc = RelativeFactorizedPosition(
+            len(self.backbone.stem.patch_size),
+            self.backbone.dim,
+            dropout=0.1,
+        )
+
+        # Projections for the input context and output predictions
+        self.context_proj = nn.Linear(self.backbone.dim, self.backbone.dim)
+        self.out_proj = nn.Sequential(
+            nn.LayerNorm(self.backbone.dim),
+            nn.Linear(self.backbone.dim, self.backbone.dim),
+        )
+
+        # JEPA predictor
         encoder_proto = next(filter(lambda l: isinstance(l, TransformerEncoderLayer), self.backbone.modules()), None)
         if encoder_proto is None:
             raise ValueError(
@@ -191,58 +183,36 @@ class JEPA(Task):
         for block in self.jepa_predictor:
             block.reset_parameters()
 
-        # Primary JEPA loss
-        match loss_fn:
-            case "cosine":
-                self.jepa_loss = cosine_similarity_loss
-            case "mse":
-                self.jepa_loss = F.mse_loss
-            case _:
-                raise ValueError(f"Unknown loss function: {loss_fn}, expected 'cosine' or 'mse'")
-
-        # Contrastive loss for collapse mitigation
-        self.contrastive_loss = partial(contrastive_loss, margin=margin) if margin is not None else None
-
         self.save_hyperparameters()
 
     def prepare_backbone(self, name: str) -> nn.Module:
         return BACKBONES.get(name).instantiate_with_metadata().fn
 
-    def create_context_mask(self, x: Tensor) -> TokenMask:
+    def create_mask(self, x: Tensor, unmasked_ratio: float, scale: int) -> TokenMask:
         size = x.shape[2:]
+
         # For AdaptiveViT we choose a token mask that matches the size of the fixed token grid produced
         # by the ViT.
         if isinstance(self.backbone, AdaptiveViT):
             size = self.backbone.stem.equivalent_size(cast(Any, size))
+
         batch_size = x.shape[0]
         device = x.device
-        return TokenMask.create(
+        mask = TokenMask.create(
             size,
             self.backbone.stem.patch_size,
             batch_size,
             device=device,
-            # Flip this so we get context_mask unmasked
-            mask_ratio=1 - self.context_ratio,
-            scale=self.context_scale,
+            mask_ratio=1 - unmasked_ratio,
+            scale=scale,
         )
 
-    def create_target_mask(self, x: Tensor) -> TokenMask:
-        size = x.shape[2:]
-        # For AdaptiveViT we choose a token mask that matches the size of the fixed token grid produced
-        # by the ViT.
-        if isinstance(self.backbone, AdaptiveViT):
-            size = self.backbone.stem.equivalent_size(cast(Any, size))
-        batch_size = x.shape[0]
-        device = x.device
-        return TokenMask.create(
-            size,
-            self.backbone.stem.patch_size,
-            batch_size,
-            device=device,
-            # Flip this so we get target_mask unmasked
-            mask_ratio=1 - self.target_ratio,
-            scale=self.target_scale,
-        )
+        # If we get unlucky and sample a complete mask, just sample again
+        if not mask.mask.any():
+            return self.create_mask(x, unmasked_ratio, scale)
+
+        assert not mask.is_ragged, "Mask should not be ragged"
+        return mask
 
     def create_metrics(self, state: State) -> tm.MetricCollection:
         r"""Gets a MetricCollection for a given state"""
@@ -250,57 +220,68 @@ class JEPA(Task):
             {
                 "example_sim": tm.MeanMetric(),
                 "token_sim": tm.MeanMetric(),
-                "variance": tm.MeanMetric(),
             }
         )
 
     def forward(self, x: Tensor, context_mask: TokenMask, target_mask: TokenMask) -> Dict[str, Tensor]:
-        # Run encoder on context and broadcast back to full size with 0 padding
-        dense_context: Tensor = self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
-        context = context_mask.restore_tokens(dense_context, 0)
+        # Run encoder on context
+        context: Tensor = self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
 
-        # Create empty queries w/ position encoding that forms the initial predictor input
-        B, _, D = context.shape
+        # Sample a subset of the context as input to the predictor and project
+        context = sample_tokens(context, self.context_subsample_ratio)
+        context = self.context_proj(context)
+
+        # Prepare positional encoding for target queries
+        B, _, _ = context.shape
         tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
-        query = self.pos_enc.from_grid(tokenized_size, B, proto=context, normalize=True, requires_grad=True)
-        query = query.contiguous()
+        query = self.pos_enc.from_grid(
+            tokenized_size,
+            B,
+            proto=context,
+            normalize=True,
+            add_noise=self.training and self.backbone._position_noise,
+        ).contiguous()
+        query = target_mask.apply_to_tokens(query, fill_value=None)
+        L = query.shape[1]
 
-        # Use xor mask to inject encoder context into queries that aren't part of the target mask.
-        # Query now contains context only at locations that are not part of the target.
-        #with torch.no_grad():
-        #    xor_mask = (context_mask.mask ^ target_mask.mask).unsqueeze_(-1)
-        #query = torch.where(xor_mask, query, context)
-        #query = torch.where(context_mask.mask.unsqueeze(-1), context, query)
-        query = torch.where(target_mask.mask.unsqueeze(-1), query, context)
-        #query = query + context
-
-        # Create a context or target mask.
-        # Since context and target may overlap, we may end up with an inconsistent number of tokens
-        # for each example in the batch. To resolve this we will pad to match the largest number
-        # of tokens in an example, and adjust the ALiBi positions such that these padding tokens
-        # are masked in the predictor.
-        mask = context_mask.mask | target_mask.mask
-        mask = TokenMask(mask, context_mask.size, context_mask.patch_size)
-        query = mask.apply_to_tokens(query, fill_value=None)
-
-        # Run the queries and ALiBi positions through the predictor
-        B, L = query.shape[:2]
+        # Run query and context through predictor
+        query = torch.cat([query, context], dim=1)
         for block in self.jepa_predictor:
             block = cast(TransformerEncoderLayer, block)
             query = block(query)
 
-        # Extract only the target queries from the full set of queries
-        query = mask.restore_tokens(query, 0)
-        query = target_mask.apply_to_tokens(query, fill_value=None)
+        # Separate predictions from context
+        pred = self.out_proj(query[:, :L])
 
-        return {"jepa": query, "jepa_context": dense_context}
+        return {"jepa": pred, "jepa_context": context}
+
+    @property
+    def fraction_complete(self) -> float | None:
+        r"""The fraction of training complete as a float between 0 and 1, or None if we can't determine it."""
+        # Try to determine a momentum schedule from ema_alpha to 1.0 over the course of training
+        if self.trainer.max_steps:
+            current = self.trainer.global_step
+            total = self.trainer.max_steps
+        elif self.trainer.max_epochs:
+            current = self.trainer.current_epoch
+            total = self.trainer.max_epochs
+        # Otherwise we can fall back to constant self.ema_alpha
+        else:
+            return None
+        return current / total
+
+    def get_ema_momentum(self) -> float:
+        r"""Get the momentum for the EMA update based on the current step or epoch."""
+        fraction_complete = self.fraction_complete
+        fraction_complete = fraction_complete if fraction_complete is not None else 0.0
+        return self.ema_alpha + (1 - self.ema_alpha) * fraction_complete
 
     @torch.no_grad()
     def update_ema(self) -> None:
         """Update the Exponential Moving Average (EMA) of the backbone parameters."""
-        for i, (ema_param, param) in enumerate(zip(self.ema_backbone.parameters(), self.backbone.parameters())):
-            ema_param.data.mul_(self.ema_alpha).add_(param.data, alpha=1 - self.ema_alpha)
-            assert not ema_param.requires_grad
+        momentum = self.get_ema_momentum()
+        for ema_param, param in zip(self.ema_backbone.parameters(), self.backbone.parameters()):
+            ema_param.lerp_(param, 1 - momentum)
         self.synchronize_ema_weights()
 
     @torch.no_grad()
@@ -320,6 +301,37 @@ class JEPA(Task):
                 ema_param.data /= self.trainer.world_size
             dist_barrier()
 
+    def update_weight_decay(self) -> None:
+        """Update the weight decay for each parameter group based on the current training progress."""
+        assert self.weight_decay_final is not None
+
+        # Check where we are in the training loop, abort if we can't determine
+        fraction_complete = self.fraction_complete
+        if fraction_complete is None:
+            return
+
+        # Get optimizer and wrap as a list if necessary
+        optimizers = self.optimizers()
+        optimizers = [optimizers] if isinstance(optimizers, Optimizer) else optimizers
+        optimizers = cast(List[Optimizer], optimizers)
+
+        def update_weight_decay(pg: Dict[str, Any]) -> None:
+            current_wd = pg["weight_decay"]
+            # Some layers may be exempt from weight decay
+            if current_wd == 0:
+                return
+
+            initial_wd = pg.setdefault("initial_weight_decay", current_wd)
+            final_wd = self.weight_decay_final
+            new_wd = initial_wd + (final_wd - initial_wd) * fraction_complete
+            pg["weight_decay"] = new_wd
+
+        # Update weight decay for each optimizer
+        map(
+            update_weight_decay,
+            (pg for optimizer in optimizers for pg in optimizer.param_groups if "weight_decay" in pg),
+        )
+
     def step(
         self,
         batch: Any,
@@ -328,17 +340,17 @@ class JEPA(Task):
         metrics: Optional[tm.MetricCollection] = None,
     ) -> Dict[str, Any]:
         x: Tensor = batch["img"]
-        x.shape[0]
-        self.backbone.dim
 
         # ema update from previous step when training
         if state.mode == Mode.TRAIN:
             self.update_ema()
+        # update weight decay
+        if self.weight_decay_final is not None:
+            self.update_weight_decay()
 
         # generate context and target masks
-        context_mask = self.create_context_mask(x)
-        target_mask = self.create_target_mask(x)
-        assert not context_mask.mask.all()
+        target_mask = self.create_mask(x, self.target_ratio, self.target_scale)
+        context_mask = self.create_mask(x, self.context_ratio, self.context_scale)
 
         # generate ground truth with forward pass of ema backbone on unmasked image
         with torch.no_grad():
@@ -354,41 +366,15 @@ class JEPA(Task):
 
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
-        loss = self.jepa_loss(pred, target)
-
-        # compute contrastive loss for collapse mitigation
-        if self.contrastive_loss is not None:
-            # NOTE: It is empirically better to compute contrastive loss on the predictions
-            # rather than the context, though the difference is small.
-            pred_pool = pred.mean(1)
-
-            # Gather average-pooled predictions from all GPUs if requested
-            if self.dist_gather and dist_is_initialized():
-                gathered_preds = [torch.zeros_like(pred_pool) for _ in range(self.trainer.world_size)]
-                all_gather(gathered_preds, pred_pool)
-                pred_pool = torch.cat(gathered_preds, dim=0)
-            loss_contrastive = self.contrastive_loss(pred_pool)
-        else:
-            loss_contrastive = None
+        loss = cosine_similarity_loss(pred, target)
 
         # Compute metrics
-        with torch.no_grad():
-            assert metrics is not None
-            example_sim = average_pairwise_cosine_similarity(full_target.mean(1), 0, 1)
-            metrics["example_sim"].update(example_sim)
-            token_sim = average_pairwise_cosine_similarity(full_target, 1, 2)
-            metrics["token_sim"].update(token_sim)
-            variance = full_target.var(-1)
-            metrics["variance"].update(variance)
-
-        # combine prediction and target into a single tensor that requires grad.
-        # this can be used with a supervised loss to backprop through the backbone.
-        combined = (
-            # EMA backbone outpu tis used as the baseline
-            context_mask.apply_to_tokens(full_target, fill_value=0.0)
-            # Add online context at relevant locations
-            + context_mask.restore_tokens(context, 0)
-        )
+        if metrics is not None:
+            with torch.no_grad():
+                example_sim = average_pairwise_cosine_similarity(full_target.mean(1), 0, 1)
+                metrics["example_sim"].update(example_sim)
+                token_sim = average_pairwise_cosine_similarity(full_target, 1, 2)
+                metrics["token_sim"].update(token_sim)
 
         output = {
             "log": {
@@ -398,11 +384,7 @@ class JEPA(Task):
             "jepa_pred": pred,
             "target": target,
             "full_target": full_target,
-            "combined": combined,
         }
-        if loss_contrastive is not None:
-            output["log"]["loss_contrastive"] = loss_contrastive
-
         return output
 
     @torch.no_grad()
@@ -421,11 +403,9 @@ class JEPAWithProbe(JEPA, ABC):
         context_scale: int = 4,
         target_ratio: float = 0.25,
         target_scale: int = 2,
+        context_subsample_ratio: float = 0.5,
         ema_alpha: float = 0.95,
-        margin: float | None = 0.5,
-        loss_fn: str = "cosine",
         predictor_depth: int = 4,
-        dist_gather: bool = False,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -436,6 +416,7 @@ class JEPAWithProbe(JEPA, ABC):
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
         weight_decay_exemptions: Set[str] = set(),
+        weight_decay_final: float | None = None,
     ):
         super().__init__(
             backbone,
@@ -443,11 +424,9 @@ class JEPAWithProbe(JEPA, ABC):
             context_scale,
             target_ratio,
             target_scale,
+            context_subsample_ratio,
             ema_alpha,
-            margin,
-            loss_fn,
             predictor_depth,
-            dist_gather,
             optimizer_init,
             lr_scheduler_init,
             lr_interval,
@@ -458,6 +437,7 @@ class JEPAWithProbe(JEPA, ABC):
             log_train_metrics_interval,
             log_train_metrics_on_epoch,
             weight_decay_exemptions,
+            weight_decay_final,
         )
         self.linear_probe = self.create_probe_head()
 
