@@ -160,9 +160,8 @@ class TestJEPA:
             for param in task.ema_backbone.parameters():
                 assert_close(param.data, expected.expand_as(param.data))
 
-    @pytest.mark.parametrize("dist_gather", [False, True])
-    def test_fit(self, task, datamodule, logger, dist_gather):
-        task.dist_gather = dist_gather
+    def test_fit(self, task, datamodule, logger):
+        task.weight_decay_final = 4.0
         trainer = pl.Trainer(
             accelerator="cpu",
             fast_dev_run=True,

@@ -32,6 +32,7 @@ class JEPAWithViewPosition(JEPAWithProbe):
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
         weight_decay_exemptions: Set[str] = set(),
+        weight_decay_final: float | None = None,
     ):
         super().__init__(
             backbone,
@@ -52,6 +53,7 @@ class JEPAWithViewPosition(JEPAWithProbe):
             log_train_metrics_interval,
             log_train_metrics_on_epoch,
             weight_decay_exemptions,
+            weight_decay_final,
         )
 
     def create_probe_head(self) -> nn.Module:

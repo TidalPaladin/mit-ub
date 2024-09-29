@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from typing import Any, Dict, Final, Optional, Set, cast, Tuple
+from typing import Any, Dict, Final, List, Optional, Set, cast
 
 import torch
 import torch.nn as nn
@@ -8,11 +8,11 @@ import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
-from deep_helpers.helpers import to_tuple
 from ssl_tasks.tokens import TokenMask
 from torch import Tensor
 from torch.distributed import ReduceOp, all_reduce
 from torch.distributed import barrier as dist_barrier
+from torch.optim.optimizer import Optimizer
 
 from ..model import BACKBONES, AdaptiveViT, TransformerEncoderLayer, ViT
 from ..model.pos_enc import RelativeFactorizedPosition
@@ -46,6 +46,7 @@ def cosine_similarity_loss(x: Tensor, y: Tensor, eps: float = EPS) -> Tensor:
     return y.mean()
 
 
+@torch.compile(fullgraph=True)
 def sample_tokens(x: Tensor, ratio: float) -> Tensor:
     B, L_in, _ = x.shape
     L_out = int(L_in * ratio)
@@ -81,6 +82,8 @@ class JEPA(Task):
         target_ratio: Ratio of the input to sample as a prediction target.
         target_scale: Integer scale at which to sample contiguous blocks of target tokens.
             Increasing this ensures more adjacent tokens appear together in the target.
+        context_subsample_ratio: Sampling ratio for encoded context just before passing
+            it to the predictor.
         ema_alpha: Smoothing factor for EMA updates.
         predictor_depth: Depth of the predictor network.
         optimizer_init: Initial configuration for the optimizer.
@@ -93,6 +96,8 @@ class JEPA(Task):
         log_train_metrics_interval: Interval (in steps) at which to log training metrics.
         log_train_metrics_on_epoch: If True, log training metrics at the end of each epoch.
         weight_decay_exemptions: Set of parameter names to exempt from weight decay.
+        weight_decay_final: Final weight decay value. If set, the weight decay will be linearly
+            annealed from the current value to this value over the course of training.
     """
 
     backbone: ViT | AdaptiveViT
@@ -117,6 +122,7 @@ class JEPA(Task):
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
         weight_decay_exemptions: Set[str] = set(),
+        weight_decay_final: float | None = None,
     ):
         super().__init__(
             optimizer_init,
@@ -139,6 +145,7 @@ class JEPA(Task):
         assert self.target_ratio > 0
         assert self.context_subsample_ratio > 0
         self.ema_alpha = ema_alpha
+        self.weight_decay_final = weight_decay_final
 
         # Backbone and EMA weights
         self.backbone = cast(ViT | AdaptiveViT, self.prepare_backbone(backbone))
@@ -219,7 +226,13 @@ class JEPA(Task):
         # Prepare positional encoding for target queries
         B, _, _ = context.shape
         tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
-        query = self.pos_enc.from_grid(tokenized_size, B, proto=context, normalize=True).contiguous()
+        query = self.pos_enc.from_grid(
+            tokenized_size,
+            B,
+            proto=context,
+            normalize=True,
+            add_noise=self.training and self.backbone._position_noise,
+        ).contiguous()
         query = target_mask.apply_to_tokens(query, fill_value=None)
         L = query.shape[1]
 
@@ -234,8 +247,9 @@ class JEPA(Task):
 
         return {"jepa": pred, "jepa_context": context}
 
-    def get_ema_momentum(self) -> float:
-        r"""Get the momentum for the EMA update based on the current step or epoch."""
+    @property
+    def fraction_complete(self) -> float | None:
+        r"""The fraction of training complete as a float between 0 and 1, or None if we can't determine it."""
         # Try to determine a momentum schedule from ema_alpha to 1.0 over the course of training
         if self.trainer.max_steps:
             current = self.trainer.global_step
@@ -245,8 +259,14 @@ class JEPA(Task):
             total = self.trainer.max_epochs
         # Otherwise we can fall back to constant self.ema_alpha
         else:
-            current = total = 1.0
-        return self.ema_alpha + (1 - self.ema_alpha) * (current / total)
+            return None
+        return current / total
+
+    def get_ema_momentum(self) -> float:
+        r"""Get the momentum for the EMA update based on the current step or epoch."""
+        fraction_complete = self.fraction_complete
+        fraction_complete = fraction_complete if fraction_complete is not None else 0.0
+        return self.ema_alpha + (1 - self.ema_alpha) * fraction_complete
 
     @torch.no_grad()
     def update_ema(self) -> None:
@@ -273,6 +293,37 @@ class JEPA(Task):
                 ema_param.data /= self.trainer.world_size
             dist_barrier()
 
+    def update_weight_decay(self) -> None:
+        """Update the weight decay for each parameter group based on the current training progress."""
+        assert self.weight_decay_final is not None
+
+        # Check where we are in the training loop, abort if we can't determine
+        fraction_complete = self.fraction_complete
+        if fraction_complete is None:
+            return
+
+        # Get optimizer and wrap as a list if necessary
+        optimizers = self.optimizers()
+        optimizers = [optimizers] if isinstance(optimizers, Optimizer) else optimizers
+        optimizers = cast(List[Optimizer], optimizers)
+
+        def update_weight_decay(pg: Dict[str, Any]) -> None:
+            current_wd = pg["weight_decay"]
+            # Some layers may be exempt from weight decay
+            if current_wd == 0:
+                return
+
+            initial_wd = pg.setdefault("initial_weight_decay", current_wd)
+            final_wd = self.weight_decay_final
+            new_wd = initial_wd + (final_wd - initial_wd) * fraction_complete
+            pg["weight_decay"] = new_wd
+
+        # Update weight decay for each optimizer
+        map(
+            update_weight_decay,
+            (pg for optimizer in optimizers for pg in optimizer.param_groups if "weight_decay" in pg),
+        )
+
     def step(
         self,
         batch: Any,
@@ -285,6 +336,9 @@ class JEPA(Task):
         # ema update from previous step when training
         if state.mode == Mode.TRAIN:
             self.update_ema()
+        # update weight decay
+        if self.weight_decay_final is not None:
+            self.update_weight_decay()
 
         # generate context and target masks
         target_mask = self.create_mask(x, self.target_ratio, self.target_scale)
@@ -354,6 +408,7 @@ class JEPAWithProbe(JEPA, ABC):
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
         weight_decay_exemptions: Set[str] = set(),
+        weight_decay_final: float | None = None,
     ):
         super().__init__(
             backbone,
@@ -374,6 +429,7 @@ class JEPAWithProbe(JEPA, ABC):
             log_train_metrics_interval,
             log_train_metrics_on_epoch,
             weight_decay_exemptions,
+            weight_decay_final,
         )
         self.linear_probe = self.create_probe_head()
 

@@ -1,3 +1,4 @@
+import math
 from functools import partial
 from typing import Final, Optional, Sequence, cast
 
@@ -116,8 +117,15 @@ class RelativeFactorizedPosition(PositionEncoder, SupportsLoRA):
 
     def __init__(self, d_in: int, d_out: int):
         super().__init__()
+        self._d_in = d_in
         self._d_out = d_out
         self.proj = nn.Linear(d_in, d_out)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.zeros_(self.proj.bias)
+        # Uniform inputs on [-1, 1]
+        nn.init.normal_(self.proj.weight, std=math.sqrt(3 / self._d_in))
 
     def forward(self, x: Tensor) -> Tensor:
         # Run this at high precision. Should only matter for > 1k positions, but it's cheap.
