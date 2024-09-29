@@ -6,6 +6,7 @@ import torch.nn as nn
 from einops.layers.torch import Rearrange
 from torch import Tensor
 
+from ..mlp import ReLU2
 from ..pos_enc import RelativeFactorizedPosition
 
 
@@ -34,6 +35,8 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         position_noise: bool = False,
         autocast: bool = False,
+        dropout: float = 0.0,
+        activation: nn.Module = ReLU2(),
     ):
         super().__init__()
         self.patch = nn.Sequential(
@@ -41,7 +44,7 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
             Rearrange("b c h w -> b (h w) c", c=embed_dim),
         )
         self.norm = norm_layer(embed_dim)
-        self.pos_enc = RelativeFactorizedPosition(2, embed_dim)
+        self.pos_enc = RelativeFactorizedPosition(2, embed_dim, dropout=dropout, activation=activation)
         self.position_noise = position_noise
         self.autocast = autocast
 
@@ -80,6 +83,8 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         position_noise: bool = False,
         autocast: bool = False,
+        dropout: float = 0.0,
+        activation: nn.Module = ReLU2(),
     ):
         super().__init__()
         self.patch = nn.Sequential(
@@ -87,7 +92,7 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
             Rearrange("b c d h w -> b (h w d) c", c=embed_dim),
         )
         self.norm = norm_layer(embed_dim)
-        self.pos_enc = RelativeFactorizedPosition(3, embed_dim)
+        self.pos_enc = RelativeFactorizedPosition(3, embed_dim, dropout=dropout, activation=activation)
         self.position_noise = position_noise
         self.autocast = autocast
 

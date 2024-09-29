@@ -41,7 +41,9 @@ class ViT(nn.Module):
 
         # Stem tokenizer
         stem_type = PatchEmbed2d if isinstance(patch_size, int) or len(patch_size) == 2 else PatchEmbed3d
-        self.stem = stem_type(in_channels, dim, cast(Any, patch_size), norm_layer, position_noise)
+        self.stem = stem_type(
+            in_channels, dim, cast(Any, patch_size), norm_layer, position_noise, dropout=dropout, activation=activation
+        )
 
         # Transformer blocks
         self.blocks = nn.ModuleList(
@@ -165,7 +167,15 @@ class AdaptiveViT(ViT):
         # Adaptive stem tokenizer
         stem_type = AdaptiveTokenizer2d if isinstance(patch_size, int) or len(patch_size) == 2 else AdaptiveTokenizer3d
         self.stem = stem_type(
-            in_channels, dim, kv_dim, cast(Any, patch_size), cast(Any, target_shape), norm_layer, position_noise
+            in_channels,
+            dim,
+            kv_dim,
+            cast(Any, patch_size),
+            cast(Any, target_shape),
+            norm_layer,
+            position_noise,
+            dropout=dropout,
+            activation=activation,
         )
 
         # Cross attention to high res tokens

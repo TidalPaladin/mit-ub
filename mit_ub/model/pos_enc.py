@@ -1,4 +1,3 @@
-import math
 from functools import partial
 from typing import Final, Optional, Sequence, cast
 
@@ -7,6 +6,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from .lora import LoRATarget, SupportsLoRA, apply_lora, freeze_non_lora
+from .mlp import MLP, ReLU2
 
 
 # Bound for position noise in grid cell units. This is set slightly below 0.5
@@ -115,24 +115,19 @@ class PositionEncoder(nn.Module):
 
 class RelativeFactorizedPosition(PositionEncoder, SupportsLoRA):
 
-    def __init__(self, d_in: int, d_out: int):
+    def __init__(self, d_in: int, d_out: int, dropout: float = 0.0, activation: nn.Module = ReLU2()):
         super().__init__()
         self._d_in = d_in
         self._d_out = d_out
-        self.proj = nn.Linear(d_in, d_out)
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        nn.init.zeros_(self.proj.bias)
-        # Uniform inputs on [-1, 1]
-        nn.init.normal_(self.proj.weight, std=math.sqrt(3 / self._d_in))
+        self.proj = MLP(d_in, 2 * d_out, d_out, dropout=dropout, activation=activation)
+        self.norm = nn.LayerNorm(d_out)
 
     def forward(self, x: Tensor) -> Tensor:
         # Run this at high precision. Should only matter for > 1k positions, but it's cheap.
         matmul_precision = torch.get_float32_matmul_precision()
         torch.set_float32_matmul_precision("high")
         with torch.autocast(device_type="cuda", dtype=torch.float32):
-            result = self.proj(x.to(torch.float32)).to(x.dtype)
+            result = self.norm(self.proj(x.to(torch.float32))).to(x.dtype)
         torch.set_float32_matmul_precision(matmul_precision)
         return result
 

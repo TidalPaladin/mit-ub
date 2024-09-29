@@ -154,13 +154,16 @@ class JEPA(Task):
             p.requires_grad = False
 
         # Position encoding / initialization for prediction queries.
-        self.pos_enc = RelativeFactorizedPosition(len(self.backbone.stem.patch_size), self.backbone.dim)
+        self.pos_enc = RelativeFactorizedPosition(
+            len(self.backbone.stem.patch_size),
+            self.backbone.dim,
+            dropout=0.1,
+        )
 
         # Projections for the input context and output predictions
         self.context_proj = nn.Linear(self.backbone.dim, self.backbone.dim)
         self.out_proj = nn.Sequential(
             nn.LayerNorm(self.backbone.dim),
-            nn.Dropout(0.1),
             nn.Linear(self.backbone.dim, self.backbone.dim),
         )
 
