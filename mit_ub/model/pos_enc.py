@@ -1,11 +1,10 @@
-from functools import partial
-from typing import Final, Optional, Sequence, cast
+from typing import Final, Optional, Sequence
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 
-from .lora import LoRATarget, SupportsLoRA, apply_lora, freeze_non_lora
+from .lora import LoRATarget, SupportsLoRA, freeze_non_lora
 from .mlp import MLP, ReLU2
 
 
@@ -139,12 +138,8 @@ class RelativeFactorizedPosition(PositionEncoder, SupportsLoRA):
         dropout: float = 0.0,
         quantize_base: bool = False,
     ) -> nn.Module:
-        # NOTE: Quantization is not supported when using a bias, which this module has.
-        # We force quantize_base to False to avoid issues.
-        _apply_lora = partial(apply_lora, rank=rank, alpha=alpha, dropout=dropout, quantize_base=False)
-
         if LoRATarget.POSITION in target:
-            self.proj = _apply_lora(cast(nn.Linear, self.proj))
+            self.proj = self.proj.apply_lora([LoRATarget.FEEDFORWARD], rank, alpha, dropout, quantize_base)
 
         # Freeze all non-LoRA matrices/weights
         freeze_non_lora(self)
