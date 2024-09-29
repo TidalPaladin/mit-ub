@@ -1,11 +1,11 @@
-from functools import partial
-from typing import Final, Optional, Sequence, cast
+from typing import Final, Optional, Sequence
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 
-from .lora import LoRATarget, SupportsLoRA, apply_lora, freeze_non_lora
+from .lora import LoRATarget, SupportsLoRA, freeze_non_lora
+from .mlp import MLP, ReLU2
 
 
 # Bound for position noise in grid cell units. This is set slightly below 0.5
@@ -114,17 +114,19 @@ class PositionEncoder(nn.Module):
 
 class RelativeFactorizedPosition(PositionEncoder, SupportsLoRA):
 
-    def __init__(self, d_in: int, d_out: int):
+    def __init__(self, d_in: int, d_out: int, dropout: float = 0.0, activation: nn.Module = ReLU2()):
         super().__init__()
+        self._d_in = d_in
         self._d_out = d_out
-        self.proj = nn.Linear(d_in, d_out)
+        self.proj = MLP(d_in, 2 * d_out, d_out, dropout=dropout, activation=activation)
+        self.norm = nn.LayerNorm(d_out)
 
     def forward(self, x: Tensor) -> Tensor:
         # Run this at high precision. Should only matter for > 1k positions, but it's cheap.
         matmul_precision = torch.get_float32_matmul_precision()
         torch.set_float32_matmul_precision("high")
         with torch.autocast(device_type="cuda", dtype=torch.float32):
-            result = self.proj(x.to(torch.float32)).to(x.dtype)
+            result = self.norm(self.proj(x.to(torch.float32))).to(x.dtype)
         torch.set_float32_matmul_precision(matmul_precision)
         return result
 
@@ -136,12 +138,8 @@ class RelativeFactorizedPosition(PositionEncoder, SupportsLoRA):
         dropout: float = 0.0,
         quantize_base: bool = False,
     ) -> nn.Module:
-        # NOTE: Quantization is not supported when using a bias, which this module has.
-        # We force quantize_base to False to avoid issues.
-        _apply_lora = partial(apply_lora, rank=rank, alpha=alpha, dropout=dropout, quantize_base=False)
-
         if LoRATarget.POSITION in target:
-            self.proj = _apply_lora(cast(nn.Linear, self.proj))
+            self.proj = self.proj.apply_lora([LoRATarget.FEEDFORWARD], rank, alpha, dropout, quantize_base)
 
         # Freeze all non-LoRA matrices/weights
         freeze_non_lora(self)

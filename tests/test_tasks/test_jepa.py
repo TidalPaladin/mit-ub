@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch.multiprocessing import spawn  # type: ignore
 from torch.testing import assert_close
 
-from mit_ub.tasks.jepa import JEPA, average_pairwise_cosine_similarity, contrastive_loss
+from mit_ub.tasks.jepa import JEPA, average_pairwise_cosine_similarity
 
 
 def test_average_pairwise_cosine_similarity():
@@ -19,28 +19,6 @@ def test_average_pairwise_cosine_similarity():
 
     actual = average_pairwise_cosine_similarity(x, 1, 2)
     expected = F.cosine_similarity(x.view(B, L, 1, D), x.view(B, 1, L, D), dim=-1).mean(dim=(1, 2))
-    assert_close(expected, actual)
-
-
-@pytest.mark.parametrize("margin", [0.0, 0.5])
-def test_contrastive_loss(margin):
-    B, L, D = 10, 128, 32
-    torch.manual_seed(0)
-    x = torch.randn(B, L, D)
-
-    expected = (
-        F.cosine_similarity(
-            x.view(B, L, 1, D),
-            x.view(B, 1, L, D),
-            dim=-1,
-            eps=1e-6,
-        )
-        .sub(margin)
-        .relu()
-    )
-    diagonal_sum = (1 - margin) * L
-    expected = (expected.sum(dim=(-1, -2)) - diagonal_sum) / (L * (L - 1))
-    actual = contrastive_loss(x, margin)
     assert_close(expected, actual)
 
 
@@ -182,9 +160,8 @@ class TestJEPA:
             for param in task.ema_backbone.parameters():
                 assert_close(param.data, expected.expand_as(param.data))
 
-    @pytest.mark.parametrize("dist_gather", [False, True])
-    def test_fit(self, task, datamodule, logger, dist_gather):
-        task.dist_gather = dist_gather
+    def test_fit(self, task, datamodule, logger):
+        task.weight_decay_final = 4.0
         trainer = pl.Trainer(
             accelerator="cpu",
             fast_dev_run=True,

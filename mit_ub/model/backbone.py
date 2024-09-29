@@ -29,6 +29,7 @@ class ViT(nn.Module):
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
+        stochastic_depth: float = 0.0,
     ):
         super().__init__()
         self._dim = dim
@@ -40,7 +41,9 @@ class ViT(nn.Module):
 
         # Stem tokenizer
         stem_type = PatchEmbed2d if isinstance(patch_size, int) or len(patch_size) == 2 else PatchEmbed3d
-        self.stem = stem_type(in_channels, dim, cast(Any, patch_size), norm_layer, position_noise)
+        self.stem = stem_type(
+            in_channels, dim, cast(Any, patch_size), norm_layer, position_noise, dropout=dropout, activation=activation
+        )
 
         # Transformer blocks
         self.blocks = nn.ModuleList(
@@ -55,6 +58,7 @@ class ViT(nn.Module):
                     num_kv_heads=num_kv_heads,
                     qk_norm=qk_norm,
                     norm_layer=norm_layer,
+                    stochastic_depth=stochastic_depth,
                 )
                 for _ in range(depth)
             ]
@@ -139,6 +143,7 @@ class AdaptiveViT(ViT):
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
+        stochastic_depth: float = 0.0,
         high_res_layer_scale: float | None = 1e-5,
     ):
         super().__init__(
@@ -156,12 +161,21 @@ class AdaptiveViT(ViT):
             num_kv_heads,
             qk_norm,
             norm_layer,
+            stochastic_depth,
         )
 
         # Adaptive stem tokenizer
         stem_type = AdaptiveTokenizer2d if isinstance(patch_size, int) or len(patch_size) == 2 else AdaptiveTokenizer3d
         self.stem = stem_type(
-            in_channels, dim, kv_dim, cast(Any, patch_size), cast(Any, target_shape), norm_layer, position_noise
+            in_channels,
+            dim,
+            kv_dim,
+            cast(Any, patch_size),
+            cast(Any, target_shape),
+            norm_layer,
+            position_noise,
+            dropout=dropout,
+            activation=activation,
         )
 
         # Cross attention to high res tokens
@@ -182,6 +196,7 @@ class AdaptiveViT(ViT):
                     # Since AdaptiveViT will likely be trained from a ViT checkpoint, this helps set the
                     # intial condition of the model to the ViT checkpoint.
                     layer_scale=high_res_layer_scale,
+                    stochastic_depth=stochastic_depth,
                 )
                 for _ in range(high_res_depth)
             ]

@@ -6,8 +6,8 @@ from mit_ub.model import BACKBONES, AdaptiveViT, ViT
 @pytest.fixture
 def optimizer_init():
     return {
-        "class_path": "torch.optim.Adam",
-        "init_args": {"lr": 1e-3},
+        "class_path": "torch.optim.AdamW",
+        "init_args": {"lr": 1e-3, "weight_decay": 0.05},
     }
 
 
