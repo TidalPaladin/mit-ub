@@ -41,6 +41,23 @@ class TestTransformerEncoderLayer:
             layer.mlp.gate is not None and isinstance(layer.mlp.gate[-1], type(gate_activation))
         )
 
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    @pytest.mark.parametrize("num_experts, num_slots", [(None, None), (8, 8)])
+    def test_forward_moe(self, device, num_experts, num_slots):
+        B, L, D = 1, 128, 128
+        x = torch.randn(B, L, D, device=device)
+        nhead = D // 16
+        layer = TransformerEncoderLayer(D, nhead, D, num_experts=num_experts, num_slots=num_slots).to(device)
+        with torch.autocast(device_type=device, dtype=torch.float16):
+            out = layer(x)
+        assert out.shape == x.shape
+
     def test_forward_multi_query(self):
         B, L, D = 1, 128, 128
         x = torch.randn(B, L, D)
@@ -221,6 +238,25 @@ class TestTransformerDecoderLayer:
         assert gate_activation is None or (
             layer.mlp.gate is not None and isinstance(layer.mlp.gate[-1], type(gate_activation))
         )
+
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    @pytest.mark.parametrize("num_experts, num_slots", [(None, None), (8, 8)])
+    def test_forward_moe(self, device, num_experts, num_slots):
+        B, Lq, Dq = 1, 64, 128
+        B, Lk, Dk = 1, 128, 32
+        q = torch.randn(B, Lq, Dq, device=device)
+        k = torch.randn(B, Lk, Dk, device=device)
+        nhead = Dq // 16
+        layer = TransformerDecoderLayer(Dq, nhead, Dk, num_experts=num_experts, num_slots=num_slots).to(device)
+        with torch.autocast(device_type=device, dtype=torch.float16):
+            out = layer(q, k)
+        assert out.shape == q.shape
 
     def test_forward_multi_query(self):
         B, Lq, Dq = 1, 64, 128
