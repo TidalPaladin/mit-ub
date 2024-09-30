@@ -95,7 +95,7 @@ We use CIFAR-10 as a testbed for pre-training MiT-UB. Its low resolution makes i
 
 ### Mammography
 
-MiT-UB has been pre-trained and evaluated on mammographic tasks including view classification, breast density assessment, and breast cancer triage. For low-resolution tasks (view classification and breast density assessment) we apply a ViT backbone at 512x384 resolution and a patch size of 16. For high-resolution tasks (breast cancer triage) we apply an AViT backbone at 3072x2304 resolution, patch size 16, and pooled size of 32x24. Training was performed on a proprietary dataset of 450k mammograms. The model achieves 99.9% accuracy on view classification by linear probing. Assessment of breast cancer triage is ongoing, however the model has achieved 0.86 AUC on an enriched test set of 800+ exams.
+MiT-UB has been successfully applied to various mammographic tasks. For low-resolution tasks we apply a ViT backbone at 512x384 resolution and a patch size of 16. For high-resolution tasks we apply an AViT backbone at 3072x2304 resolution, patch size 16, and pooled size of 32x24. 
 
 ## Usage
 
