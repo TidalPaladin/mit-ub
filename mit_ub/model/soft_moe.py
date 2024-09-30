@@ -6,8 +6,6 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
-from .layer_scale import LayerScale
-
 
 class AttentionRouter(nn.Module):
     """
@@ -99,9 +97,9 @@ def _forward_experts(experts: nn.ModuleList, slots: Tensor) -> Tensor:
     return torch.cat(
         [
             # Residual connections seem to provide stability and improve performance
-            expert(slot) + slot
+            expert(slot)
             for expert, slot in zip(experts, slots)
-        ], 
+        ],
         dim=-2,
     )
 
