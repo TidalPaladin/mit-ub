@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from typing import Any, Dict, Final, List, Optional, Set, cast
+from typing import Any, Dict, Final, List, Optional, Set, cast, Tuple
 
 import torch
 import torch.nn as nn
@@ -146,6 +146,8 @@ class JEPA(Task):
         assert self.context_subsample_ratio > 0
         self.ema_alpha = ema_alpha
         self.weight_decay_final = weight_decay_final
+        self.mixup_alpha = 1.0
+        self.mixup_prob = 1.0
 
         # Backbone and EMA weights
         self.backbone = cast(ViT | AdaptiveViT, self.prepare_backbone(backbone))
@@ -326,6 +328,29 @@ class JEPA(Task):
             (pg for optimizer in optimizers for pg in optimizer.param_groups if "weight_decay" in pg),
         )
 
+    @torch.no_grad()
+    def mixup(self, x: Tensor, target: Tensor) -> Tuple[Tensor, Tensor]:
+        # Generate mixup weight
+        N = x.shape[0]
+        dist = torch.distributions.Beta(self.mixup_alpha, self.mixup_alpha)
+        lam = dist.sample(torch.Size((N,))).to(x.device)
+
+        # Generate mask of mixup samples
+        mixup_mask = torch.rand_like(lam) < self.mixup_prob
+
+        # Apply mixup to input and target
+        x = torch.where(
+            mixup_mask.view(-1, *(1,) * len(x.shape[1:])),
+            x.roll(1, 0).lerp_(x, lam.view(-1, *(1,) * len(x.shape[1:]))),
+            x,
+        )
+        target = torch.where(
+            mixup_mask.view(-1, *(1,) * len(target.shape[1:])),
+            target.roll(1, 0).lerp_(target, lam.view(-1, *(1,) * len(target.shape[1:]))),
+            target,
+        )
+        return x, target
+
     def step(
         self,
         batch: Any,
@@ -350,7 +375,13 @@ class JEPA(Task):
         with torch.no_grad():
             self.ema_backbone.eval()
             full_target: Tensor = self.ema_backbone(x, reshape=False)
-            target = target_mask.apply_to_tokens(full_target, fill_value=None)
+
+            # apply mixup, not overwriting full_target
+            if self.training and self.mixup_prob > 0:
+                x, full_target_mixed = self.mixup(x, full_target)
+                target = target_mask.apply_to_tokens(full_target_mixed, fill_value=None)
+            else:
+                target = target_mask.apply_to_tokens(full_target, fill_value=None)
 
         # generate predictions by encoding the context and then running the encoded context
         # plus the positional target queries through the predictor
