@@ -229,13 +229,14 @@ class JEPA(Task):
         # Prepare positional encoding for target queries
         B, _, _ = context.shape
         tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
-        query = self.pos_enc.from_grid(
-            tokenized_size,
-            B,
-            proto=context,
-            normalize=True,
-            add_noise=self.training and self.backbone._position_noise,
-        ).contiguous()
+        with torch.autocast(device_type=x.device.type, dtype=torch.float32):
+            query = self.pos_enc.from_grid(
+                tokenized_size,
+                B,
+                proto=context.to(torch.float32, copy=False),
+                normalize=True,
+                add_noise=self.training and self.backbone._position_noise,
+            ).contiguous()
         query = target_mask.apply_to_tokens(query, fill_value=None)
         L = query.shape[1]
 
@@ -253,14 +254,12 @@ class JEPA(Task):
     @property
     def fraction_complete(self) -> float | None:
         r"""The fraction of training complete as a float between 0 and 1, or None if we can't determine it."""
-        # Try to determine a momentum schedule from ema_alpha to 1.0 over the course of training
         if self.trainer.max_steps:
             current = self.trainer.global_step
             total = self.trainer.max_steps
         elif self.trainer.max_epochs:
             current = self.trainer.current_epoch
             total = self.trainer.max_epochs
-        # Otherwise we can fall back to constant self.ema_alpha
         else:
             return None
         return current / total
