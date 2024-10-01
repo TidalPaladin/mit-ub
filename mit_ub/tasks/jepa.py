@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from typing import Any, Dict, Final, List, Optional, Set, cast, Tuple
+from typing import Any, Dict, Final, List, Optional, Set, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -86,6 +86,8 @@ class JEPA(Task):
             it to the predictor.
         ema_alpha: Smoothing factor for EMA updates.
         predictor_depth: Depth of the predictor network.
+        mixup_alpha: Alpha parameter for the Beta distribution used to sample the mixup weight.
+        mixup_prob: Probability of applying mixup to the input and target.
         optimizer_init: Initial configuration for the optimizer.
         lr_scheduler_init: Initial configuration for the learning rate scheduler.
         lr_interval: Frequency of learning rate update. Can be 'step' or 'epoch'.
@@ -112,6 +114,8 @@ class JEPA(Task):
         context_subsample_ratio: float = 0.5,
         ema_alpha: float = 0.95,
         predictor_depth: int = 4,
+        mixup_alpha: float = 1.0,
+        mixup_prob: float = 0.2,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -146,8 +150,8 @@ class JEPA(Task):
         assert self.context_subsample_ratio > 0
         self.ema_alpha = ema_alpha
         self.weight_decay_final = weight_decay_final
-        self.mixup_alpha = 1.0
-        self.mixup_prob = 1.0
+        self.mixup_alpha = mixup_alpha
+        self.mixup_prob = mixup_prob
 
         # Backbone and EMA weights
         self.backbone = cast(ViT | AdaptiveViT, self.prepare_backbone(backbone))
@@ -330,6 +334,18 @@ class JEPA(Task):
 
     @torch.no_grad()
     def mixup(self, x: Tensor, target: Tensor) -> Tuple[Tensor, Tensor]:
+        r"""Implements MixUp on inputs and teacher network outputs.
+
+        At a high level, this involves linearly combining two inputs and their
+        corresponding targets in a random manner.
+
+        Args:
+            x: The input tensor.
+            target: The target tensor.
+
+        Returns:
+            A tuple containing the mixed input and target.
+        """
         # Generate mixup weight
         N = x.shape[0]
         dist = torch.distributions.Beta(self.mixup_alpha, self.mixup_alpha)
@@ -338,15 +354,18 @@ class JEPA(Task):
         # Generate mask of mixup samples
         mixup_mask = torch.rand_like(lam) < self.mixup_prob
 
+        def right_broadcast(inp: Tensor, proto: Tensor) -> Tensor:
+            return inp.view(-1, *(1,) * len(proto.shape[1:]))
+
         # Apply mixup to input and target
         x = torch.where(
-            mixup_mask.view(-1, *(1,) * len(x.shape[1:])),
-            x.roll(1, 0).lerp_(x, lam.view(-1, *(1,) * len(x.shape[1:]))),
+            right_broadcast(mixup_mask, x),
+            x.roll(1, 0).lerp_(x, right_broadcast(lam, x)),
             x,
         )
         target = torch.where(
-            mixup_mask.view(-1, *(1,) * len(target.shape[1:])),
-            target.roll(1, 0).lerp_(target, lam.view(-1, *(1,) * len(target.shape[1:]))),
+            right_broadcast(mixup_mask, target),
+            target.roll(1, 0).lerp_(target, right_broadcast(lam, target)),
             target,
         )
         return x, target
@@ -431,6 +450,8 @@ class JEPAWithProbe(JEPA, ABC):
         context_subsample_ratio: float = 0.5,
         ema_alpha: float = 0.95,
         predictor_depth: int = 4,
+        mixup_alpha: float = 1.0,
+        mixup_prob: float = 0.2,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -452,6 +473,8 @@ class JEPAWithProbe(JEPA, ABC):
             context_subsample_ratio,
             ema_alpha,
             predictor_depth,
+            mixup_alpha,
+            mixup_prob,
             optimizer_init,
             lr_scheduler_init,
             lr_interval,
