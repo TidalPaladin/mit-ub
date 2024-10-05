@@ -221,6 +221,7 @@ class JEPA(Task):
             {
                 "example_sim": tm.MeanMetric(),
                 "token_sim": tm.MeanMetric(),
+                "normalized_jepa_loss": tm.MeanMetric(),
             }
         )
 
@@ -419,6 +420,10 @@ class JEPA(Task):
                 metrics["example_sim"].update(example_sim)
                 token_sim = average_pairwise_cosine_similarity(full_target, 1, 2)
                 metrics["token_sim"].update(token_sim)
+                # Normalize JEPA loss by target similarity
+                target_sim = average_pairwise_cosine_similarity(target.view(-1, target.shape[-1]), 0, 1)
+                normalized_jepa_loss = loss / (1 - target_sim.clip(min=0, max=1 - EPS))
+                metrics["normalized_jepa_loss"].update(normalized_jepa_loss)
 
         output = {
             "log": {
