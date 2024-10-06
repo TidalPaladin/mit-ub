@@ -59,7 +59,15 @@ class CheXpert(Dataset):
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
         row = self.df.iloc[index]
-        x = load_image(row["Path"]).contiguous()
+        path = Path(row["Path"])
+        if path.is_file():
+            path = path
+        elif path.with_suffix(".tiff").is_file():
+            path = path.with_suffix(".tiff")
+        else:
+            raise FileNotFoundError(path)
+
+        x = load_image(path).contiguous()
         finding, dense_label = self.label_to_tensor(row[self.df.columns[1:]].to_dict())
         if self.transform is not None:
             x = self.transform(x)

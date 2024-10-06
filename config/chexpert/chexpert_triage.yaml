@@ -1,0 +1,96 @@
+fit:
+  compile: true
+  float32_matmul_precision: medium
+  trainer:
+    accelerator: gpu
+    devices: 2
+    strategy: "ddp"
+    precision: "bf16-mixed"
+    max_steps: 250000
+    num_sanity_val_steps: 0
+    default_root_dir: /mnt/storage/users/chase/mitub
+
+    callbacks:
+      - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+        init_args:
+          filename: "epoch={epoch}-step={step}-loss={val/loss:.4f}"
+          monitor: "val/loss"
+          auto_insert_metric_name: false
+          mode: min
+          save_last: true
+
+    logger: 
+      class_path: pytorch_lightning.loggers.wandb.WandbLogger
+      init_args:
+        save_dir: /mnt/storage/users/chase/mitub
+        project: mit-ub
+        name: "mitub-rev6-chexpert-mjepa-triage"
+
+  model:
+    class_path: mit_ub.tasks.ChexpertTask
+    init_args:
+      backbone: "vit-i1-p16-d512"
+      checkpoint: /mnt/storage/users/chase/mitub/mit-ub/khj0w1jy/checkpoints/last.ckpt
+      strict_checkpoint: false
+
+      focal_loss: true
+
+      log_train_metrics_interval: 50
+      optimizer_init:
+        class_path: torch.optim.AdamW
+        init_args:
+          lr: 0.00005
+          weight_decay: 0.05
+      lr_interval: "step"
+      lr_scheduler_init:
+        class_path: torch.optim.lr_scheduler.OneCycleLR
+        init_args:
+          max_lr: 0.00005
+          div_factor: 5
+          final_div_factor: 50
+          pct_start: 0.10
+          three_phase: false
+          total_steps: 250000
+
+  data:
+    class_path: mit_ub.data.CheXpertDataModule
+    init_args:
+      root: /mnt/active_1/chase/chexpert
+      batch_size: 32
+      num_workers: 12
+      pin_memory: true
+
+      train_transforms:
+        class_path: torchvision.transforms.v2.Compose
+        init_args:
+          transforms:
+
+            - class_path: torchvision.transforms.v2.RandomResizedCrop
+              init_args:
+                size: [512, 512]
+                scale: [0.8, 1.0]
+                ratio: [0.8, 1.2]
+                antialias: true
+
+            - class_path: torchvision.transforms.v2.RandomHorizontalFlip
+              init_args:
+                p: 0.5
+
+            - class_path: torchvision.transforms.v2.RandomVerticalFlip
+              init_args:
+                p: 0.5
+
+            - class_path: torchvision.transforms.v2.ColorJitter
+              init_args:
+                brightness: 0.2
+                contrast: 0.2
+
+            - class_path: torchvision.transforms.v2.RandomInvert
+              init_args:
+                p: 0.5
+
+      val_transforms:
+        class_path: torchvision.transforms.v2.Resize
+        init_args:
+          size: [512, 512]
+          antialias: true
