@@ -5,7 +5,7 @@
 groups = ["default", "quality", "test"]
 strategy = ["cross_platform", "inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:e075a88888fd81765f4944452e52ea9c1990f2155d1d4d1e325652bb11914683"
+content_hash = "sha256:6aab177275d9438b24f7fc8dfc215265e2c2e2e49068d58a1281977b4d996414"
 
 [[metadata.targets]]
 requires_python = ">=3.11,<3.12"
@@ -2534,6 +2534,16 @@ dependencies = [
     "deep-helpers @ git+https://github.com/TidalPaladin/deep-helpers.git",
     "pytorch-lightning>=2.1.2",
     "torch-dicom @ git+https://github.com/medcognetics/torch-dicom.git",
+]
+
+[[package]]
+name = "torchao"
+version = "0.5.0"
+summary = "Package for applying ao techniques to GPU models"
+groups = ["default"]
+files = [
+    {file = "torchao-0.5.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:3b8be5c3dcb641688397501d55cab4804688c3d27bdb9f8e0abcba1f2810678e"},
+    {file = "torchao-0.5.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:2aede6d89481ccda6bfd81f1666707765244de97697cb42b57c1001d9f928492"},
 ]
 
 [[package]]
