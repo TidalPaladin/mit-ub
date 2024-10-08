@@ -1,5 +1,5 @@
 from copy import copy
-from typing import Any, Dict, Optional, Set, cast
+from typing import Any, Dict, List, Optional, cast
 
 import torch
 import torch.nn as nn
@@ -46,7 +46,7 @@ class ClassificationTask(Task):
         strict_checkpoint: bool = True,
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
-        weight_decay_exemptions: Set[str] = set(),
+        parameter_groups: List[Dict[str, Any]] = [],
     ):
         super().__init__(
             optimizer_init,
@@ -58,7 +58,7 @@ class ClassificationTask(Task):
             strict_checkpoint,
             log_train_metrics_interval,
             log_train_metrics_on_epoch,
-            weight_decay_exemptions,
+            parameter_groups,
         )
         self.num_classes = num_classes
 
@@ -142,7 +142,7 @@ class JEPAWithClassification(JEPAWithProbe):
         strict_checkpoint: bool = True,
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
-        weight_decay_exemptions: Set[str] = set(),
+        parameter_groups: List[Dict[str, Any]] = [],
         weight_decay_final: float | None = None,
     ):
         self.num_classes = num_classes
@@ -166,7 +166,7 @@ class JEPAWithClassification(JEPAWithProbe):
             strict_checkpoint,
             log_train_metrics_interval,
             log_train_metrics_on_epoch,
-            weight_decay_exemptions,
+            parameter_groups,
             weight_decay_final,
         )
 

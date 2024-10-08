@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from typing import Any, Dict, Final, List, Optional, Set, Tuple, cast
+from typing import Any, Dict, Final, List, Optional, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -97,7 +97,7 @@ class JEPA(Task):
         strict_checkpoint: If True, the model must exactly match the checkpoint.
         log_train_metrics_interval: Interval (in steps) at which to log training metrics.
         log_train_metrics_on_epoch: If True, log training metrics at the end of each epoch.
-        weight_decay_exemptions: Set of parameter names to exempt from weight decay.
+        parameter_groups: Dictionary of parameter groups and their corresponding weight decay values.
         weight_decay_final: Final weight decay value. If set, the weight decay will be linearly
             annealed from the current value to this value over the course of training.
     """
@@ -125,7 +125,7 @@ class JEPA(Task):
         strict_checkpoint: bool = True,
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
-        weight_decay_exemptions: Set[str] = set(),
+        parameter_groups: List[Dict[str, Any]] = [],
         weight_decay_final: float | None = None,
     ):
         super().__init__(
@@ -138,7 +138,7 @@ class JEPA(Task):
             strict_checkpoint,
             log_train_metrics_interval,
             log_train_metrics_on_epoch,
-            weight_decay_exemptions,
+            parameter_groups,
         )
         self.context_ratio = context_ratio
         self.context_scale = context_scale
@@ -302,21 +302,21 @@ class JEPA(Task):
                 ema_param.data /= self.trainer.world_size
             dist_barrier()
 
-    def update_weight_decay(self) -> None:
+    def update_weight_decay(self) -> List[float | None]:
         """Update the weight decay for each parameter group based on the current training progress."""
         assert self.weight_decay_final is not None
-
-        # Check where we are in the training loop, abort if we can't determine
-        fraction_complete = self.fraction_complete
-        if fraction_complete is None:
-            return
 
         # Get optimizer and wrap as a list if necessary
         optimizers = self.optimizers()
         optimizers = [optimizers] if isinstance(optimizers, Optimizer) else optimizers
         optimizers = cast(List[Optimizer], optimizers)
 
-        def update_weight_decay(pg: Dict[str, Any]) -> None:
+        # Check where we are in the training loop, abort if we can't determine
+        fraction_complete = self.fraction_complete
+        if fraction_complete is None:
+            return [pg.get("weight_decay", None) for opt in optimizers for pg in opt.param_groups]
+
+        def update_weight_decay(pg: Dict[str, Any]) -> float | None:
             current_wd = pg["weight_decay"]
             # Some layers may be exempt from weight decay
             if current_wd == 0:
@@ -324,14 +324,16 @@ class JEPA(Task):
 
             initial_wd = pg.setdefault("initial_weight_decay", current_wd)
             final_wd = self.weight_decay_final
-            new_wd = initial_wd + (final_wd - initial_wd) * fraction_complete
+            new_wd = max(current_wd, initial_wd + (final_wd - initial_wd) * fraction_complete)
             pg["weight_decay"] = new_wd
+            return new_wd
 
         # Update weight decay for each optimizer
-        map(
+        updates = map(
             update_weight_decay,
             (pg for optimizer in optimizers for pg in optimizer.param_groups if "weight_decay" in pg),
         )
+        return list(updates)
 
     @torch.no_grad()
     def mixup(self, x: Tensor, target: Tensor) -> Tuple[Tensor, Tensor]:
@@ -466,7 +468,7 @@ class JEPAWithProbe(JEPA, ABC):
         strict_checkpoint: bool = True,
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
-        weight_decay_exemptions: Set[str] = set(),
+        parameter_groups: List[Dict[str, Any]] = [],
         weight_decay_final: float | None = None,
     ):
         super().__init__(
@@ -489,7 +491,7 @@ class JEPAWithProbe(JEPA, ABC):
             strict_checkpoint,
             log_train_metrics_interval,
             log_train_metrics_on_epoch,
-            weight_decay_exemptions,
+            parameter_groups,
             weight_decay_final,
         )
         self.linear_probe = self.create_probe_head()
