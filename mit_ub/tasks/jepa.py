@@ -125,7 +125,7 @@ class JEPA(Task):
         strict_checkpoint: bool = True,
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
-        parameter_groups: Dict[Tuple[str, ...], Dict[str, float]] = {},
+        parameter_groups: List[Dict[str, Any]] = [],
         weight_decay_final: float | None = None,
     ):
         super().__init__(
@@ -468,7 +468,7 @@ class JEPAWithProbe(JEPA, ABC):
         strict_checkpoint: bool = True,
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
-        parameter_groups: Dict[Tuple[str, ...], Dict[str, float]] = {},
+        parameter_groups: List[Dict[str, Any]] = [],
         weight_decay_final: float | None = None,
     ):
         super().__init__(

@@ -433,10 +433,10 @@ files = [
 
 [[package]]
 name = "deep-helpers"
-version = "0.1.dev61"
+version = "0.1.dev63"
 requires_python = ">=3.10,<3.12"
 git = "https://github.com/TidalPaladin/deep-helpers.git"
-revision = "65e90c8bfcee23f039a3ace96b971e5abc3a93ff"
+revision = "45d6f0f3b44c447a12883a35a0bb2023c8c00042"
 summary = ""
 groups = ["default"]
 dependencies = [

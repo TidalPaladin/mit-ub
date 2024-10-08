@@ -1,5 +1,5 @@
 from copy import copy
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -33,7 +33,7 @@ class JEPAWithViewPosition(JEPAWithProbe):
         strict_checkpoint: bool = True,
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
-        parameter_groups: Dict[Tuple[str, ...], Dict[str, float]] = {},
+        parameter_groups: List[Dict[str, Any]] = [],
         weight_decay_final: float | None = None,
     ):
         super().__init__(

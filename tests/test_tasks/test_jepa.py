@@ -161,9 +161,9 @@ class TestJEPA:
                 assert_close(param.data, expected.expand_as(param.data))
 
     def test_update_weight_decay(self, mocker, task):
-        task.parameter_groups = {
-            ("jepa_predictor",): {"weight_decay": 1.0},
-        }
+        task.parameter_groups = [
+            {"params": ("jepa_predictor",), "weight_decay": 1.0},
+        ]
         task.weight_decay_final = 0.5
         trainer = mocker.MagicMock(spec_set=pl.Trainer)
         trainer.global_step = 100
