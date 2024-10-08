@@ -160,6 +160,23 @@ class TestJEPA:
             for param in task.ema_backbone.parameters():
                 assert_close(param.data, expected.expand_as(param.data))
 
+    def test_update_weight_decay(self, mocker, task):
+        task.parameter_groups = {
+            ("jepa_predictor",): {"weight_decay": 1.0},
+        }
+        task.weight_decay_final = 0.5
+        trainer = mocker.MagicMock(spec_set=pl.Trainer)
+        trainer.global_step = 100
+        trainer.max_steps = 100
+        mocker.patch.object(task, "_trainer", trainer)
+        opt = task.configure_optimizers()["optimizer"]
+        mocker.patch.object(task, "optimizers", side_effect=lambda: opt)
+        task.update_weight_decay()
+        # We shouldn't decrease weight decay, only increase it.
+        # The first parameter group is the custom one for jepa_predictor.
+        assert opt.param_groups[0]["weight_decay"] == 1.0
+        assert opt.param_groups[1]["weight_decay"] == 0.5
+
     def test_fit(self, task, datamodule, logger):
         task.weight_decay_final = 4.0
         trainer = pl.Trainer(
