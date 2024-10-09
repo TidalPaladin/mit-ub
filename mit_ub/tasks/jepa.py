@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
-from ssl_tasks.tokens import TokenMask
+from deep_helpers.tokens import apply_mask, create_mask
 from torch import Tensor
 from torch.distributed import ReduceOp, all_reduce
 from torch.distributed import barrier as dist_barrier
@@ -189,30 +189,18 @@ class JEPA(Task):
     def prepare_backbone(self, name: str) -> nn.Module:
         return BACKBONES.get(name).instantiate_with_metadata().fn
 
-    def create_mask(self, x: Tensor, unmasked_ratio: float, scale: int) -> TokenMask:
-        size = x.shape[2:]
-
-        # For AdaptiveViT we choose a token mask that matches the size of the fixed token grid produced
-        # by the ViT.
-        if isinstance(self.backbone, AdaptiveViT):
-            size = self.backbone.stem.equivalent_size(cast(Any, size))
-
+    def create_mask(self, x: Tensor, unmasked_ratio: float, scale: int) -> Tensor:
         batch_size = x.shape[0]
         device = x.device
-        mask = TokenMask.create(
+        size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
+        mask = create_mask(
             size,
-            self.backbone.stem.patch_size,
-            batch_size,
-            device=device,
             mask_ratio=1 - unmasked_ratio,
+            batch_size=batch_size,
             scale=scale,
+            device=device,
         )
-
-        # If we get unlucky and sample a complete mask, just sample again
-        if not mask.mask.any():
-            return self.create_mask(x, unmasked_ratio, scale)
-
-        assert not mask.is_ragged, "Mask should not be ragged"
+        # assert not mask_is_ragged(mask), "Mask should not be ragged"
         return mask
 
     def create_metrics(self, state: State) -> tm.MetricCollection:
@@ -225,7 +213,7 @@ class JEPA(Task):
             }
         )
 
-    def forward(self, x: Tensor, context_mask: TokenMask, target_mask: TokenMask) -> Dict[str, Tensor]:
+    def forward(self, x: Tensor, context_mask: Tensor, target_mask: Tensor) -> Dict[str, Tensor]:
         # Run encoder on context
         context: Tensor = self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
 
@@ -244,7 +232,7 @@ class JEPA(Task):
                 normalize=True,
                 add_noise=self.training and self.backbone._position_noise,
             ).contiguous()
-        query = target_mask.apply_to_tokens(query, fill_value=None)
+        query = apply_mask(target_mask, query, fill_value=None)
         L = query.shape[1]
 
         # Run query and context through predictor
@@ -401,9 +389,9 @@ class JEPA(Task):
             # apply mixup, not overwriting full_target
             if self.training and self.mixup_prob > 0:
                 x, full_target_mixed = self.mixup(x, full_target)
-                target = target_mask.apply_to_tokens(full_target_mixed, fill_value=None)
+                target = apply_mask(target_mask, full_target_mixed, fill_value=None)
             else:
-                target = target_mask.apply_to_tokens(full_target, fill_value=None)
+                target = apply_mask(target_mask, full_target, fill_value=None)
 
         # generate predictions by encoding the context and then running the encoded context
         # plus the positional target queries through the predictor

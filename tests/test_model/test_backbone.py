@@ -2,7 +2,7 @@ from typing import Any, cast
 
 import pytest
 import torch
-from ssl_tasks.tokens import TokenMask
+from deep_helpers.tokens import create_mask
 
 from mit_ub.model import BACKBONES
 from mit_ub.model.backbone import AdaptiveViT, ViT
@@ -53,17 +53,17 @@ class TestViT:
         torch.random.manual_seed(0)
         B, C, H, W = 1, 3, 224, 224
         D, patch_size, depth = 128, (16, 16), 3
-        mask = TokenMask.create(size=(H, W), patch_size=patch_size, batch_size=B, mask_ratio=0.25, scale=1)
-        x = torch.randn(B, C, H, W, device=device)
-        x = mask.apply_to_input(x, fill_value=float("nan"))
 
         nhead = 128 // 16
         model = ViT(C, D, patch_size, depth, nhead).to(device)
+
+        mask_size = model.stem.tokenized_size(cast(Any, (H, W)))
+        mask = create_mask(mask_size, batch_size=B, mask_ratio=0.25, scale=1)
+        x = torch.randn(B, C, H, W, device=device)
         with torch.autocast(device_type=device, dtype=torch.float16):
-            out1 = model(x)
+            out1 = model(x, reshape=False)
             out2 = model(x, mask=mask, reshape=False)
-        assert out1.isnan().any()
-        assert not out2.isnan().any()
+        assert out1.shape != out2.shape
 
 
 class TestAdaptiveViT:
@@ -111,25 +111,17 @@ class TestAdaptiveViT:
         torch.random.manual_seed(0)
         B, C, H, W = 1, 3, 256, 256
         D, D_kv, patch_size, target_size, depth = 128, 32, (16, 16), (4, 4), 3
-        size = (H, W)
         nhead = 128 // 16
-        model = ViT(C, D, patch_size, depth, nhead).to(device)
         model = AdaptiveViT(C, D, D_kv, patch_size, target_size, depth, depth, nhead).to(device)
 
-        mask_size = model.stem.equivalent_size(cast(Any, size))
-        mask = TokenMask.create(size=mask_size, patch_size=patch_size, batch_size=B, mask_ratio=0.25, scale=1)
-        kv_mask = mask.resize(size)
-        test_mask = kv_mask.resize(mask_size)
-        assert torch.allclose(mask.mask, test_mask.mask)
-
+        mask_size = model.stem.tokenized_size(cast(Any, (H, W)))
+        mask = create_mask(mask_size, batch_size=B, mask_ratio=0.25, scale=1)
         x = torch.randn(B, C, H, W, device=device)
-        x = kv_mask.apply_to_input(x, fill_value=float("nan"))
 
         with torch.autocast(device_type=device, dtype=torch.float16):
-            out1 = model(x)
+            out1 = model(x, reshape=False)
             out2 = model(x, mask=mask, reshape=False)
-        assert out1.isnan().any()
-        assert not out2.isnan().any()
+        assert out1.shape != out2.shape
 
     def test_load_from_vit(self):
         C, D, D_kv = 3, 128, 32

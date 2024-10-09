@@ -10,7 +10,6 @@ authors = [
     {name = "Scott Chase Waggener", email = "tidalpaladin@protonmail.com"},
 ]
 dependencies = [
-    "setuptools",
     "numpy",
     "pydicom",
     "torch",
@@ -28,13 +27,7 @@ dependencies = [
     "torch-dicom[datamodule] @ git+https://github.com/medcognetics/torch-dicom.git",
     "triton-helpers @ git+https://github.com/TidalPaladin/triton-helpers.git",
     "jsonargparse[signatures]",
-    "triton>=2.0",
-    "pip>=24.0",
-    "ipykernel>=6.29.4",
-    "plotly",
-    "nbformat>=4.2.0",
     "tqdm-multiprocessing",
-    "ssl-tasks @ git+https://github.com/TidalPaladin/ssl-tasks.git",
     "torchtune>=0.2.1",
     "torchao>=0.5.0",
 ]
