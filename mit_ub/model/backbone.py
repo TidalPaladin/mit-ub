@@ -1,9 +1,10 @@
 from typing import Any, List, Optional, Tuple, Type, cast
 
 import torch.nn as nn
+from deep_helpers.tokens import apply_mask
 from einops import rearrange
-from ssl_tasks.tokens import TokenMask
 from torch import Tensor
+from torch.nn import functional as F
 
 from .mlp import ReLU2
 from .stem import AdaptiveTokenizer2d, AdaptiveTokenizer3d, PatchEmbed2d, PatchEmbed3d
@@ -96,7 +97,7 @@ class ViT(nn.Module):
         self,
         x: Tensor,
         reshape: bool = True,
-        mask: TokenMask | None = None,
+        mask: Tensor | None = None,
         mask_fill_value: float | Tensor | None = None,
     ) -> Tensor:
         B, C, *original_size = x.shape
@@ -105,7 +106,7 @@ class ViT(nn.Module):
         # Tokenize and apply mask
         x = self.stem(x)
         if mask is not None:
-            x = mask.apply_to_tokens(x, fill_value=mask_fill_value)
+            x = apply_mask(mask, x, fill_value=mask_fill_value)
 
         # Transformer blocks and output norm
         for block in self.blocks:
@@ -223,16 +224,21 @@ class AdaptiveViT(ViT):
     def convert_mask_to_kv_mask(
         self,
         input_size: Tuple[int, int] | Tuple[int, int, int],
-        mask: TokenMask,
-    ) -> TokenMask:
-        effective_kv_size = self.stem.equivalent_size_kv(cast(Any, input_size))
-        return mask.resize(effective_kv_size)
+        mask: Tensor,
+    ) -> Tensor:
+        size = self.stem.tokenized_size(cast(Any, input_size))
+        kv_size = self.stem.kv_size(cast(Any, input_size))
+        B = mask.shape[0]
+        mask = mask.view(B, 1, *size)
+        mask = F.interpolate(mask.float(), size=kv_size, mode="nearest").to(mask.dtype)
+        mask = mask.view(B, -1)
+        return mask
 
     def forward(
         self,
         x: Tensor,
         reshape: bool = True,
-        mask: TokenMask | None = None,
+        mask: Tensor | None = None,
         mask_fill_value: float | Tensor | None = None,
     ) -> Tensor:
         B, C, *original_size = x.shape
@@ -244,8 +250,8 @@ class AdaptiveViT(ViT):
         # Apply token mask if given
         if mask is not None:
             kv_mask = self.convert_mask_to_kv_mask(cast(Any, tuple(original_size)), mask)
-            q = mask.apply_to_tokens(q, fill_value=mask_fill_value)
-            kv = kv_mask.apply_to_tokens(kv, fill_value=mask_fill_value)
+            q = apply_mask(mask, q, fill_value=mask_fill_value)
+            kv = apply_mask(kv_mask, kv, fill_value=mask_fill_value)
         else:
             kv_mask = None
 

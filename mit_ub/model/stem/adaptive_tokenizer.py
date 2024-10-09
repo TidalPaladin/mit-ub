@@ -4,7 +4,6 @@ from typing import Tuple, Type, cast
 import torch.nn as nn
 from deep_helpers.helpers import to_tuple
 from einops.layers.torch import Rearrange
-from ssl_tasks.helpers import divide_tuple
 from torch import Tensor
 
 from ..mlp import ReLU2
@@ -65,7 +64,8 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         return self._target_shape
 
     def kv_size(self, input_size: Tuple[int, int]) -> Tuple[int, int]:
-        return cast(Tuple[int, int], divide_tuple(input_size, self.patch_size))
+        result = tuple(s // p for s, p in zip(input_size, self.patch_size))
+        return cast(Tuple[int, int], result)
 
     def equivalent_size(self, input_size: Tuple[int, int]) -> Tuple[int, int]:
         h, w = tuple(s * p for s, p in zip(self.tokenized_size(input_size), self.patch_size))
@@ -143,7 +143,8 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         return self._target_shape
 
     def kv_size(self, input_size: Tuple[int, int, int]) -> Tuple[int, int, int]:
-        return cast(Tuple[int, int, int], divide_tuple(input_size, self.patch_size))
+        result = tuple(s // p for s, p in zip(input_size, self.patch_size))
+        return cast(Tuple[int, int, int], result)
 
     def equivalent_size(self, input_size: Tuple[int, int, int]) -> Tuple[int, int, int]:
         d, h, w = tuple(s * p for s, p in zip(self.tokenized_size(input_size), self.patch_size))
