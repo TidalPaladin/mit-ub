@@ -85,6 +85,7 @@ class JEPA(Task):
         context_subsample_ratio: Sampling ratio for encoded context just before passing
             it to the predictor.
         ema_alpha: Smoothing factor for EMA updates.
+        momentum_schedule: If True, use a momentum schedule for EMA updates.
         predictor_depth: Depth of the predictor network.
         mixup_alpha: Alpha parameter for the Beta distribution used to sample the mixup weight.
         mixup_prob: Probability of applying mixup to the input and target.
@@ -113,6 +114,7 @@ class JEPA(Task):
         target_scale: int = 2,
         context_subsample_ratio: float = 0.5,
         ema_alpha: float = 0.95,
+        momentum_schedule: bool = False,
         predictor_depth: int = 4,
         mixup_alpha: float = 1.0,
         mixup_prob: float = 0.2,
@@ -149,6 +151,7 @@ class JEPA(Task):
         assert self.target_ratio > 0
         assert self.context_subsample_ratio > 0
         self.ema_alpha = ema_alpha
+        self.momentum_schedule = momentum_schedule
         self.weight_decay_final = weight_decay_final
         self.mixup_alpha = mixup_alpha
         self.mixup_prob = mixup_prob
@@ -261,6 +264,8 @@ class JEPA(Task):
 
     def get_ema_momentum(self) -> float:
         r"""Get the momentum for the EMA update based on the current step or epoch."""
+        if not self.momentum_schedule:
+            return self.ema_alpha
         fraction_complete = self.fraction_complete
         fraction_complete = fraction_complete if fraction_complete is not None else 0.0
         return self.ema_alpha + (1 - self.ema_alpha) * fraction_complete
@@ -444,6 +449,7 @@ class JEPAWithProbe(JEPA, ABC):
         target_scale: int = 2,
         context_subsample_ratio: float = 0.5,
         ema_alpha: float = 0.95,
+        momentum_schedule: bool = False,
         predictor_depth: int = 4,
         mixup_alpha: float = 1.0,
         mixup_prob: float = 0.2,
@@ -467,6 +473,7 @@ class JEPAWithProbe(JEPA, ABC):
             target_scale,
             context_subsample_ratio,
             ema_alpha,
+            momentum_schedule,
             predictor_depth,
             mixup_alpha,
             mixup_prob,
