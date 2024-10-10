@@ -5,7 +5,7 @@
 groups = ["default", "quality", "test"]
 strategy = ["cross_platform", "inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:ae718ef5c4495bccfd1802d90bd694fc2a4a261f9f0b14ced9dfffe5973d5e31"
+content_hash = "sha256:28a37966ab492edec57624fbe32fbc1b350e1c64a7a8fc9113a179919fad29b2"
 
 [[metadata.targets]]
 requires_python = ">=3.11,<3.12"
@@ -123,6 +123,20 @@ dependencies = [
 files = [
     {file = "autopep8-2.3.1-py2.py3-none-any.whl", hash = "sha256:a203fe0fcad7939987422140ab17a930f684763bf7335bdb6709991dd7ef6c2d"},
     {file = "autopep8-2.3.1.tar.gz", hash = "sha256:8d6c87eba648fdcfc83e29b788910b8643171c395d9c4bcf115ece035b9c9dda"},
+]
+
+[[package]]
+name = "bitsandbytes"
+version = "0.44.1"
+summary = "k-bit optimizers and matrix multiplication routines."
+groups = ["default"]
+dependencies = [
+    "numpy",
+    "torch",
+]
+files = [
+    {file = "bitsandbytes-0.44.1-py3-none-manylinux_2_24_x86_64.whl", hash = "sha256:b2f24c6cbf11fc8c5d69b3dcecee9f7011451ec59d6ac833e873c9f105259668"},
+    {file = "bitsandbytes-0.44.1-py3-none-win_amd64.whl", hash = "sha256:8e68e12aa25d2cf9a1730ad72890a5d1a19daa23f459a6a4679331f353d58cb4"},
 ]
 
 [[package]]

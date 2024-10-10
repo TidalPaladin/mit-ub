@@ -30,6 +30,7 @@ dependencies = [
     "tqdm-multiprocessing",
     "torchtune>=0.2.1",
     "torchao>=0.5.0",
+    "bitsandbytes>=0.44.1",
 ]
 readme = "README.md"
 license = {text = "Apache"}

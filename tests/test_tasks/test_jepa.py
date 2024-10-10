@@ -64,15 +64,18 @@ class TestJEPA:
         return JEPA(backbone, optimizer_init=optimizer_init, context_scale=1)
 
     @pytest.mark.parametrize(
-        "max_steps,current_step,ema_alpha,expected",
+        "momentum_schedule,max_steps,current_step,ema_alpha,expected",
         [
-            (1000, 0, 0.95, 0.95),
-            (1000, 1000, 0.95, 1.0),
-            (1000, 500, 0.95, 0.975),
+            (True, 1000, 0, 0.95, 0.95),
+            (True, 1000, 1000, 0.95, 1.0),
+            (True, 1000, 500, 0.95, 0.975),
+            (False, 1000, 1000, 0.95, 0.95),
         ],
     )
-    def test_ema_momentum_step(self, mocker, vit_dummy, optimizer_init, max_steps, current_step, ema_alpha, expected):
-        task = JEPA(vit_dummy, optimizer_init=optimizer_init, ema_alpha=ema_alpha)
+    def test_ema_momentum_step(
+        self, mocker, vit_dummy, optimizer_init, momentum_schedule, max_steps, current_step, ema_alpha, expected
+    ):
+        task = JEPA(vit_dummy, optimizer_init=optimizer_init, ema_alpha=ema_alpha, momentum_schedule=momentum_schedule)
         trainer = mocker.MagicMock(spec_set=pl.Trainer)
         trainer.max_steps = max_steps
         trainer.global_step = current_step
@@ -84,17 +87,18 @@ class TestJEPA:
         assert actual == expected
 
     @pytest.mark.parametrize(
-        "max_epochs,current_epoch,ema_alpha,expected",
+        "momentum_schedule,max_epochs,current_epoch,ema_alpha,expected",
         [
-            (100, 0, 0.95, 0.95),
-            (100, 100, 0.95, 1.0),
-            (100, 50, 0.95, 0.975),
+            (True, 100, 0, 0.95, 0.95),
+            (True, 100, 100, 0.95, 1.0),
+            (True, 100, 50, 0.95, 0.975),
+            (False, 100, 100, 0.95, 0.95),
         ],
     )
     def test_ema_momentum_epoch(
-        self, mocker, vit_dummy, optimizer_init, max_epochs, current_epoch, ema_alpha, expected
+        self, mocker, vit_dummy, optimizer_init, momentum_schedule, max_epochs, current_epoch, ema_alpha, expected
     ):
-        task = JEPA(vit_dummy, optimizer_init=optimizer_init, ema_alpha=ema_alpha)
+        task = JEPA(vit_dummy, optimizer_init=optimizer_init, ema_alpha=ema_alpha, momentum_schedule=momentum_schedule)
         trainer = mocker.MagicMock(spec_set=pl.Trainer)
         trainer.max_steps = None
         trainer.global_step = None
