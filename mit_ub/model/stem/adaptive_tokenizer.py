@@ -80,19 +80,11 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
 
         q = self.patch(x)
         q = self.norm(q)
-        q = q + self.pos_enc.from_grid(
-            self.tokenized_size((H, W)),
-            B,
-            proto=q,
-            normalize=True,
-            add_noise=self.training and self.position_noise,
-        )
+        q = q + self.pos_enc(self.tokenized_size((H, W)))
 
         kv = self.kv(x)
         kv = self.norm_kv(kv)
-        kv = kv + self.pos_enc_kv.from_grid(
-            self.kv_size((H, W)), B, proto=kv, normalize=True, add_noise=self.training and self.position_noise
-        )
+        kv = kv + self.pos_enc_kv(self.kv_size((H, W)))
 
         return q, kv
 
@@ -155,18 +147,10 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
 
         q = self.patch(x)
         q = self.norm(q)
-        q = q + self.pos_enc.from_grid(
-            self.tokenized_size((D, H, W)),
-            B,
-            proto=q,
-            normalize=True,
-            add_noise=self.training and self.position_noise,
-        )
+        q = q + self.pos_enc(self.tokenized_size((D, H, W)))
 
         kv = self.kv(x)
         kv = self.norm_kv(kv)
-        kv = kv + self.pos_enc_kv.from_grid(
-            self.kv_size((D, H, W)), B, proto=kv, normalize=True, add_noise=self.training and self.position_noise
-        )
+        kv = kv + self.pos_enc_kv(self.kv_size((D, H, W)))
 
         return q, kv

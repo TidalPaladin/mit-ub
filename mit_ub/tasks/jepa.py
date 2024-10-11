@@ -227,14 +227,7 @@ class JEPA(Task):
         # Prepare positional encoding for target queries
         B, _, _ = context.shape
         tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
-        with torch.autocast(device_type=x.device.type, dtype=torch.float32):
-            query = self.pos_enc.from_grid(
-                tokenized_size,
-                B,
-                proto=context.to(torch.float32, copy=False),
-                normalize=True,
-                add_noise=self.training and self.backbone._position_noise,
-            ).contiguous()
+        query = self.pos_enc(tokenized_size).expand(B, -1, -1)
         query = apply_mask(target_mask, query, fill_value=None)
         L = query.shape[1]
 

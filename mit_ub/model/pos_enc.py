@@ -1,146 +1,143 @@
-from typing import Final, Optional, Sequence
+from typing import Callable, Sequence
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
-from .lora import LoRATarget, SupportsLoRA, freeze_non_lora
-from .mlp import MLP, ReLU2
+from .mlp import relu2
 
 
-# Bound for position noise in grid cell units. This is set slightly below 0.5
-# so that +- 0.5 is still in the cell of the base grid.
-NOISE_BOUND: Final = 0.45
-# Scale for normally distributed noise with zero mean.
-NOISE_SCALE: Final = NOISE_BOUND / 2
+@torch.compile(fullgraph=True, mode="reduce-overhead")
+def create_grid(
+    dims: Sequence[int],
+    dtype: torch.dtype = torch.float32,
+    device: torch.device = torch.device("cpu"),
+    normalize: bool = True,
+) -> Tensor:
+    r"""Create a grid of coordinate values given the size of each dimension.
+
+    Args:
+        dims:
+            The length of each dimension
+        proto:
+            If provided, a source tensor with which to match device / requires_grad
+        normalize:
+            If true, normalize coordinate values on the range :math:`\[-1, 1\]`
+
+    Shapes:
+        * Output - :math:`(1, L, C)` where :math:`C` is ``len(dims)`` and :math:`L` is ``product(dims)``
+    """
+    if normalize:
+        lens = [torch.linspace(-1, 1, d, device=device, dtype=dtype) for d in dims]
+    else:
+        lens = [torch.arange(d, device=device, dtype=dtype) for d in dims]
+    grid = torch.stack(torch.meshgrid(lens, indexing="ij"), dim=-1)
+    return grid.view(1, -1, len(dims))
 
 
-class PositionEncoder(nn.Module):
-    r"""Base class for positional encodings"""
+@torch.compile(fullgraph=True, mode="reduce-overhead")
+def relative_factorized_position_forward(
+    dims: Sequence[int],
+    w1: Tensor,
+    b1: Tensor | None,
+    w2: Tensor,
+    b2: Tensor | None,
+    w_norm: Tensor | None,
+    b_norm: Tensor | None,
+    activation: Callable[[Tensor], Tensor] = relu2,
+    dropout: float = 0.0,
+    training: bool = True,
+) -> Tensor:
+    """
+    Perform the forward pass for the relative factorized position encoding.
 
-    def __init__(self):
-        super().__init__()
+    Args:
+        dims:
+            The length of each dimension
+        w1:
+            The weight tensor for the first linear layer
+        b1:
+            The bias tensor for the first linear layer
+        w2:
+            The weight tensor for the second linear layer
+        b2:
+            The bias tensor for the second linear layer
+        w_norm:
+            The weight tensor for the layer normalization
+        b_norm:
+            The bias tensor for the layer normalization
+        activation:
+            The activation function to be applied after the first linear layer
+        dropout:
+            The dropout probability
+        training:
+            Whether the model is in training mode
 
-    @torch.jit.export  # type: ignore
-    def from_grid(
-        self,
-        dims: Sequence[int],
-        batch_size: int = 1,
-        proto: Optional[Tensor] = None,
-        requires_grad: bool = True,
-        normalize: bool = True,
-        add_noise: bool = False,
-    ):
-        r"""Creates positional encodings for a coordinate space with lengths given in ``dims``.
-        Args:
-            dims:
-                Forwarded to :func:`create_grid`
-            batch_size:
-                Batch size, for matching the coordinate grid against a batch of vectors that need
-                positional encoding.
-            proto:
-                Forwarded to :func:`create_grid`
-            requires_grad:
-                Forwarded to :func:`create_grid`
-            normalize:
-                Forwarded to :func:`create_grid`
-            add_noise:
-                Forwarded to :func:`create_grid`
-
-        Keyword Args:
-            Forwarded to :func:`create_grid`
-        Shapes:
-            * Output - :math:`(L, N, D)` where :math:`D` is the embedding size, :math:`L` is ``product(dims)``,
-              and :math:`N` is ``batch_size``.
-        """
-        grid = self.create_grid(dims, proto, requires_grad, normalize, add_noise)
-        pos_enc = self(grid).expand(batch_size, -1, -1)
-        return pos_enc
-
-    @staticmethod
-    def create_grid(
-        dims: Sequence[int],
-        proto: Optional[Tensor] = None,
-        requires_grad: bool = True,
-        normalize: bool = True,
-        add_noise: bool = False,
-    ) -> Tensor:
-        r"""Create a grid of coordinate values given the size of each dimension.
-        Args:
-            dims:
-                The length of each dimension
-            proto:
-                If provided, a source tensor with which to match device / requires_grad
-            requires_grad:
-                Optional override for requires_grad
-            normalize:
-                If true, normalize coordinate values on the range :math:`\[-1, 1\]`
-            add_noise:
-                If true, add noise to the grid. The noise is sampled from a uniform distribution on
-                the range :math:`\[-0.5, 0.5\]` and is applied prior to normalization.
-
-        Shapes:
-            * Output - :math:`(1, L, C)` where :math:`C` is ``len(dims)`` and :math:`L` is ``product(dims)``
-        """
-        if proto is not None:
-            device = proto.device
-            dtype = proto.dtype
-        else:
-            device = torch.device("cpu")
-            dtype = torch.float32
-
-        with torch.no_grad():
-            lens = [torch.arange(d, device=device, dtype=dtype) for d in dims]
-            grid = torch.stack(torch.meshgrid(lens, indexing="ij"), dim=0)
-
-            if add_noise:
-                noise = torch.randn_like(grid).mul_(NOISE_SCALE).clip_(min=-NOISE_BOUND, max=NOISE_BOUND)
-                bounds = noise.new_tensor(dims).view(-1, *[1] * len(dims)).sub_(1)
-                grid.add_(noise).clip_(min=torch.zeros_like(bounds), max=bounds)
-
-            C = grid.shape[0]
-            if normalize:
-                scale = grid.view(C, -1).amax(dim=-1, keepdim=True)
-                grid = grid.view(C, -1).div_(scale).sub_(0.5).mul_(2).view_as(grid)
-
-            # This is cleaner but not scriptable
-            # grid = rearrange(grid, "c ... -> () (...) c")
-            grid = grid.view(C, -1).movedim(0, -1).unsqueeze_(0)
-
-        requires_grad = requires_grad or (proto is not None and proto.requires_grad)
-        grid.requires_grad_()
-        return grid
+    Shapes:
+        * dims - :math:`(C,)` where :math:`C` is the number of dimensions
+        * w1 - :math:`(H, C)` where :math:`H` is the hidden dimension
+        * b1 - :math:`(H,)` or None
+        * w2 - :math:`(D, H)` where :math:`D` is the output dimension
+        * b2 - :math:`(D,)` or None
+        * w_norm - :math:`(D,)`
+        * b_norm - :math:`(D,)` or None
+        * Output - :math:`(1, L, D)` where :math:`L` is the product of dims and :math:`D` is the output dimension
+    """
+    # TODO: Make a faster kernel that doesn't need a grid of input coords. Just compute normalized
+    # coodinates based on the block of the output we're computing, no need to read coords from DRAM.
+    lens = [torch.linspace(-1, 1, d, device=w1.device, dtype=w1.dtype) for d in dims]
+    grid = torch.stack(torch.meshgrid(lens, indexing="ij"), dim=-1).view(1, -1, len(dims))
+    y = F.linear(grid, w1, b1)
+    y = activation(y)
+    y = F.dropout(y, p=dropout, training=training)
+    y = F.linear(y, w2, b2)
+    y = F.layer_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm, bias=b_norm)
+    return y
 
 
-class RelativeFactorizedPosition(PositionEncoder, SupportsLoRA):
+class RelativeFactorizedPosition(nn.Module):
+    """
+    Computes relative factorized position encodings.
 
-    def __init__(self, d_in: int, d_out: int, dropout: float = 0.0, activation: nn.Module = ReLU2()):
+    A grid of positions in the interval :math:`[-1, 1]` is first created.
+    This grid is then projected into a higher-dimensional space using a multi-layer perceptron (MLP).
+    The output is then normalized using a layer normalization. This computation is performed in float32 precision
+    to ensure stability at high resolution, and mamtul precision is set to 'high' for this step.
+
+    Args:
+        d_in:
+            Input dimension size
+        d_out:
+            Output dimension size
+        dropout:
+            Dropout probability to be applied in the MLP
+
+    Shapes:
+        * Input - :math:`(C,)` where :math:`C` is the number of input dimensions
+        * Output - :math:`(1, L, D)` where :math:`L` is the product of input dimensions and :math:`D` is the output dimension
+    """
+
+    def __init__(self, d_in: int, d_out: int, dropout: float = 0.0, activation: Callable[[Tensor], Tensor] = relu2):
         super().__init__()
         self._d_in = d_in
         self._d_out = d_out
-        self.proj = MLP(d_in, 2 * d_out, d_out, dropout=dropout, activation=activation)
+        self.fc1 = nn.Linear(d_in, 2 * d_out, bias=True)
+        self.fc2 = nn.Linear(2 * d_out, d_out, bias=True)
         self.norm = nn.LayerNorm(d_out)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = activation
 
-    def forward(self, x: Tensor) -> Tensor:
-        # Run this at high precision. Should only matter for > 1k positions, but it's cheap.
-        matmul_precision = torch.get_float32_matmul_precision()
-        torch.set_float32_matmul_precision("high")
-        with torch.autocast(device_type="cuda", dtype=torch.float32):
-            result = self.norm(self.proj(x.to(torch.float32))).to(x.dtype)
-        torch.set_float32_matmul_precision(matmul_precision)
-        return result
-
-    def apply_lora(
-        self,
-        target: Sequence[LoRATarget],
-        rank: int,
-        alpha: float,
-        dropout: float = 0.0,
-        quantize_base: bool = False,
-    ) -> nn.Module:
-        if LoRATarget.POSITION in target:
-            self.proj = self.proj.apply_lora([LoRATarget.FEEDFORWARD], rank, alpha, dropout, quantize_base)
-
-        # Freeze all non-LoRA matrices/weights
-        freeze_non_lora(self)
-        return self
+    def forward(self, dims: Sequence[int]) -> Tensor:
+        return relative_factorized_position_forward(
+            dims,
+            self.fc1.weight,
+            self.fc1.bias,
+            self.fc2.weight,
+            self.fc2.bias,
+            self.norm.weight,
+            self.norm.bias,
+            self.activation,
+            dropout=self.dropout.p,
+            training=self.training,
+        )
