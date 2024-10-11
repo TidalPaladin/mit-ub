@@ -1,6 +1,5 @@
-from copy import deepcopy
 from functools import partial
-from typing import Sequence, cast
+from typing import Callable, Sequence, cast
 
 import torch
 import torch.nn as nn
@@ -18,10 +17,36 @@ def relu2(x: Tensor) -> Tensor:
     return y * y
 
 
-class ReLU2(nn.Module):
+# TODO: Consider max-autotune
+@torch.compile(fullgraph=True, mode="reduce-overhead")
+def mlp_forward(
+    x: Tensor,
+    w1: Tensor,
+    w2: Tensor,
+    b1: Tensor | None = None,
+    b2: Tensor | None = None,
+    w_gate: Tensor | None = None,
+    b_gate: Tensor | None = None,
+    dropout: float = 0.0,
+    activation: Callable[[Tensor], Tensor] = relu2,
+    gate_activation: Callable[[Tensor], Tensor] | None = None,
+    training: bool = True,
+    output_dropout: bool = False,
+) -> Tensor:
+    y = F.linear(x, w1, b1)
+    y = activation(y)
 
-    def forward(self, x: Tensor) -> Tensor:
-        return relu2(x)
+    if w_gate is not None:
+        gate = F.linear(x, w_gate, b_gate)
+        if gate_activation is not None:
+            gate = gate_activation(gate)
+        y = y * gate
+
+    y = F.dropout(y, dropout, training)
+    y = F.linear(y, w2, b2)
+    if output_dropout:
+        y = F.dropout(y, dropout, training)
+    return y
 
 
 class MLP(nn.Module, SupportsLoRA):
@@ -51,8 +76,8 @@ class MLP(nn.Module, SupportsLoRA):
         hidden_features: int,
         out_features: int,
         dropout: float = 0.0,
-        activation: nn.Module = ReLU2(),
-        gate_activation: nn.Module | None = None,
+        activation: Callable[[Tensor], Tensor] = relu2,
+        gate_activation: Callable[[Tensor], Tensor] | None = None,
         bias: bool = True,
         output_dropout: bool = False,
     ):
@@ -61,21 +86,15 @@ class MLP(nn.Module, SupportsLoRA):
         self.fc2 = nn.Linear(hidden_features, out_features, bias=bias)
         self.dropout = nn.Dropout(dropout)
         self.output_dropout = nn.Dropout(dropout) if output_dropout else nn.Identity()
-        self.activation = deepcopy(activation)
-
-        if gate_activation is not None:
-            self.gate = nn.Sequential(
-                nn.Linear(in_features, hidden_features, bias=bias),
-                deepcopy(gate_activation),
-            )
-        else:
-            self.gate = None
+        self.activation = activation
+        self.gate = nn.Linear(in_features, hidden_features, bias=bias) if gate_activation is not None else None
+        self.gate_activation = gate_activation
 
     def reset_parameters(self):
         self.fc1.reset_parameters()
         self.fc2.reset_parameters()
         if self.gate is not None:
-            self.gate[0].reset_parameters()
+            self.gate.reset_parameters()
 
     @property
     def in_features(self) -> int:
@@ -90,15 +109,20 @@ class MLP(nn.Module, SupportsLoRA):
         return self.fc1.out_features
 
     def forward(self, x: Tensor) -> Tensor:
-        y = self.activation(self.fc1(x))
-
-        if self.gate is not None:
-            y = y * self.gate(x)
-
-        y = self.dropout(y)
-        y = self.fc2(y)
-        y = self.output_dropout(y)
-        return y
+        return mlp_forward(
+            x,
+            self.fc1.weight,
+            self.fc2.weight,
+            self.fc1.bias,
+            self.fc2.bias,
+            self.gate.weight if self.gate is not None else None,
+            self.gate.bias if self.gate is not None else None,
+            self.dropout.p,
+            self.activation,
+            self.gate_activation,
+            self.training,
+            isinstance(self.output_dropout, nn.Dropout),
+        )
 
     def apply_lora(
         self,
@@ -114,7 +138,7 @@ class MLP(nn.Module, SupportsLoRA):
             self.fc1 = _apply_lora(cast(nn.Linear, self.fc1))
             self.fc2 = _apply_lora(cast(nn.Linear, self.fc2))
             if self.gate is not None:
-                self.gate[0] = _apply_lora(cast(nn.Linear, self.gate[0]))
+                self.gate = _apply_lora(cast(nn.Linear, self.gate))
 
         # Freeze all non-LoRA matrices/weights
         freeze_non_lora(self)

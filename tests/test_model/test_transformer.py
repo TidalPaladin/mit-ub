@@ -38,7 +38,7 @@ class TestTransformerEncoderLayer:
         assert out.shape == x.shape
         assert isinstance(layer.mlp.activation, type(activation))
         assert gate_activation is None or (
-            layer.mlp.gate is not None and isinstance(layer.mlp.gate[-1], type(gate_activation))
+            layer.mlp.gate is not None and isinstance(layer.mlp.gate_activation, type(gate_activation))
         )
 
     @pytest.mark.parametrize(
@@ -236,7 +236,7 @@ class TestTransformerDecoderLayer:
         assert out.shape == q.shape
         assert isinstance(layer.mlp.activation, type(activation))
         assert gate_activation is None or (
-            layer.mlp.gate is not None and isinstance(layer.mlp.gate[-1], type(gate_activation))
+            layer.mlp.gate is not None and isinstance(layer.mlp.gate_activation, type(gate_activation))
         )
 
     @pytest.mark.parametrize(

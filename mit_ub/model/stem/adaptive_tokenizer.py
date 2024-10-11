@@ -1,12 +1,12 @@
 from enum import StrEnum
-from typing import Tuple, Type, cast
+from typing import Callable, Tuple, Type, cast
 
 import torch.nn as nn
 from deep_helpers.helpers import to_tuple
 from einops.layers.torch import Rearrange
 from torch import Tensor
 
-from ..mlp import ReLU2
+from ..mlp import relu2
 from ..pos_enc import RelativeFactorizedPosition
 from .patch_embed import PatchEmbed
 
@@ -30,7 +30,7 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         autocast: bool = False,
         pool_type: PoolType = PoolType.MAX,
         dropout: float = 0.0,
-        activation: nn.Module = ReLU2(),
+        activation: Callable[[Tensor], Tensor] = relu2,
     ):
         super().__init__()
         self._target_shape = to_tuple(target_shape, 2)
@@ -103,7 +103,7 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         autocast: bool = False,
         pool_type: PoolType = PoolType.MAX,
         dropout: float = 0.0,
-        activation: nn.Module = ReLU2(),
+        activation: Callable[[Tensor], Tensor] = relu2,
     ):
         super().__init__()
         self._target_shape = to_tuple(target_shape, 3)
