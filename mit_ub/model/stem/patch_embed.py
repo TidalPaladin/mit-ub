@@ -1,13 +1,16 @@
+import math
 from abc import ABC, abstractmethod
-from typing import Generic, Tuple, Type, TypeVar, cast
+from typing import Callable, Generic, Sequence, Tuple, Type, TypeVar
 
 import torch
 import torch.nn as nn
-from einops.layers.torch import Rearrange
+import torch.nn.functional as F
+from deep_helpers.helpers import to_tuple
+from einops import rearrange
 from torch import Tensor
 
-from ..mlp import ReLU2
-from ..pos_enc import RelativeFactorizedPosition
+from ..mlp import relu2
+from ..pos_enc import RelativeFactorizedPosition, relative_factorized_position_forward
 
 
 T = TypeVar("T", bound=Tuple[int, ...])
@@ -25,6 +28,43 @@ class PatchEmbed(ABC, Generic[T]):
         raise NotImplementedError
 
 
+@torch.compile(fullgraph=True, mode="reduce-overhead")
+def patch_embed_forward(
+    x: Tensor,
+    w_patch: Tensor,
+    b_patch: Tensor | None,
+    stride: Sequence[int],
+    w_norm: Tensor | None,
+    b_norm: Tensor | None,
+    w1_pos: Tensor,
+    b1_pos: Tensor | None,
+    w2_pos: Tensor,
+    b2_pos: Tensor | None,
+    w_pos_norm: Tensor | None,
+    b_pos_norm: Tensor | None,
+    dropout: float = 0.0,
+    activation: Callable[[Tensor], Tensor] = relu2,
+    training: bool = True,
+) -> Tensor:
+    dims = tuple(dim_size // dim_stride for dim_size, dim_stride in zip(x.shape[2:], stride))
+    if x.ndim == 4:
+        x = rearrange(x, "b c (ht hp) (wt wp) -> b (ht wt) (hp wp c)", hp=stride[0], wp=stride[1])
+    elif x.ndim == 5:
+        x = rearrange(
+            x, "b c (dt dp) (ht hp) (wt wp) -> b (dt ht wt) (dp hp wp c)", dp=stride[0], hp=stride[1], wp=stride[2]
+        )
+    else:
+        raise ValueError(f"Invalid input dimension: {x.ndim}")
+
+    x = F.linear(x, w_patch, b_patch)
+    x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm)
+    pos = relative_factorized_position_forward(
+        dims, w1_pos, b1_pos, w2_pos, b2_pos, w_pos_norm, b_pos_norm, activation, dropout=dropout, training=training
+    )
+    x += pos
+    return x
+
+
 class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
 
     def __init__(
@@ -33,38 +73,41 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         embed_dim: int,
         patch_size: int | Tuple[int, int],
         norm_layer: Type[nn.Module] = nn.LayerNorm,
-        position_noise: bool = False,
-        autocast: bool = False,
         dropout: float = 0.0,
-        activation: nn.Module = ReLU2(),
+        activation: Callable[[Tensor], Tensor] = relu2,
     ):
         super().__init__()
-        self.patch = nn.Sequential(
-            nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size, bias=True),
-            Rearrange("b c h w -> b (h w) c", c=embed_dim),
-        )
+        self._patch_size = to_tuple(patch_size, 2)
+        d_in = math.prod(self.patch_size) * in_channels
+        self.patch = nn.Linear(d_in, embed_dim)
         self.norm = norm_layer(embed_dim)
         self.pos_enc = RelativeFactorizedPosition(2, embed_dim, dropout=dropout, activation=activation)
-        self.position_noise = position_noise
-        self.autocast = autocast
 
     @property
     def patch_size(self) -> Tuple[int, int]:
-        conv = cast(nn.Conv2d, self.patch[0])
-        hp, wp = conv.kernel_size
-        return hp, wp
+        return self._patch_size
 
     def tokenized_size(self, size: Tuple[int, int]) -> Tuple[int, int]:
         ht, wt = tuple(s // p for s, p in zip(size, self.patch_size))
         return ht, wt
 
     def forward(self, x: Tensor) -> Tensor:
-        with torch.autocast(device_type=x.device.type, enabled=self.autocast):
-            B, C, H, W = x.shape
-            x = self.patch(x)
-            x = self.norm(x)
-            x += self.pos_enc(self.tokenized_size((H, W)))
-            return x
+        return patch_embed_forward(
+            x,
+            self.patch.weight,
+            self.patch.bias,
+            self.patch_size,
+            self.norm.weight,
+            self.norm.bias,
+            self.pos_enc.fc1.weight,
+            self.pos_enc.fc1.bias,
+            self.pos_enc.fc2.weight,
+            self.pos_enc.fc2.bias,
+            self.pos_enc.norm.weight,
+            self.pos_enc.norm.bias,
+            dropout=self.pos_enc.dropout.p,
+            training=self.training,
+        )
 
 
 class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
@@ -75,35 +118,38 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         embed_dim: int,
         patch_size: Tuple[int, int, int],
         norm_layer: Type[nn.Module] = nn.LayerNorm,
-        position_noise: bool = False,
-        autocast: bool = False,
         dropout: float = 0.0,
-        activation: nn.Module = ReLU2(),
+        activation: Callable[[Tensor], Tensor] = relu2,
     ):
         super().__init__()
-        self.patch = nn.Sequential(
-            nn.Conv3d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size, bias=False),
-            Rearrange("b c d h w -> b (h w d) c", c=embed_dim),
-        )
+        self._patch_size = to_tuple(patch_size, 3)
+        d_in = math.prod(self.patch_size) * in_channels
+        self.patch = nn.Linear(d_in, embed_dim)
         self.norm = norm_layer(embed_dim)
         self.pos_enc = RelativeFactorizedPosition(3, embed_dim, dropout=dropout, activation=activation)
-        self.position_noise = position_noise
-        self.autocast = autocast
 
     @property
     def patch_size(self) -> Tuple[int, int, int]:
-        conv = cast(nn.Conv3d, self.patch[0])
-        dp, hp, wp = conv.kernel_size
-        return dp, hp, wp
+        return self._patch_size
 
     def tokenized_size(self, size: Tuple[int, int, int]) -> Tuple[int, int, int]:
         dt, ht, wt = tuple(s // p for s, p in zip(size, self.patch_size))
         return dt, ht, wt
 
     def forward(self, x: Tensor) -> Tensor:
-        with torch.autocast(device_type=x.device.type, enabled=self.autocast):
-            B, C, D, H, W = x.shape
-            x = self.patch(x)
-            x = self.norm(x)
-            x += self.pos_enc(self.tokenized_size((D, H, W)))
-            return x
+        return patch_embed_forward(
+            x,
+            self.patch.weight,
+            self.patch.bias,
+            self.patch_size,
+            self.norm.weight,
+            self.norm.bias,
+            self.pos_enc.fc1.weight,
+            self.pos_enc.fc1.bias,
+            self.pos_enc.fc2.weight,
+            self.pos_enc.fc2.bias,
+            self.pos_enc.norm.weight,
+            self.pos_enc.norm.bias,
+            dropout=self.pos_enc.dropout.p,
+            training=self.training,
+        )
