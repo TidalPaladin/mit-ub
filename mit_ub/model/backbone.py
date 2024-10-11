@@ -1,4 +1,4 @@
-from typing import Any, List, Optional, Tuple, Type, cast
+from typing import Any, Callable, List, Optional, Tuple, Type, cast
 
 import torch.nn as nn
 from deep_helpers.tokens import apply_mask
@@ -6,7 +6,7 @@ from einops import rearrange
 from torch import Tensor
 from torch.nn import functional as F
 
-from .mlp import ReLU2
+from .mlp import relu2
 from .stem import AdaptiveTokenizer2d, AdaptiveTokenizer3d, PatchEmbed2d, PatchEmbed3d
 from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
@@ -23,8 +23,8 @@ class ViT(nn.Module):
         nhead: int,
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
-        activation: nn.Module = ReLU2(),
-        gate_activation: nn.Module | None = None,
+        activation: Callable[[Tensor], Tensor] = relu2,
+        gate_activation: Callable[[Tensor], Tensor] | None = None,
         position_noise: bool = False,
         output_norm: bool = True,
         num_kv_heads: int | None = None,
@@ -144,8 +144,8 @@ class AdaptiveViT(ViT):
         nhead: int,
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
-        activation: nn.Module = ReLU2(),
-        gate_activation: nn.Module | None = None,
+        activation: Callable[[Tensor], Tensor] = relu2,
+        gate_activation: Callable[[Tensor], Tensor] | None = None,
         position_noise: bool = False,
         output_norm: bool = True,
         num_kv_heads: int | None = None,

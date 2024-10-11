@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Sequence, Type, cast
+from typing import Callable, Sequence, Type, cast
 
 import torch.nn as nn
 from torch import Tensor
@@ -8,7 +8,7 @@ from torchvision.ops import StochasticDepth
 from .gqa import MultiHeadAttention
 from .layer_scale import LayerScale
 from .lora import LoRATarget, SupportsLoRA, apply_lora, freeze_non_lora
-from .mlp import MLP, ReLU2
+from .mlp import MLP, relu2
 from .soft_moe import SoftMoE
 
 
@@ -20,8 +20,8 @@ class TransformerEncoderLayer(nn.Module, SupportsLoRA):
         nhead: int,
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
-        activation: nn.Module = ReLU2(),
-        gate_activation: nn.Module | None = None,
+        activation: Callable[[Tensor], Tensor] = relu2,
+        gate_activation: Callable[[Tensor], Tensor] | None = None,
         layer_norm_eps: float = 1e-5,
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
@@ -145,8 +145,8 @@ class TransformerDecoderLayer(nn.Module, SupportsLoRA):
         d_kv: int | None = None,
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
-        activation: nn.Module = ReLU2(),
-        gate_activation: nn.Module | None = None,
+        activation: Callable[[Tensor], Tensor] = relu2,
+        gate_activation: Callable[[Tensor], Tensor] | None = None,
         layer_norm_eps: float = 1e-5,
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
