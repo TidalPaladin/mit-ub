@@ -63,13 +63,7 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
             B, C, H, W = x.shape
             x = self.patch(x)
             x = self.norm(x)
-            x += self.pos_enc.from_grid(
-                self.tokenized_size((H, W)),
-                B,
-                proto=x,
-                normalize=True,
-                add_noise=self.training and self.position_noise,
-            )
+            x += self.pos_enc(self.tokenized_size((H, W)))
             return x
 
 
@@ -111,11 +105,5 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
             B, C, D, H, W = x.shape
             x = self.patch(x)
             x = self.norm(x)
-            x += self.pos_enc.from_grid(
-                self.tokenized_size((D, H, W)),
-                B,
-                proto=x,
-                normalize=True,
-                add_noise=self.training and self.position_noise,
-            )
+            x += self.pos_enc(self.tokenized_size((D, H, W)))
             return x
