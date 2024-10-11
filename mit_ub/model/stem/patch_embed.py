@@ -28,7 +28,13 @@ class PatchEmbed(ABC, Generic[T]):
         raise NotImplementedError
 
 
-@torch.compile(fullgraph=True, mode="reduce-overhead")
+@torch.compile(
+    fullgraph=True,
+    options={
+        "max_autotune": True,
+        "shape_padding": True,
+    },
+)
 def patch_embed_forward(
     x: Tensor,
     w_patch: Tensor,

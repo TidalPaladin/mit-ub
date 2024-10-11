@@ -17,8 +17,14 @@ def relu2(x: Tensor) -> Tensor:
     return y * y
 
 
-# TODO: Consider max-autotune
-@torch.compile(fullgraph=True, mode="reduce-overhead")
+@torch.compile(
+    fullgraph=True,
+    options={
+        "max_autotune": True,
+        "epilogue_fusion": True,
+        "shape_padding": True,
+    },
+)
 def mlp_forward(
     x: Tensor,
     w1: Tensor,

@@ -366,6 +366,7 @@ class JEPA(Task):
         state: State,
         metrics: Optional[tm.MetricCollection] = None,
     ) -> Dict[str, Any]:
+        torch.compiler.cudagraph_mark_step_begin()
         x: Tensor = batch["img"]
 
         # ema update from previous step when training

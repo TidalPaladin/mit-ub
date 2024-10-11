@@ -8,7 +8,7 @@ from torch import Tensor
 from .mlp import relu2
 
 
-@torch.compile(fullgraph=True, mode="reduce-overhead")
+@torch.compile(fullgraph=True)
 def create_grid(
     dims: Sequence[int],
     dtype: torch.dtype = torch.float32,
@@ -36,7 +36,14 @@ def create_grid(
     return grid.view(1, -1, len(dims))
 
 
-@torch.compile(fullgraph=True, mode="reduce-overhead")
+@torch.compile(
+    fullgraph=True,
+    options={
+        "max_autotune": True,
+        "shape_padding": True,
+        "triton.cudagraph_trees": True,
+    },
+)
 def relative_factorized_position_forward(
     dims: Sequence[int],
     w1: Tensor,
