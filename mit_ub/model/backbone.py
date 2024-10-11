@@ -47,7 +47,7 @@ class ViT(nn.Module):
         # Stem tokenizer
         stem_type = PatchEmbed2d if isinstance(patch_size, int) or len(patch_size) == 2 else PatchEmbed3d
         self.stem = stem_type(
-            in_channels, dim, cast(Any, patch_size), norm_layer, position_noise, dropout=dropout, activation=activation
+            in_channels, dim, cast(Any, patch_size), norm_layer, dropout=dropout, activation=activation
         )
 
         # Transformer blocks
