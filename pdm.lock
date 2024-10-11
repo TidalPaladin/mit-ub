@@ -364,10 +364,10 @@ files = [
 
 [[package]]
 name = "deep-helpers"
-version = "0.1.dev66"
+version = "0.1.dev68"
 requires_python = ">=3.10,<3.12"
 git = "https://github.com/TidalPaladin/deep-helpers.git"
-revision = "3ebad0271ef63f20c2b20f0860f1753c9e9d0109"
+revision = "ef66bae046fcc3ee4e8c61fb49c7a370fbeaf133"
 summary = ""
 groups = ["default"]
 dependencies = [
