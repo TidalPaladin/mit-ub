@@ -5,10 +5,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+from .compile import compile_is_disabled
 from .mlp import relu2
 
 
-@torch.compile(fullgraph=True)
+@torch.compile(fullgraph=True, disable=compile_is_disabled())
 def create_grid(
     dims: Sequence[int],
     dtype: torch.dtype = torch.float32,
@@ -38,6 +39,7 @@ def create_grid(
 
 @torch.compile(
     fullgraph=True,
+    disable=compile_is_disabled(),
     options={
         "max_autotune": True,
         "shape_padding": True,

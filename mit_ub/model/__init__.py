@@ -4,6 +4,7 @@ import torch.nn as nn
 from registry import Registry
 
 from .backbone import AdaptiveViT, ViT
+from .compile import compile_is_disabled
 from .convnext import ConvNext
 from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
@@ -189,4 +190,12 @@ BACKBONES(
     norm_layer=nn.BatchNorm2d,
 )
 
-__all__ = ["BACKBONES", "ViT", "TransformerEncoderLayer", "TransformerDecoderLayer", "AdaptiveViT", "ConvNext"]
+__all__ = [
+    "BACKBONES",
+    "ViT",
+    "TransformerEncoderLayer",
+    "TransformerDecoderLayer",
+    "AdaptiveViT",
+    "ConvNext",
+    "compile_is_disabled",
+]
