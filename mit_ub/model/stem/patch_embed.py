@@ -9,6 +9,7 @@ from deep_helpers.helpers import to_tuple
 from einops import rearrange
 from torch import Tensor
 
+from ..compile import compile_is_disabled
 from ..mlp import relu2
 from ..pos_enc import RelativeFactorizedPosition, relative_factorized_position_forward
 
@@ -28,7 +29,14 @@ class PatchEmbed(ABC, Generic[T]):
         raise NotImplementedError
 
 
-@torch.compile(fullgraph=True, mode="reduce-overhead")
+@torch.compile(
+    fullgraph=True,
+    disable=compile_is_disabled(),
+    options={
+        "max_autotune": True,
+        "shape_padding": True,
+    },
+)
 def patch_embed_forward(
     x: Tensor,
     w_patch: Tensor,

@@ -16,7 +16,6 @@ dependencies = [
     "torchvision",
     "torchmetrics",
     "pytorch-lightning",
-    "lightning-bolts",
     "timm>=0.5.4",
     "einops",
     "pandas",
@@ -25,7 +24,6 @@ dependencies = [
     "registry @ git+https://github.com/TidalPaladin/callable-registry.git",
     "dicom-utils @ git+https://github.com/medcognetics/dicom-utils.git",
     "torch-dicom[datamodule] @ git+https://github.com/medcognetics/torch-dicom.git",
-    "triton-helpers @ git+https://github.com/TidalPaladin/triton-helpers.git",
     "jsonargparse[signatures]",
     "tqdm-multiprocessing",
     "torchtune>=0.2.1",
@@ -108,6 +106,7 @@ filterwarnings = [
 [tool.pytest_env]
 TRITON_DEBUG = "1"
 TORCH_LOGS = "recompiles,dynamic"
+TORCH_COMPILE = "0"
 
 [tool.coverage.run]
 omit = [

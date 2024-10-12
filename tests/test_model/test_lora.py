@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from torch.testing import assert_close
 
-from mit_ub.model.transformer import apply_lora, freeze_non_lora
+from mit_ub.model.lora import apply_lora, freeze_non_lora
 
 
 @pytest.mark.parametrize(

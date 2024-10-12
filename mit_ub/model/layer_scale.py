@@ -1,5 +1,13 @@
 import torch
 import torch.nn as nn
+from torch import Tensor
+
+from .compile import compile_is_disabled
+
+
+@torch.compile(fullgraph=True, disable=compile_is_disabled())
+def layer_scale(x: Tensor, gamma: Tensor, inplace: bool = False) -> Tensor:
+    return x.mul_(gamma) if inplace else x * gamma
 
 
 class LayerScale(nn.Module):
@@ -13,5 +21,5 @@ class LayerScale(nn.Module):
     def reset_parameters(self):
         self.gamma.data.fill_(self._gamma)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x.mul_(self.gamma) if self.inplace else x * self.gamma
+    def forward(self, x: Tensor) -> Tensor:
+        return layer_scale(x, self.gamma, self.inplace)

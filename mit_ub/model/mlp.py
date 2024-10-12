@@ -1,15 +1,14 @@
-from functools import partial
-from typing import Callable, Sequence, cast
+from typing import Callable
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from .lora import LoRATarget, SupportsLoRA, apply_lora, freeze_non_lora
+from .compile import compile_is_disabled
 
 
-@torch.compile(fullgraph=True)
+@torch.compile(fullgraph=True, disable=compile_is_disabled())
 def relu2(x: Tensor) -> Tensor:
     r"""Computes squared ReLU of an input."""
     # NOTE: This is roughly as fast as the custom triton kernel
@@ -17,8 +16,15 @@ def relu2(x: Tensor) -> Tensor:
     return y * y
 
 
-# TODO: Consider max-autotune
-@torch.compile(fullgraph=True, mode="reduce-overhead")
+@torch.compile(
+    fullgraph=True,
+    options={
+        "max_autotune": True,
+        "epilogue_fusion": True,
+        "shape_padding": True,
+    },
+    disable=compile_is_disabled(),
+)
 def mlp_forward(
     x: Tensor,
     w1: Tensor,
@@ -49,7 +55,7 @@ def mlp_forward(
     return y
 
 
-class MLP(nn.Module, SupportsLoRA):
+class MLP(nn.Module):
     """
     A multi-layer perceptron (MLP) module with optional gating mechanism and dropout.
 
@@ -123,23 +129,3 @@ class MLP(nn.Module, SupportsLoRA):
             self.training,
             isinstance(self.output_dropout, nn.Dropout),
         )
-
-    def apply_lora(
-        self,
-        target: Sequence[LoRATarget],
-        rank: int,
-        alpha: float,
-        dropout: float = 0.0,
-        quantize_base: bool = False,
-    ) -> nn.Module:
-        _apply_lora = partial(apply_lora, rank=rank, alpha=alpha, dropout=dropout, quantize_base=quantize_base)
-
-        if LoRATarget.FEEDFORWARD in target:
-            self.fc1 = _apply_lora(cast(nn.Linear, self.fc1))
-            self.fc2 = _apply_lora(cast(nn.Linear, self.fc2))
-            if self.gate is not None:
-                self.gate = _apply_lora(cast(nn.Linear, self.gate))
-
-        # Freeze all non-LoRA matrices/weights
-        freeze_non_lora(self)
-        return self

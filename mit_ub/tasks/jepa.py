@@ -14,14 +14,14 @@ from torch.distributed import ReduceOp, all_reduce
 from torch.distributed import barrier as dist_barrier
 from torch.optim.optimizer import Optimizer
 
-from ..model import BACKBONES, AdaptiveViT, TransformerEncoderLayer, ViT
+from ..model import BACKBONES, AdaptiveViT, TransformerEncoderLayer, ViT, compile_is_disabled
 from ..model.pos_enc import RelativeFactorizedPosition
 
 
 EPS: Final = 1e-8
 
 
-@torch.compile(fullgraph=True)
+@torch.compile(fullgraph=True, disable=compile_is_disabled())
 def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: int, eps: float = EPS) -> Tensor:
     r"""Compute the average pairwise cosine similarity without manifesting the full pairwise matrix.
 
@@ -40,13 +40,13 @@ def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: 
     return y
 
 
-@torch.compile(fullgraph=True)
+@torch.compile(fullgraph=True, disable=compile_is_disabled())
 def cosine_similarity_loss(x: Tensor, y: Tensor, eps: float = EPS) -> Tensor:
     y = 1 - F.cosine_similarity(x, y, dim=-1, eps=eps)
     return y.mean()
 
 
-@torch.compile(fullgraph=True)
+@torch.compile(fullgraph=True, disable=compile_is_disabled())
 def sample_tokens(x: Tensor, ratio: float) -> Tensor:
     B, L_in, _ = x.shape
     L_out = int(L_in * ratio)
@@ -366,6 +366,7 @@ class JEPA(Task):
         state: State,
         metrics: Optional[tm.MetricCollection] = None,
     ) -> Dict[str, Any]:
+        torch.compiler.cudagraph_mark_step_begin()
         x: Tensor = batch["img"]
 
         # ema update from previous step when training

@@ -3,9 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.testing import assert_close
-from torchtune.modules.peft.lora import LoRALinear
 
-from mit_ub.model.lora import LoRATarget
 from mit_ub.model.mlp import MLP
 
 
@@ -57,34 +55,6 @@ class TestMLP:
         layer = MLP(D, D, D).to(device)
         y = layer(x)
         y.sum().backward()
-
-    @pytest.mark.skip
-    @pytest.mark.parametrize(
-        "device",
-        [
-            "cpu",
-            pytest.param("cuda", marks=pytest.mark.cuda),
-        ],
-    )
-    @pytest.mark.parametrize("gate_activation", [None, nn.ReLU()])
-    def test_lora(self, device, gate_activation):
-        B, L, D = 2, 8, 32
-        torch.random.manual_seed(0)
-        layer = MLP(D, 2 * D, D, gate_activation=gate_activation).to(device)
-        x = torch.randn(B, L, D, device=device)
-
-        layer = layer.apply_lora(target=[LoRATarget.FEEDFORWARD], rank=4, alpha=16)
-        assert isinstance(layer.fc1, LoRALinear)
-        assert isinstance(layer.fc2, LoRALinear)
-        if gate_activation is not None:
-            assert isinstance(layer.gate[0], LoRALinear)
-
-        with torch.autocast(device_type=device, dtype=torch.float16):
-            out = layer(x)
-        assert out.shape == (B, L, D)
-
-        for name, param in layer.named_parameters():
-            assert param.requires_grad == ("lora_a" in name or "lora_b" in name)
 
     @pytest.mark.parametrize(
         "device",
