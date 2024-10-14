@@ -1,4 +1,3 @@
-import os
 from typing import cast
 
 import torch
@@ -6,8 +5,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor, nn
 
-
-TORCH_COMPILE = os.getenv("TORCH_COMPILE", "1").lower() == "1"
+from .compile import compile_is_disabled
 
 
 @torch.compile(
@@ -17,7 +15,7 @@ TORCH_COMPILE = os.getenv("TORCH_COMPILE", "1").lower() == "1"
         "triton.cudagraph_trees": True,
         "shape_padding": True,
     },
-    disable=not TORCH_COMPILE,
+    disable=compile_is_disabled(),
 )
 def multi_head_self_attention_forward(
     # fmt: off
@@ -60,7 +58,7 @@ def multi_head_self_attention_forward(
         "triton.cudagraph_trees": True,
         "shape_padding": True,
     },
-    disable=not TORCH_COMPILE,
+    disable=compile_is_disabled(),
 )
 def grouped_query_self_attention_forward(
     # fmt: off
@@ -111,7 +109,7 @@ def grouped_query_self_attention_forward(
         "triton.cudagraph_trees": True,
         "shape_padding": True,
     },
-    disable=not TORCH_COMPILE,
+    disable=compile_is_disabled(),
 )
 def multi_head_attention_forward(
     # fmt: off
@@ -155,7 +153,7 @@ def multi_head_attention_forward(
         "triton.cudagraph_trees": True,
         "shape_padding": True,
     },
-    disable=not TORCH_COMPILE,
+    disable=compile_is_disabled(),
 )
 def grouped_query_attention_forward(
     # fmt: off
@@ -208,7 +206,7 @@ class MultiHeadAttention(nn.Module):
         qk_norm: bool = False,
         kdim: int | None = None,
         vdim: int | None = None,
-        output_dropout: bool = False,
+        output_dropout: bool = True,
     ):
         super().__init__()
         self._embed_dim = embed_dim

@@ -53,9 +53,6 @@ def patch_embed_forward(
     dropout: float = 0.0,
     activation: Callable[[Tensor], Tensor] = relu2,
 ) -> Tensor:
-    # Adjust x from [0, 1.0] to [-1.0, 1.0]
-    x = x * 2.0 - 1.0
-
     dims = tuple(dim_size // dim_stride for dim_size, dim_stride in zip(x.shape[2:], stride))
     if x.ndim == 4:
         x = rearrange(x, "b c (ht hp) (wt wp) -> b (ht wt) (hp wp c)", hp=stride[0], wp=stride[1])

@@ -1,5 +1,6 @@
 from typing import Final
 
+import torch
 import torch.nn as nn
 from registry import Registry
 
@@ -8,6 +9,8 @@ from .compile import compile_is_disabled
 from .convnext import ConvNext
 from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
+
+torch._dynamo.config.cache_size_limit = 32  # type: ignore
 
 BACKBONES = Registry("backbones")
 QUERY_GROUPS: Final = 2

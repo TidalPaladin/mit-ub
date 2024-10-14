@@ -25,7 +25,6 @@ class ViT(nn.Module):
         dropout: float = 0.1,
         activation: Callable[[Tensor], Tensor] = relu2,
         gate_activation: Callable[[Tensor], Tensor] | None = None,
-        position_noise: bool = False,
         output_norm: bool = True,
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
@@ -41,7 +40,6 @@ class ViT(nn.Module):
         self._nhead = nhead if nhead is not None else self.dim // 32
         self._in_channels = in_channels
         self._dim_feedforward = dim_feedforward = dim_feedforward or 4 * dim
-        self._position_noise = position_noise
         self._norm_layer = norm_layer
 
         # Stem tokenizer
@@ -146,7 +144,6 @@ class AdaptiveViT(ViT):
         dropout: float = 0.1,
         activation: Callable[[Tensor], Tensor] = relu2,
         gate_activation: Callable[[Tensor], Tensor] | None = None,
-        position_noise: bool = False,
         output_norm: bool = True,
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
@@ -169,7 +166,6 @@ class AdaptiveViT(ViT):
             dropout,
             activation,
             gate_activation,
-            position_noise,
             output_norm,
             num_kv_heads,
             qk_norm,
@@ -190,7 +186,6 @@ class AdaptiveViT(ViT):
             cast(Any, patch_size),
             cast(Any, target_shape),
             norm_layer,
-            position_noise,
             dropout=dropout,
             activation=activation,
         )

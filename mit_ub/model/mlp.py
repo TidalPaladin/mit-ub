@@ -83,7 +83,7 @@ class MLP(nn.Module):
         activation: Callable[[Tensor], Tensor] = relu2,
         gate_activation: Callable[[Tensor], Tensor] | None = None,
         bias: bool = True,
-        output_dropout: bool = False,
+        output_dropout: bool = True,
     ):
         super().__init__()
         self.dropout = dropout
