@@ -47,3 +47,38 @@ class TestRelativeFactorizedPosition:
         layer = RelativeFactorizedPosition(C, D).to(device)
         out = layer((8, 8))
         out.sum().backward()
+
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    def test_forward_deterministic(self, device):
+        C, D = 2, 16
+        torch.random.manual_seed(0)
+        layer = RelativeFactorizedPosition(C, D, dropout=0.1).to(device)
+        out1 = layer((8, 8))
+        out2 = layer((8, 8))
+        assert not torch.allclose(out1, out2)
+
+        layer.eval()
+        out1 = layer((8, 8))
+        out2 = layer((8, 8))
+        assert torch.allclose(out1, out2)
+
+    def test_reset_parameters(self, mocker):
+        C, D = 2, 16
+        spy = mocker.spy(RelativeFactorizedPosition, "reset_parameters")
+        layer = RelativeFactorizedPosition(C, D, dropout=0.1)
+        spy.assert_called_once()
+        weights_original = {name: param.clone() for name, param in layer.named_parameters()}
+        layer.reset_parameters()
+        weights_reset = {name: param for name, param in layer.named_parameters()}
+
+        for name, param in weights_original.items():
+            # Ignore constant weights or biases
+            if (param == 0).all() or (param == 1).all():
+                continue
+            assert not torch.allclose(param, weights_reset[name], equal_nan=True)

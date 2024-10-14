@@ -41,21 +41,30 @@ class TransformerEncoderLayer(nn.Module):
             qk_norm=qk_norm,
         )
 
-        mlp = MLP(
-            d_model,
-            dim_feedforward,
-            d_model,
-            dropout,
-            activation,
-            gate_activation,
-            bias=False,
-        )
-        if (num_experts is None) != (num_slots is None):
-            raise ValueError("num_experts and num_slots must be both set or both None")
-        elif num_experts is not None and num_slots is not None:
-            self.mlp = SoftMoE(mlp, d_model, num_experts, num_slots, nhead, dropout=dropout)
+        if num_experts is not None and num_slots is not None:
+            self.mlp = SoftMoE(
+                d_model,
+                dim_feedforward,
+                num_experts,
+                num_slots,
+                nhead,
+                dropout,
+                activation,
+                gate_activation,
+                bias=False,
+            )
+        elif num_experts is None and num_slots is None:
+            self.mlp = MLP(
+                d_model,
+                dim_feedforward,
+                d_model,
+                dropout,
+                activation,
+                gate_activation,
+                bias=False,
+            )
         else:
-            self.mlp = mlp
+            raise ValueError("num_experts and num_slots must be both set or both None")
 
         self.stochastic_depth = StochasticDepth(stochastic_depth, mode="row")
         self.norm1 = norm_layer(d_model, eps=layer_norm_eps)
@@ -125,21 +134,30 @@ class TransformerDecoderLayer(nn.Module):
             vdim=d_kv,
         )
 
-        mlp = MLP(
-            d_model,
-            dim_feedforward,
-            d_model,
-            dropout,
-            activation,
-            gate_activation,
-            bias=False,
-        )
-        if (num_experts is None) != (num_slots is None):
-            raise ValueError("num_experts and num_slots must be both set or both None")
-        elif num_experts is not None and num_slots is not None:
-            self.mlp = SoftMoE(mlp, d_model, num_experts, num_slots, nhead, dropout=dropout)
+        if num_experts is not None and num_slots is not None:
+            self.mlp = SoftMoE(
+                d_model,
+                dim_feedforward,
+                num_experts,
+                num_slots,
+                nhead,
+                dropout,
+                activation,
+                gate_activation,
+                bias=False,
+            )
+        elif num_experts is None and num_slots is None:
+            self.mlp = MLP(
+                d_model,
+                dim_feedforward,
+                d_model,
+                dropout,
+                activation,
+                gate_activation,
+                bias=False,
+            )
         else:
-            self.mlp = mlp
+            raise ValueError("num_experts and num_slots must be both set or both None")
 
         self.stochastic_depth = StochasticDepth(stochastic_depth, mode="row")
         self.norm1 = norm_layer(d_model, eps=layer_norm_eps)

@@ -71,6 +71,8 @@ class ClassificationTask(Task):
             nn.Dropout(0.1),
             nn.Linear(dim, num_classes),
         )
+        nn.init.zeros_(self.classification_head[-1].bias)
+        nn.init.trunc_normal_(self.classification_head[-1].weight, std=0.02)
         self.criterion = nn.CrossEntropyLoss()
         self.save_hyperparameters()
 

@@ -52,7 +52,6 @@ def patch_embed_forward(
     b_pos_norm: Tensor | None,
     dropout: float = 0.0,
     activation: Callable[[Tensor], Tensor] = relu2,
-    training: bool = True,
 ) -> Tensor:
     dims = tuple(dim_size // dim_stride for dim_size, dim_stride in zip(x.shape[2:], stride))
     if x.ndim == 4:
@@ -67,10 +66,17 @@ def patch_embed_forward(
     x = F.linear(x, w_patch, b_patch)
     x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm)
     pos = relative_factorized_position_forward(
-        dims, w1_pos, b1_pos, w2_pos, b2_pos, w_pos_norm, b_pos_norm, activation, dropout=dropout, training=training
+        dims, w1_pos, b1_pos, w2_pos, b2_pos, w_pos_norm, b_pos_norm, activation, dropout=dropout
     )
     x += pos
     return x
+
+
+def _init_patch_embed(layer: nn.Module) -> None:
+    layer.pos_enc.reset_parameters()
+    layer.norm.reset_parameters()
+    nn.init.trunc_normal_(layer.patch.weight, std=0.02)
+    nn.init.zeros_(layer.patch.bias)
 
 
 class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
@@ -90,6 +96,10 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         self.patch = nn.Linear(d_in, embed_dim)
         self.norm = norm_layer(embed_dim)
         self.pos_enc = RelativeFactorizedPosition(2, embed_dim, dropout=dropout, activation=activation)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        _init_patch_embed(self)
 
     @property
     def patch_size(self) -> Tuple[int, int]:
@@ -107,14 +117,13 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
             self.patch_size,
             self.norm.weight,
             self.norm.bias,
-            self.pos_enc.fc1.weight,
-            self.pos_enc.fc1.bias,
-            self.pos_enc.fc2.weight,
-            self.pos_enc.fc2.bias,
-            self.pos_enc.norm.weight,
-            self.pos_enc.norm.bias,
-            dropout=self.pos_enc.dropout.p,
-            training=self.training,
+            self.pos_enc.w_in,
+            self.pos_enc.b_in,
+            self.pos_enc.w_out,
+            self.pos_enc.b_out,
+            self.pos_enc.w_norm,
+            self.pos_enc.b_norm,
+            dropout=self.pos_enc.dropout if self.training else 0.0,
         )
 
 
@@ -135,6 +144,10 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         self.patch = nn.Linear(d_in, embed_dim)
         self.norm = norm_layer(embed_dim)
         self.pos_enc = RelativeFactorizedPosition(3, embed_dim, dropout=dropout, activation=activation)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        _init_patch_embed(self)
 
     @property
     def patch_size(self) -> Tuple[int, int, int]:
@@ -152,12 +165,11 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
             self.patch_size,
             self.norm.weight,
             self.norm.bias,
-            self.pos_enc.fc1.weight,
-            self.pos_enc.fc1.bias,
-            self.pos_enc.fc2.weight,
-            self.pos_enc.fc2.bias,
-            self.pos_enc.norm.weight,
-            self.pos_enc.norm.bias,
-            dropout=self.pos_enc.dropout.p,
-            training=self.training,
+            self.pos_enc.w_in,
+            self.pos_enc.b_in,
+            self.pos_enc.w_out,
+            self.pos_enc.b_out,
+            self.pos_enc.w_norm,
+            self.pos_enc.b_norm,
+            dropout=self.pos_enc.dropout if self.training else 0.0,
         )

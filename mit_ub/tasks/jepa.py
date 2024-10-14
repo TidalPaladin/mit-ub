@@ -175,6 +175,10 @@ class JEPA(Task):
             nn.LayerNorm(self.backbone.dim),
             nn.Linear(self.backbone.dim, self.backbone.dim),
         )
+        nn.init.trunc_normal_(self.context_proj.weight, std=0.02)
+        nn.init.zeros_(self.context_proj.bias)
+        nn.init.trunc_normal_(self.out_proj[1].weight, std=0.02)
+        nn.init.zeros_(self.out_proj[1].bias)
 
         # JEPA predictor
         encoder_proto = next(filter(lambda l: isinstance(l, TransformerEncoderLayer), self.backbone.modules()), None)
@@ -203,7 +207,6 @@ class JEPA(Task):
             scale=scale,
             device=device,
         )
-        # assert not mask_is_ragged(mask), "Mask should not be ragged"
         return mask
 
     def create_metrics(self, state: State) -> tm.MetricCollection:
@@ -354,7 +357,7 @@ class JEPA(Task):
         )
         target = torch.where(
             right_broadcast(mixup_mask, target),
-            target.roll(1, 0).lerp_(target, right_broadcast(lam, target)),
+            target.roll(1, 0).lerp_(target, right_broadcast(lam.type_as(target), target)),
             target,
         )
         return x, target

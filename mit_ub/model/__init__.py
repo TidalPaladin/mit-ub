@@ -1,5 +1,6 @@
 from typing import Final
 
+import torch
 import torch.nn as nn
 from registry import Registry
 
@@ -8,6 +9,8 @@ from .compile import compile_is_disabled
 from .convnext import ConvNext
 from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
+
+torch._dynamo.config.cache_size_limit = 32  # type: ignore
 
 BACKBONES = Registry("backbones")
 QUERY_GROUPS: Final = 2
@@ -111,8 +114,6 @@ BACKBONES(
     depth=12,
     nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     num_kv_heads=CIFAR10_DIM // CIFAR10_HEAD_DIM,
-    dropout=0.1,
-    position_noise=False,
     stochastic_depth=0.1,
 )
 
@@ -127,10 +128,10 @@ BACKBONES(
     nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     num_kv_heads=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     dropout=0.1,
-    num_experts=4,
+    num_experts=8,
     # 1 slot per token
-    num_slots=4,
-    moe_layers=[6, 11],
+    num_slots=32,
+    moe_layers=[11],
     stochastic_depth=0.1,
 )
 

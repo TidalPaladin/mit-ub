@@ -36,7 +36,6 @@ def mlp_forward(
     dropout: float = 0.0,
     activation: Callable[[Tensor], Tensor] = relu2,
     gate_activation: Callable[[Tensor], Tensor] | None = None,
-    training: bool = True,
     output_dropout: bool = False,
 ) -> Tensor:
     y = F.linear(x, w1, b1)
@@ -48,10 +47,9 @@ def mlp_forward(
             gate = gate_activation(gate)
         y = y * gate
 
-    y = F.dropout(y, dropout, training)
+    y = F.dropout(y, p=dropout, training=dropout > 0.0)
     y = F.linear(y, w2, b2)
-    if output_dropout:
-        y = F.dropout(y, dropout, training)
+    y = F.dropout(y, p=dropout, training=dropout > 0.0 and output_dropout)
     return y
 
 
@@ -70,10 +68,10 @@ class MLP(nn.Module):
         output_dropout: Whether to apply dropout to the output layer.
 
     Basic MLP:
-        >>> mlp = MLP(10, 20, 10, activation=nn.ReLU())
+        >>> mlp = MLP(10, 20, 10))
 
     Gated Linear Unit (GLU):
-        >>> mlp = MLP(10, 20, 10, activation=nn.Identity(), gate_activation=nn.Sigmoid())
+        >>> mlp = MLP(10, 20, 10, activation=lambda x: x, gate_activation=torch.sigmoid)
     """
 
     def __init__(
@@ -85,47 +83,71 @@ class MLP(nn.Module):
         activation: Callable[[Tensor], Tensor] = relu2,
         gate_activation: Callable[[Tensor], Tensor] | None = None,
         bias: bool = True,
-        output_dropout: bool = False,
+        output_dropout: bool = True,
     ):
         super().__init__()
-        self.fc1 = nn.Linear(in_features, hidden_features, bias=bias)
-        self.fc2 = nn.Linear(hidden_features, out_features, bias=bias)
-        self.dropout = nn.Dropout(dropout)
-        self.output_dropout = nn.Dropout(dropout) if output_dropout else nn.Identity()
+        self.dropout = dropout
+        self.output_dropout = output_dropout
         self.activation = activation
-        self.gate = nn.Linear(in_features, hidden_features, bias=bias) if gate_activation is not None else None
         self.gate_activation = gate_activation
 
+        self.w_in = nn.Parameter(torch.empty(hidden_features, in_features))
+        self.w_out = nn.Parameter(torch.empty(out_features, hidden_features))
+
+        if bias:
+            self.b_in = nn.Parameter(torch.empty(hidden_features))
+            self.b_out = nn.Parameter(torch.empty(out_features))
+        else:
+            self.register_parameter("b_in", None)
+            self.register_parameter("b_out", None)
+
+        if gate_activation is not None and bias:
+            self.w_gate = nn.Parameter(torch.empty(hidden_features, in_features))
+            self.b_gate = nn.Parameter(torch.empty(hidden_features))
+        elif gate_activation is not None:
+            self.w_gate = nn.Parameter(torch.empty(hidden_features, in_features))
+            self.register_parameter("b_gate", None)
+        else:
+            self.register_parameter("w_gate", None)
+            self.register_parameter("b_gate", None)
+
+        self.reset_parameters()
+
     def reset_parameters(self):
-        self.fc1.reset_parameters()
-        self.fc2.reset_parameters()
-        if self.gate is not None:
-            self.gate.reset_parameters()
+        nn.init.trunc_normal_(self.w_in, std=0.02)
+        nn.init.trunc_normal_(self.w_out, std=0.02)
+        if self.b_in is not None:
+            nn.init.zeros_(self.b_in)
+        if self.b_out is not None:
+            nn.init.zeros_(self.b_out)
+        if self.w_gate is not None:
+            nn.init.trunc_normal_(self.w_gate, std=0.02)
+        if self.b_gate is not None:
+            nn.init.zeros_(self.b_gate)
 
     @property
     def in_features(self) -> int:
-        return self.fc1.in_features
+        return self.w_in.shape[-1]
 
     @property
     def out_features(self) -> int:
-        return self.fc2.out_features
+        return self.w_out.shape[-1]
 
     @property
     def hidden_features(self) -> int:
-        return self.fc1.out_features
+        return self.w_in.shape[-2]
 
     def forward(self, x: Tensor) -> Tensor:
         return mlp_forward(
             x,
-            self.fc1.weight,
-            self.fc2.weight,
-            self.fc1.bias,
-            self.fc2.bias,
-            self.gate.weight if self.gate is not None else None,
-            self.gate.bias if self.gate is not None else None,
-            self.dropout.p,
+            self.w_in,
+            self.w_out,
+            self.b_in,
+            self.b_out,
+            self.w_gate if self.w_gate is not None else None,
+            self.b_gate if self.b_gate is not None else None,
+            self.dropout if self.training else 0.0,
             self.activation,
             self.gate_activation,
-            self.training,
-            isinstance(self.output_dropout, nn.Dropout),
+            self.output_dropout,
         )

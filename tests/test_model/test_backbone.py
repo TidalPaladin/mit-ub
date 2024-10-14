@@ -65,6 +65,23 @@ class TestViT:
             out2 = model(x, mask=mask, reshape=False)
         assert out1.shape != out2.shape
 
+    def test_forward_deterministic(self):
+        x = torch.randn(1, 3, 224, 224)
+        nhead = 128 // 16
+        model = ViT(3, 128, (16, 16), 3, nhead)
+
+        model.train()
+        with torch.autocast(device_type="cpu", dtype=torch.float16):
+            out1 = model(x)
+            out2 = model(x)
+        assert not torch.allclose(out1, out2)
+
+        model.eval()
+        with torch.autocast(device_type="cpu", dtype=torch.float16):
+            out1 = model(x)
+            out2 = model(x)
+        assert torch.allclose(out1, out2)
+
 
 class TestAdaptiveViT:
 
@@ -122,6 +139,23 @@ class TestAdaptiveViT:
             out1 = model(x, reshape=False)
             out2 = model(x, mask=mask, reshape=False)
         assert out1.shape != out2.shape
+
+    def test_forward_deterministic(self):
+        x = torch.randn(1, 3, 224, 224)
+        nhead = 128 // 16
+        model = AdaptiveViT(3, 128, 32, (16, 16), (4, 4), 3, 3, nhead)
+
+        model.train()
+        with torch.autocast(device_type="cpu", dtype=torch.float16):
+            out1 = model(x)
+            out2 = model(x)
+        assert not torch.allclose(out1, out2)
+
+        model.eval()
+        with torch.autocast(device_type="cpu", dtype=torch.float16):
+            out1 = model(x)
+            out2 = model(x)
+        assert torch.allclose(out1, out2)
 
     def test_load_from_vit(self):
         C, D, D_kv = 3, 128, 32
