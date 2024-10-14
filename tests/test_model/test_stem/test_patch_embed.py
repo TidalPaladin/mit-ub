@@ -39,6 +39,21 @@ class TestPatchEmbed2d:
         y.sum().backward()
         assert x.grad is not None
 
+    def test_reset_parameters(self):
+        C = 3
+        D_model = 64
+        model = PatchEmbed2d(C, D_model, (4, 4))
+
+        weights_original = {name: param.clone() for name, param in model.named_parameters()}
+        model.reset_parameters()
+        weights_reset = {name: param for name, param in model.named_parameters()}
+
+        for name, param in weights_original.items():
+            # Ignore constant weights or biases
+            if (param == 0).all() or (param == 1).all():
+                continue
+            assert not torch.allclose(param, weights_reset[name], equal_nan=True)
+
 
 class TestPatchEmbed3d:
 
@@ -72,3 +87,18 @@ class TestPatchEmbed3d:
         y = layer(x)
         y.sum().backward()
         assert x.grad is not None
+
+    def test_reset_parameters(self):
+        C = 3
+        D_model = 64
+        model = PatchEmbed3d(C, D_model, (4, 4, 4))
+
+        weights_original = {name: param.clone() for name, param in model.named_parameters()}
+        model.reset_parameters()
+        weights_reset = {name: param for name, param in model.named_parameters()}
+
+        for name, param in weights_original.items():
+            # Ignore constant weights or biases
+            if (param == 0).all() or (param == 1).all():
+                continue
+            assert not torch.allclose(param, weights_reset[name], equal_nan=True)

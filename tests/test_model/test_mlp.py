@@ -28,18 +28,21 @@ class TestMLP:
         assert y.shape == x.shape
 
     @pytest.mark.parametrize("gate_activation", [None, F.relu])
-    def test_reset_parameters(self, gate_activation):
+    def test_reset_parameters(self, mocker, gate_activation):
         torch.random.manual_seed(0)
         D = 32
+        spy = mocker.spy(MLP, "reset_parameters")
         layer = MLP(D, D, D, gate_activation=gate_activation)
-        w1 = layer.fc1.weight.clone()
-        w2 = layer.fc2.weight.clone()
-        wg = layer.gate.weight.clone() if layer.gate is not None else None
+        spy.assert_called_once()
+
+        weight_init = {k: v.clone() for k, v in layer.named_parameters()}
         layer.reset_parameters()
-        assert not torch.allclose(w1, layer.fc1.weight)
-        assert not torch.allclose(w2, layer.fc2.weight)
-        if layer.gate is not None and wg is not None:
-            assert not torch.allclose(wg, layer.gate.weight)
+        weight_reset = {k: v.clone() for k, v in layer.named_parameters()}
+
+        for k, v in weight_init.items():
+            if (v == 0).all() or (v == 1).all():
+                continue
+            assert not torch.allclose(v, weight_reset[k], equal_nan=True)
 
     @pytest.mark.parametrize(
         "device",

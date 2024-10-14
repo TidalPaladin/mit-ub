@@ -27,8 +27,8 @@ def multi_head_self_attention_forward(
     num_heads: int,
     norm_w: Tensor | None = None, norm_b: Tensor | None = None,
     dropout: float = 0.0,
-    training: bool = True,
     eps: float = 1e-8,
+    output_dropout: bool = False,
     # fmt: on
 ) -> Tensor:
     # QKV projection
@@ -43,12 +43,12 @@ def multi_head_self_attention_forward(
 
     # SDPA
     scale = 1.0 if norm_w is not None else None
-    dropout_p = dropout if training else 0.0
-    o = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout_p, is_causal=False, scale=scale)
+    o = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout, is_causal=False, scale=scale)
 
     # output projection
     o = rearrange(o, "b h l d -> b l (h d)")
     o = F.linear(o, w_out, b_out)
+    o = F.dropout(o, p=dropout, training=dropout > 0.0 and output_dropout)
 
     return o
 
@@ -70,8 +70,8 @@ def grouped_query_self_attention_forward(
     num_heads: int, num_kv_heads: int,
     norm_w: Tensor | None = None, norm_b: Tensor | None = None,
     dropout: float = 0.0,
-    training: bool = True,
     eps: float = 1e-8,
+    output_dropout: bool = False,
     # fmt: on
 ) -> Tensor:
     # QKV projection
@@ -94,12 +94,12 @@ def grouped_query_self_attention_forward(
 
     # SDPA
     scale = 1.0 if norm_w is not None else None
-    dropout_p = dropout if training else 0.0
-    o = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout_p, is_causal=False, scale=scale)
+    o = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout, is_causal=False, scale=scale)
 
     # output projection
     o = rearrange(o, "b h l d -> b l (h d)")
     o = F.linear(o, w_out, b_out)
+    o = F.dropout(o, p=dropout, training=dropout > 0.0 and output_dropout)
 
     return o
 
@@ -122,8 +122,8 @@ def multi_head_attention_forward(
     num_heads: int,
     norm_w: Tensor | None = None, norm_b: Tensor | None = None,
     dropout: float = 0.0,
-    training: bool = True,
     eps: float = 1e-8,
+    output_dropout: bool = False,
     # fmt: on
 ) -> Tensor:
     q = rearrange(F.linear(q, w_q, b_q), "b l (h d) -> b h l d", h=num_heads)
@@ -138,12 +138,12 @@ def multi_head_attention_forward(
 
     # SDPA
     scale = 1.0 if norm_w is not None else None
-    dropout_p = dropout if training else 0.0
-    o = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout_p, is_causal=False, scale=scale)
+    o = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout, is_causal=False, scale=scale)
 
     # output projection
     o = rearrange(o, "b h l d -> b l (h d)")
     o = F.linear(o, w_out, b_out)
+    o = F.dropout(o, p=dropout, training=dropout > 0.0 and output_dropout)
 
     return o
 
@@ -166,8 +166,8 @@ def grouped_query_attention_forward(
     num_heads: int, num_kv_heads: int,
     norm_w: Tensor | None = None, norm_b: Tensor | None = None,
     dropout: float = 0.0,
-    training: bool = True,
     eps: float = 1e-8,
+    output_dropout: bool = False,
     # fmt: on
 ) -> Tensor:
     q = rearrange(F.linear(q, w_q, b_q), "b l (h d) -> b h l d", h=num_heads)
@@ -187,12 +187,12 @@ def grouped_query_attention_forward(
 
     # SDPA
     scale = 1.0 if norm_w is not None else None
-    dropout_p = dropout if training else 0.0
-    o = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout_p, is_causal=False, scale=scale)
+    o = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout, is_causal=False, scale=scale)
 
     # output projection
     o = rearrange(o, "b h l d -> b l (h d)")
     o = F.linear(o, w_out, b_out)
+    o = F.dropout(o, p=dropout, training=dropout > 0.0 and output_dropout)
 
     return o
 
@@ -208,6 +208,7 @@ class MultiHeadAttention(nn.Module):
         qk_norm: bool = False,
         kdim: int | None = None,
         vdim: int | None = None,
+        output_dropout: bool = False,
     ):
         super().__init__()
         self._embed_dim = embed_dim
@@ -217,6 +218,7 @@ class MultiHeadAttention(nn.Module):
         self._kv_dim = self._head_dim * num_kv_heads
         self.dropout = dropout
         self.qk_norm = qk_norm
+        self.output_dropout = output_dropout
 
         # TODO: It is required to pass kdim and vdim for non-self attention. This should
         # be handled better.
@@ -239,28 +241,22 @@ class MultiHeadAttention(nn.Module):
             self.register_parameter("norm_b", None)
 
         self.w_out = nn.Parameter(torch.empty(embed_dim, embed_dim))
-        self.b_out = nn.Parameter(torch.empty(embed_dim))
 
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
         if self.w_in is not None:
-            # nn.init.trunc_normal_(self.w_in, std=0.02)
-            nn.init.xavier_uniform_(self.w_in)
+            nn.init.trunc_normal_(self.w_in, std=0.02)
         else:
-            # nn.init.trunc_normal_(self.w_q, std=0.02)
-            # nn.init.trunc_normal_(self.w_k, std=0.02)
-            # nn.init.trunc_normal_(self.w_v, std=0.02)
-            nn.init.xavier_uniform_(self.w_q)
-            nn.init.xavier_uniform_(self.w_k)
-            nn.init.xavier_uniform_(self.w_v)
+            nn.init.trunc_normal_(self.w_q, std=0.02)
+            nn.init.trunc_normal_(self.w_k, std=0.02)
+            nn.init.trunc_normal_(self.w_v, std=0.02)
 
         if self.qk_norm:
             nn.init.ones_(self.norm_w)
             nn.init.zeros_(self.norm_b)
 
         nn.init.trunc_normal_(self.w_out, std=0.02)
-        nn.init.zeros_(self.b_out)
 
     @property
     def embed_dim(self) -> int:
@@ -289,10 +285,11 @@ class MultiHeadAttention(nn.Module):
                     # fmt: off
                     q,
                     self.w_in, None,
-                    self.w_out, self.b_out,
+                    self.w_out, None,
                     self.num_heads, self.num_kv_heads,
                     self.norm_w, self.norm_b,
-                    self.dropout, self.training,
+                    self.dropout if self.training else 0.0,
+                    output_dropout=self.output_dropout,
                     # fmt: on
                 )
             else:
@@ -301,10 +298,11 @@ class MultiHeadAttention(nn.Module):
                     q, k, v,
                     self.w_q, self.w_k, self.w_v,
                     None, None, None,
-                    self.w_out, self.b_out,
+                    self.w_out, None,
                     self.num_heads, self.num_kv_heads,
                     self.norm_w, self.norm_b,
-                    self.dropout, self.training,
+                    self.dropout if self.training else 0.0,
+                    output_dropout=self.output_dropout,
                     # fmt: on
                 )
 
@@ -314,10 +312,11 @@ class MultiHeadAttention(nn.Module):
                     # fmt: off
                     q,
                     self.w_in, None,
-                    self.w_out, self.b_out,
+                    self.w_out, None,
                     self.num_heads,
                     self.norm_w, self.norm_b,
-                    self.dropout, self.training,
+                    self.dropout if self.training else 0.0,
+                    output_dropout=self.output_dropout,
                     # fmt: on
                 )
             else:
@@ -326,9 +325,10 @@ class MultiHeadAttention(nn.Module):
                     q, k, v,
                     self.w_q, self.w_k, self.w_v,
                     None, None, None,
-                    self.w_out, self.b_out,
+                    self.w_out, None,
                     self.num_heads,
                     self.norm_w, self.norm_b,
-                    self.dropout, self.training,
+                    self.dropout if self.training else 0.0,
+                    output_dropout=self.output_dropout,
                     # fmt: on
                 )

@@ -175,6 +175,8 @@ class JEPA(Task):
             nn.LayerNorm(self.backbone.dim),
             nn.Linear(self.backbone.dim, self.backbone.dim),
         )
+        nn.init.trunc_normal_(self.context_proj.weight, std=0.02)
+        nn.init.trunc_normal_(self.out_proj[1].weight, std=0.02)
 
         # JEPA predictor
         encoder_proto = next(filter(lambda l: isinstance(l, TransformerEncoderLayer), self.backbone.modules()), None)

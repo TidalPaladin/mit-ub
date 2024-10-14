@@ -1,3 +1,4 @@
+import math
 from typing import Callable, Sequence
 
 import torch
@@ -56,7 +57,6 @@ def relative_factorized_position_forward(
     b_norm: Tensor | None,
     activation: Callable[[Tensor], Tensor] = relu2,
     dropout: float = 0.0,
-    training: bool = True,
 ) -> Tensor:
     """
     Perform the forward pass for the relative factorized position encoding.
@@ -80,8 +80,6 @@ def relative_factorized_position_forward(
             The activation function to be applied after the first linear layer
         dropout:
             The dropout probability
-        training:
-            Whether the model is in training mode
 
     Shapes:
         * dims - :math:`(C,)` where :math:`C` is the number of dimensions
@@ -95,11 +93,14 @@ def relative_factorized_position_forward(
     """
     # TODO: Make a faster kernel that doesn't need a grid of input coords. Just compute normalized
     # coodinates based on the block of the output we're computing, no need to read coords from DRAM.
-    lens = [torch.linspace(-1, 1, d, device=w1.device, dtype=w1.dtype) for d in dims]
+    # NOTE: Scale by 1/sqrt(1/3) make uniform distribution have unit variance.
+    scale = math.sqrt(3)
+    lens = [torch.linspace(-scale, scale, d, device=w1.device, dtype=w1.dtype) for d in dims]
     grid = torch.stack(torch.meshgrid(lens, indexing="ij"), dim=-1).view(1, -1, len(dims))
+
     y = F.linear(grid, w1, b1)
     y = activation(y)
-    y = F.dropout(y, p=dropout, training=training)
+    y = F.dropout(y, p=dropout, training=dropout > 0.0)
     y = F.linear(y, w2, b2)
     y = F.layer_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm, bias=b_norm)
     return y
@@ -129,24 +130,33 @@ class RelativeFactorizedPosition(nn.Module):
 
     def __init__(self, d_in: int, d_out: int, dropout: float = 0.0, activation: Callable[[Tensor], Tensor] = relu2):
         super().__init__()
-        self._d_in = d_in
-        self._d_out = d_out
-        self.fc1 = nn.Linear(d_in, 2 * d_out, bias=True)
-        self.fc2 = nn.Linear(2 * d_out, d_out, bias=True)
-        self.norm = nn.LayerNorm(d_out)
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = dropout
         self.activation = activation
+        self.w_in = nn.Parameter(torch.empty(2 * d_out, d_in))
+        self.w_out = nn.Parameter(torch.empty(d_out, 2 * d_out))
+        self.b_in = nn.Parameter(torch.empty(2 * d_out))
+        self.b_out = nn.Parameter(torch.empty(d_out))
+        self.w_norm = nn.Parameter(torch.empty(d_out))
+        self.b_norm = nn.Parameter(torch.empty(d_out))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.trunc_normal_(self.w_in, std=0.02)
+        nn.init.trunc_normal_(self.w_out, std=0.02)
+        nn.init.zeros_(self.b_in)
+        nn.init.zeros_(self.b_out)
+        nn.init.ones_(self.w_norm)
+        nn.init.zeros_(self.b_norm)
 
     def forward(self, dims: Sequence[int]) -> Tensor:
         return relative_factorized_position_forward(
             dims,
-            self.fc1.weight,
-            self.fc1.bias,
-            self.fc2.weight,
-            self.fc2.bias,
-            self.norm.weight,
-            self.norm.bias,
+            self.w_in,
+            self.b_in,
+            self.w_out,
+            self.b_out,
+            self.w_norm,
+            self.b_norm,
             self.activation,
-            dropout=self.dropout.p,
-            training=self.training,
+            dropout=self.dropout if self.training else 0.0,
         )

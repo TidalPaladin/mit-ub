@@ -111,8 +111,6 @@ BACKBONES(
     depth=12,
     nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     num_kv_heads=CIFAR10_DIM // CIFAR10_HEAD_DIM,
-    dropout=0.1,
-    position_noise=False,
     stochastic_depth=0.1,
 )
 
@@ -127,10 +125,10 @@ BACKBONES(
     nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     num_kv_heads=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     dropout=0.1,
-    num_experts=4,
+    num_experts=8,
     # 1 slot per token
-    num_slots=4,
-    moe_layers=[6, 11],
+    num_slots=32,
+    moe_layers=[11],
     stochastic_depth=0.1,
 )
 
