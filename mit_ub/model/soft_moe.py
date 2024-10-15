@@ -14,6 +14,7 @@ from .mlp import mlp_forward, relu2
     options={
         "max_autotune": True,
         "shape_padding": True,
+        "triton.cudagraph_trees": True,
     },
     disable=compile_is_disabled(),
 )
@@ -24,6 +25,9 @@ def dispatch(
     w_v: Tensor,
     nhead: int,
     dropout: float = 0.0,
+    norm_w: Tensor | None = None,
+    norm_b: Tensor | None = None,
+    eps: float = 1e-5,
 ) -> Tensor:
     """Dispatch tokens to expert slots using attention mechanism.
 
@@ -34,6 +38,8 @@ def dispatch(
         w_v: Weight matrix for value projection.
         nhead: Number of attention heads.
         dropout: Dropout probability.
+        norm_w: Weight matrix for normalization.
+        norm_b: Bias vector for normalization.
 
     Shapes:
         - tokens: :math:`(B, L, D)` where :math:`B` is batch size, :math:`L` is sequence length, and :math:`D` is the embedding dimension.
@@ -42,10 +48,13 @@ def dispatch(
         - w_v: :math:`(D, D)`
         - Output: :math:`(B, S, D)`
     """
-
+    q = slot_query
     k = rearrange(F.linear(tokens, w_k), "b l (h d) -> b h l d", h=nhead)
     v = rearrange(F.linear(tokens, w_v), "b l (h d) -> b h l d", h=nhead)
-    o = F.scaled_dot_product_attention(slot_query, k, v, dropout_p=dropout)
+    if norm_w is not None:
+        q = F.layer_norm(q, (q.shape[-1],), norm_w, norm_b, eps)
+        k = F.layer_norm(k, (k.shape[-1],), norm_w, norm_b, eps)
+    o = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout)
     return rearrange(o, "b h l d -> b l (h d)")
 
 
@@ -53,6 +62,7 @@ def dispatch(
     options={
         "max_autotune": True,
         "shape_padding": True,
+        "triton.cudagraph_trees": True,
     },
     disable=compile_is_disabled(),
 )
@@ -63,6 +73,9 @@ def combine(
     w_q: Tensor,
     nhead: int,
     dropout: float = 0.0,
+    norm_w: Tensor | None = None,
+    norm_b: Tensor | None = None,
+    eps: float = 1e-5,
 ) -> Tensor:
     """Combine expert outputs using attention mechanism.
 
@@ -73,6 +86,8 @@ def combine(
         w_q: Weight matrix for query projection.
         nhead: Number of attention heads.
         dropout: Dropout probability.
+        norm_w: Weight matrix for normalization.
+        norm_b: Bias vector for normalization.
 
     Shapes:
         - tokens: :math:`(B, L, D)` where :math:`B` is batch size, :math:`L` is sequence length, and :math:`D` is the embedding dimension.
@@ -82,8 +97,12 @@ def combine(
         - Output: :math:`(B, L, D)`
     """
     q = rearrange(F.linear(tokens, w_q), "b l (h d) -> b h l d", h=nhead)
+    k = slot_key
     v = rearrange(expert_out, "b l (h d) -> b h l d", h=nhead)
-    o = F.scaled_dot_product_attention(q, slot_key, v, dropout_p=dropout)
+    if norm_w is not None:
+        q = F.layer_norm(q, (q.shape[-1],), norm_w, norm_b, eps)
+        k = F.layer_norm(k, (k.shape[-1],), norm_w, norm_b, eps)
+    o = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout)
     return rearrange(o, "b h l d -> b l (h d)")
 
 
@@ -175,13 +194,22 @@ def soft_moe_forward(
     b_gate: Tensor | None = None,
     gate_activation: Callable[[Tensor], Tensor] | None = None,
     output_dropout: bool = True,
+    norm_w: Tensor | None = None,
+    norm_b: Tensor | None = None,
+    norm: bool = True,
+    pre_norm_w: Tensor | None = None,
+    pre_norm_b: Tensor | None = None,
+    eps: float = 1e-5,
 ) -> Tensor:
+    if norm:
+        x = F.layer_norm(x, (x.shape[-1],), pre_norm_w, pre_norm_b, eps)
+
     nhead = slot_query.shape[0]
-    y = dispatch(x, slot_query, w_dispatch_k, w_dispatch_v, nhead, dropout)
+    y = dispatch(x, slot_query, w_dispatch_k, w_dispatch_v, nhead, dropout, norm_w, norm_b, eps)
     y = forward_experts(
         y, w_in, b_in, w_out, b_out, activation, dropout, w_gate, b_gate, gate_activation, output_dropout
     )
-    y = combine(x, slot_key, y, w_combine_q, nhead, dropout)
+    y = combine(x, slot_key, y, w_combine_q, nhead, dropout, norm_w, norm_b, eps)
     return y
 
 
@@ -226,17 +254,27 @@ class SoftMoE(nn.Module):
         gate_activation: Callable[[Tensor], Tensor] | None = None,
         bias: bool = True,
         output_dropout: bool = True,
+        qk_norm: bool = False,
+        norm: bool = True,
     ):
         super().__init__()
         self.dropout = dropout
         self.output_dropout = output_dropout
         self.activation = activation
         self.gate_activation = gate_activation
+        self.norm = norm
 
         if num_slots < num_experts:
             raise ValueError("num_slots must be greater than or equal to num_experts")
         if not num_slots % num_experts == 0:
             raise ValueError(f"num_slots must be divisible by num_experts, got {num_slots} and {num_experts}")
+
+        if norm:
+            self.pre_norm_w = nn.Parameter(torch.empty(dim))
+            self.pre_norm_b = nn.Parameter(torch.empty(dim))
+        else:
+            self.register_parameter("pre_norm_w", None)
+            self.register_parameter("pre_norm_b", None)
 
         # Dispatch / combine
         self.slot_query = nn.Parameter(torch.empty(nhead, num_slots, dim // nhead))
@@ -244,6 +282,12 @@ class SoftMoE(nn.Module):
         self.w_dispatch_v = nn.Parameter(torch.empty(dim, dim))
         self.slot_key = nn.Parameter(torch.empty(nhead, num_slots, dim // nhead))
         self.w_combine_q = nn.Parameter(torch.empty(dim, dim))
+        if qk_norm:
+            self.norm_w = nn.Parameter(torch.empty(dim // nhead))
+            self.norm_b = nn.Parameter(torch.empty(dim // nhead))
+        else:
+            self.register_parameter("norm_w", None)
+            self.register_parameter("norm_b", None)
 
         self.w_in = nn.Parameter(torch.empty(num_experts, dim_feedfoward, dim))
         self.w_out = nn.Parameter(torch.empty(num_experts, dim, dim_feedfoward))
@@ -272,6 +316,14 @@ class SoftMoE(nn.Module):
         nn.init.trunc_normal_(self.w_dispatch_k, std=0.02)
         nn.init.trunc_normal_(self.w_dispatch_v, std=0.02)
         nn.init.trunc_normal_(self.w_combine_q, std=0.02)
+        if self.pre_norm_w is not None:
+            nn.init.ones_(self.pre_norm_w)
+        if self.pre_norm_b is not None:
+            nn.init.zeros_(self.pre_norm_b)
+        if self.norm_w is not None:
+            nn.init.ones_(self.norm_w)
+        if self.norm_b is not None:
+            nn.init.zeros_(self.norm_b)
 
         # Slot query / key, initialized identically as orthogonal
         t = torch.empty_like(self.slot_query)
@@ -323,4 +375,6 @@ class SoftMoE(nn.Module):
             self.b_gate,
             self.gate_activation,
             self.output_dropout,
+            self.norm_w,
+            self.norm_b,
         )

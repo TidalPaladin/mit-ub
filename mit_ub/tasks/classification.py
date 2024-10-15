@@ -175,10 +175,13 @@ class JEPAWithClassification(JEPAWithProbe):
         )
 
     def create_probe_head(self) -> nn.Module:
-        return nn.Sequential(
+        head = nn.Sequential(
             nn.LayerNorm(self.backbone.dim),
             nn.Linear(self.backbone.dim, self.num_classes),
         )
+        nn.init.zeros_(head[-1].bias)
+        nn.init.trunc_normal_(head[-1].weight, std=0.02)
+        return head
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
         metrics = super().create_metrics(*args, **kwargs)

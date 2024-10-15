@@ -1,154 +1,55 @@
 import pytest
 import torch
-import torch.nn as nn
+from torch.testing import assert_close
 
-from mit_ub.model.attention import (
-    MultiHeadAttention,
-    grouped_query_attention_forward,
-    grouped_query_self_attention_forward,
-    multi_head_attention_forward,
-    multi_head_self_attention_forward,
-)
+from mit_ub.model.attention import MultiHeadAttention, attention_forward
 
 
-@pytest.mark.parametrize(
-    "device",
-    [
-        "cpu",
-        pytest.param("cuda", marks=pytest.mark.cuda),
-    ],
-)
-@pytest.mark.parametrize("norm", [False, True])
-def test_forward_mhsa(device, norm):
+def test_attention_equivalence():
     B, L, D = 1, 32, 128
     nhead = D // 16
-    x = torch.randn(B, L, D, device=device)
-    model = nn.MultiheadAttention(D, nhead, dropout=0.0).to(device)
-    norm_w = torch.randn(16, device=device) if norm else None
-    with torch.autocast(device_type=device, dtype=torch.float16):
-        out = multi_head_self_attention_forward(
-            # fmt: off
-            x,
-            model.in_proj_weight, None,
-            model.out_proj.weight, model.out_proj.bias,
-            nhead,
-            norm_w, None
-            # fmt: on
-        )
 
-    assert out.shape == x.shape
+    x = torch.randn(B, L, D)
+    q = x.clone()
+    kv = x.clone()
 
+    w_q = torch.randn(D, D)
+    w_k = torch.randn(D, D)
+    w_v = torch.randn(D, D)
+    w_in = torch.cat([w_q, w_k, w_v], dim=0)
 
-@pytest.mark.parametrize(
-    "device",
-    [
-        "cpu",
-        pytest.param("cuda", marks=pytest.mark.cuda),
-    ],
-)
-@pytest.mark.parametrize("norm", [False, True])
-def test_forward_gqsa(device, norm):
-    B, L, D = 1, 32, 128
-    head_dim = 32
-    nhead = D // head_dim
-    num_kv_heads = nhead // 2
-    kv_dim = head_dim * num_kv_heads
+    b_q = torch.randn(D)
+    b_k = torch.randn(D)
+    b_v = torch.randn(D)
+    b_in = torch.cat([b_q, b_k, b_v], dim=0)
 
-    x = torch.randn(B, L, D, device=device)
-    w_in = torch.randn(D + 2 * kv_dim, D, device=device)
-    w_out = torch.randn(D, D, device=device)
-    b_out = torch.randn(D, device=device)
-    norm_w = torch.randn(head_dim, device=device) if norm else None
-    with torch.autocast(device_type=device, dtype=torch.float16):
-        out = grouped_query_self_attention_forward(
-            # fmt: off
-            x,
-            w_in, None,
-            w_out, b_out,
-            nhead, num_kv_heads,
-            norm_w, None
-            # fmt: on
-        )
+    w_out = torch.randn(D, D)
+    b_out = torch.randn(D)
+    norm_w = torch.randn(16)
 
-    assert out.shape == x.shape
-
-
-@pytest.mark.parametrize(
-    "device",
-    [
-        "cpu",
-        pytest.param("cuda", marks=pytest.mark.cuda),
-    ],
-)
-@pytest.mark.parametrize("norm", [False, True])
-def test_forward_mha(device, norm):
-    B, L, D = 1, 32, 128
-    nhead = D // 16
-    q = torch.randn(B, L, D, device=device)
-    kv = torch.randn(B, L, D, device=device)
-    w_q = torch.randn(D, D, device=device)
-    w_k = torch.randn(D, D, device=device)
-    w_v = torch.randn(D, D, device=device)
-    b_q = torch.randn(D, device=device) if norm else None
-    b_k = torch.randn(D, device=device) if norm else None
-    b_v = torch.randn(D, device=device) if norm else None
-    w_out = torch.randn(D, D, device=device)
-    b_out = torch.randn(D, device=device) if norm else None
-    norm_w = torch.randn(16, device=device) if norm else None
-    with torch.autocast(device_type=device, dtype=torch.float16):
-        out = multi_head_attention_forward(
-            # fmt: off
-            q, kv, kv,
-            w_q, w_k, w_v,
-            b_q, b_k, b_v,
-            w_out, b_out,
-            nhead,
-            norm_w, None
-            # fmt: on
-        )
-
-    assert out.shape == q.shape
-
-
-@pytest.mark.parametrize(
-    "device",
-    [
-        "cpu",
-        pytest.param("cuda", marks=pytest.mark.cuda),
-    ],
-)
-@pytest.mark.parametrize("norm", [False, True])
-def test_forward_gqa(device, norm):
-    B, L, D = 1, 32, 128
-    head_dim = 32
-    nhead = D // head_dim
-    num_kv_heads = nhead // 2
-    kv_dim = head_dim * num_kv_heads
-
-    q = torch.randn(B, L, D, device=device)
-    kv = torch.randn(B, L, D, device=device)
-    w_q = torch.randn(D, D, device=device)
-    w_k = torch.randn(kv_dim, D, device=device)
-    w_v = torch.randn(kv_dim, D, device=device)
-    b_q = torch.randn(D, device=device) if norm else None
-    b_k = torch.randn(kv_dim, device=device) if norm else None
-    b_v = torch.randn(kv_dim, device=device) if norm else None
-    w_out = torch.randn(D, D, device=device)
-    b_out = torch.randn(D, device=device) if norm else None
-    norm_w = torch.randn(head_dim, device=device) if norm else None
-    with torch.autocast(device_type=device, dtype=torch.float16):
-        out = grouped_query_attention_forward(
-            # fmt: off
-            q, kv, kv,
-            w_q, w_k, w_v,
-            b_q, b_k, b_v,
-            w_out, b_out,
-            nhead, num_kv_heads,
-            norm_w, None
-            # fmt: on
-        )
-
-    assert out.shape == q.shape
+    out_mhsa = attention_forward(
+        # fmt: off
+        x, None, None,
+        w_in, None, None,
+        b_in, None, None,
+        w_out, b_out,
+        nhead, nhead,
+        norm_w, None,
+        dropout=0.0,
+        # fmt: on
+    )
+    out_mha = attention_forward(
+        # fmt: off
+        q, kv, kv,
+        w_q, w_k, w_v,
+        b_q, b_k, b_v,
+        w_out, b_out,
+        nhead, nhead,
+        norm_w, None,
+        dropout=0.0,
+        # fmt: on
+    )
+    assert_close(out_mhsa, out_mha, atol=0.01, rtol=0)
 
 
 class TestMultiHeadAttention:
@@ -190,6 +91,7 @@ class TestMultiHeadAttention:
             out = model(q, k, v)
 
         assert out.shape == q.shape
+        assert not out.isnan().any()
 
     @pytest.mark.parametrize(
         "device",
@@ -305,3 +207,24 @@ class TestMultiHeadAttention:
             out1 = model(q, k, v)
             out2 = model(q, k, v)
         assert torch.allclose(out1, out2)
+
+    def test_fused_norm(self):
+        num_heads, num_kv_heads, Lq, Lk, Dq, Dk = 32, 32, 32, 32, 128, 128
+        model = MultiHeadAttention(
+            Dq,
+            num_heads,
+            num_kv_heads,
+            kdim=Dk if Dk != Dq or Lk != Lq else None,
+            vdim=Dk if Dk != Dq or Lk != Lq else None,
+            norm=True,
+        )
+
+        B = 2
+        q = torch.randn(B, Lq, Dq)
+        k = torch.randn(B, Lk, Dk) if Lk != Lq or Dk != Dq else q
+        v = torch.randn(B, Lk, Dk) if Lk != Lq or Dk != Dq else q
+
+        out_norm = model(q, k, v)
+        model.norm = False
+        out_no_norm = model(q, k, v)
+        assert not torch.allclose(out_norm, out_no_norm)

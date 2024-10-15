@@ -1,4 +1,4 @@
-from typing import Callable, Type
+from typing import Callable
 
 import torch.nn as nn
 from torch import Tensor
@@ -20,14 +20,13 @@ class TransformerEncoderLayer(nn.Module):
         dropout: float = 0.1,
         activation: Callable[[Tensor], Tensor] = relu2,
         gate_activation: Callable[[Tensor], Tensor] | None = None,
-        layer_norm_eps: float = 1e-5,
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
         layer_scale: float | None = None,
         num_experts: int | None = None,
         num_slots: int | None = None,
         stochastic_depth: float = 0.0,
+        bias: bool = True,
     ):
         super().__init__()
         self.nhead = nhead
@@ -39,6 +38,8 @@ class TransformerEncoderLayer(nn.Module):
             num_kv_heads=self.num_kv_heads,
             dropout=dropout,
             qk_norm=qk_norm,
+            bias=bias,
+            norm=True,
         )
 
         if num_experts is not None and num_slots is not None:
@@ -51,7 +52,9 @@ class TransformerEncoderLayer(nn.Module):
                 dropout,
                 activation,
                 gate_activation,
-                bias=False,
+                bias=bias,
+                qk_norm=qk_norm,
+                norm=True,
             )
         elif num_experts is None and num_slots is None:
             self.mlp = MLP(
@@ -61,14 +64,13 @@ class TransformerEncoderLayer(nn.Module):
                 dropout,
                 activation,
                 gate_activation,
-                bias=False,
+                bias=bias,
+                norm=True,
             )
         else:
             raise ValueError("num_experts and num_slots must be both set or both None")
 
         self.stochastic_depth = StochasticDepth(stochastic_depth, mode="row")
-        self.norm1 = norm_layer(d_model, eps=layer_norm_eps)
-        self.norm2 = norm_layer(d_model, eps=layer_norm_eps)
 
         self.layer_scale_attn = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
         self.layer_scale_mlp = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
@@ -80,13 +82,11 @@ class TransformerEncoderLayer(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         # Self attention
-        y = self.norm1(x)
-        y = self.self_attn(y, y, y)
+        y = self.self_attn(x, x, x)
         x = x + self.stochastic_depth(self.layer_scale_attn(y))
 
         # MLP
-        y = self.norm2(x)
-        y = self.mlp(y)
+        y = self.mlp(x)
         x = x + self.stochastic_depth(self.layer_scale_mlp(y))
 
         return x
@@ -103,14 +103,13 @@ class TransformerDecoderLayer(nn.Module):
         dropout: float = 0.1,
         activation: Callable[[Tensor], Tensor] = relu2,
         gate_activation: Callable[[Tensor], Tensor] | None = None,
-        layer_norm_eps: float = 1e-5,
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
         layer_scale: float | None = None,
         num_experts: int | None = None,
         num_slots: int | None = None,
         stochastic_depth: float = 0.0,
+        bias: bool = True,
     ):
         super().__init__()
         d_kv = d_kv or d_model
@@ -123,6 +122,8 @@ class TransformerDecoderLayer(nn.Module):
             num_kv_heads=self.num_kv_heads,
             dropout=dropout,
             qk_norm=qk_norm,
+            bias=bias,
+            norm=True,
         )
         self.cross_attn = MultiHeadAttention(
             embed_dim=d_model,
@@ -132,6 +133,8 @@ class TransformerDecoderLayer(nn.Module):
             qk_norm=qk_norm,
             kdim=d_kv,
             vdim=d_kv,
+            bias=bias,
+            norm=True,
         )
 
         if num_experts is not None and num_slots is not None:
@@ -144,7 +147,9 @@ class TransformerDecoderLayer(nn.Module):
                 dropout,
                 activation,
                 gate_activation,
-                bias=False,
+                bias=bias,
+                qk_norm=qk_norm,
+                norm=True,
             )
         elif num_experts is None and num_slots is None:
             self.mlp = MLP(
@@ -154,15 +159,13 @@ class TransformerDecoderLayer(nn.Module):
                 dropout,
                 activation,
                 gate_activation,
-                bias=False,
+                bias=bias,
+                norm=True,
             )
         else:
             raise ValueError("num_experts and num_slots must be both set or both None")
 
         self.stochastic_depth = StochasticDepth(stochastic_depth, mode="row")
-        self.norm1 = norm_layer(d_model, eps=layer_norm_eps)
-        self.norm2 = norm_layer(d_model, eps=layer_norm_eps)
-        self.norm3 = norm_layer(d_model, eps=layer_norm_eps)
 
         self.layer_scale_attn = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
         self.layer_scale_cross = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
@@ -176,18 +179,15 @@ class TransformerDecoderLayer(nn.Module):
     def forward(self, q: Tensor, kv: Tensor) -> Tensor:
         # Self attention
         x = q
-        y = self.norm1(x)
-        y = self.self_attn(y, y, y)
+        y = self.self_attn(x, x, x)
         x = x + self.stochastic_depth(self.layer_scale_attn(y))
 
         # Cross attention
-        y = self.norm2(x)
-        y = self.cross_attn(y, kv, kv)
+        y = self.cross_attn(x, kv, kv)
         x = x + self.stochastic_depth(self.layer_scale_cross(y))
 
         # MLP
-        y = self.norm3(x)
-        y = self.mlp(y)
+        y = self.mlp(x)
         x = x + self.stochastic_depth(self.layer_scale_mlp(y))
 
         return x

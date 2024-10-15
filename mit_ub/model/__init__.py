@@ -102,7 +102,7 @@ BACKBONES(
 
 
 CIFAR10_DIM: Final = 384
-CIFAR10_HEAD_DIM: Final = 32
+CIFAR10_HEAD_DIM: Final = 64
 CIFAR10_ADAPTIVE_DIM: Final = 64
 
 BACKBONES(
@@ -115,6 +115,8 @@ BACKBONES(
     nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     num_kv_heads=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     stochastic_depth=0.1,
+    bias=False,
+    qk_norm=True,
 )
 
 
@@ -133,6 +135,7 @@ BACKBONES(
     num_slots=32,
     moe_layers=[11],
     stochastic_depth=0.1,
+    qk_norm=True,
 )
 
 

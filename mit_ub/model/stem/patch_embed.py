@@ -1,6 +1,6 @@
 import math
 from abc import ABC, abstractmethod
-from typing import Callable, Generic, Sequence, Tuple, Type, TypeVar
+from typing import Callable, Generic, Sequence, Tuple, TypeVar
 
 import torch
 import torch.nn as nn
@@ -52,6 +52,7 @@ def patch_embed_forward(
     b_pos_norm: Tensor | None,
     dropout: float = 0.0,
     activation: Callable[[Tensor], Tensor] = relu2,
+    eps: float = 1e-5,
 ) -> Tensor:
     dims = tuple(dim_size // dim_stride for dim_size, dim_stride in zip(x.shape[2:], stride))
     if x.ndim == 4:
@@ -64,7 +65,7 @@ def patch_embed_forward(
         raise ValueError(f"Invalid input dimension: {x.ndim}")
 
     x = F.linear(x, w_patch, b_patch)
-    x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm)
+    x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
     pos = relative_factorized_position_forward(
         dims, w1_pos, b1_pos, w2_pos, b2_pos, w_pos_norm, b_pos_norm, activation, dropout=dropout
     )
@@ -74,9 +75,10 @@ def patch_embed_forward(
 
 def _init_patch_embed(layer: nn.Module) -> None:
     layer.pos_enc.reset_parameters()
-    layer.norm.reset_parameters()
-    nn.init.trunc_normal_(layer.patch.weight, std=0.02)
-    nn.init.zeros_(layer.patch.bias)
+    nn.init.ones_(layer.w_norm)
+    nn.init.zeros_(layer.b_norm)
+    nn.init.trunc_normal_(layer.w_in, std=0.02)
+    nn.init.zeros_(layer.b_in)
 
 
 class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
@@ -86,15 +88,16 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         in_channels: int,
         embed_dim: int,
         patch_size: int | Tuple[int, int],
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
         dropout: float = 0.0,
         activation: Callable[[Tensor], Tensor] = relu2,
     ):
         super().__init__()
         self._patch_size = to_tuple(patch_size, 2)
         d_in = math.prod(self.patch_size) * in_channels
-        self.patch = nn.Linear(d_in, embed_dim)
-        self.norm = norm_layer(embed_dim)
+        self.w_in = nn.Parameter(torch.empty(embed_dim, d_in))
+        self.b_in = nn.Parameter(torch.empty(embed_dim))
+        self.w_norm = nn.Parameter(torch.empty(embed_dim))
+        self.b_norm = nn.Parameter(torch.empty(embed_dim))
         self.pos_enc = RelativeFactorizedPosition(2, embed_dim, dropout=dropout, activation=activation)
         self.reset_parameters()
 
@@ -112,11 +115,11 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
     def forward(self, x: Tensor) -> Tensor:
         return patch_embed_forward(
             x,
-            self.patch.weight,
-            self.patch.bias,
+            self.w_in,
+            self.b_in,
             self.patch_size,
-            self.norm.weight,
-            self.norm.bias,
+            self.w_norm,
+            self.b_norm,
             self.pos_enc.w_in,
             self.pos_enc.b_in,
             self.pos_enc.w_out,
@@ -134,15 +137,16 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         in_channels: int,
         embed_dim: int,
         patch_size: Tuple[int, int, int],
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
         dropout: float = 0.0,
         activation: Callable[[Tensor], Tensor] = relu2,
     ):
         super().__init__()
         self._patch_size = to_tuple(patch_size, 3)
         d_in = math.prod(self.patch_size) * in_channels
-        self.patch = nn.Linear(d_in, embed_dim)
-        self.norm = norm_layer(embed_dim)
+        self.w_in = nn.Parameter(torch.empty(embed_dim, d_in))
+        self.b_in = nn.Parameter(torch.empty(embed_dim))
+        self.w_norm = nn.Parameter(torch.empty(embed_dim))
+        self.b_norm = nn.Parameter(torch.empty(embed_dim))
         self.pos_enc = RelativeFactorizedPosition(3, embed_dim, dropout=dropout, activation=activation)
         self.reset_parameters()
 
@@ -160,11 +164,11 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
     def forward(self, x: Tensor) -> Tensor:
         return patch_embed_forward(
             x,
-            self.patch.weight,
-            self.patch.bias,
+            self.w_in,
+            self.b_in,
             self.patch_size,
-            self.norm.weight,
-            self.norm.bias,
+            self.w_norm,
+            self.b_norm,
             self.pos_enc.w_in,
             self.pos_enc.b_in,
             self.pos_enc.w_out,

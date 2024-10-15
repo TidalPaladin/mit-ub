@@ -22,6 +22,7 @@ def relu2(x: Tensor) -> Tensor:
         "max_autotune": True,
         "epilogue_fusion": True,
         "shape_padding": True,
+        "triton.cudagraph_trees": True,
     },
     disable=compile_is_disabled(),
 )
@@ -36,8 +37,15 @@ def mlp_forward(
     dropout: float = 0.0,
     activation: Callable[[Tensor], Tensor] = relu2,
     gate_activation: Callable[[Tensor], Tensor] | None = None,
-    output_dropout: bool = False,
+    output_dropout: bool = True,
+    norm: bool = False,
+    w_norm: Tensor | None = None,
+    b_norm: Tensor | None = None,
+    eps: float = 1e-5,
 ) -> Tensor:
+    if norm:
+        x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
+
     y = F.linear(x, w1, b1)
     y = activation(y)
 
@@ -84,12 +92,21 @@ class MLP(nn.Module):
         gate_activation: Callable[[Tensor], Tensor] | None = None,
         bias: bool = True,
         output_dropout: bool = True,
+        norm: bool = False,
     ):
         super().__init__()
         self.dropout = dropout
         self.output_dropout = output_dropout
         self.activation = activation
         self.gate_activation = gate_activation
+        self.norm = norm
+
+        if norm:
+            self.w_norm = nn.Parameter(torch.empty(in_features))
+            self.b_norm = nn.Parameter(torch.empty(in_features))
+        else:
+            self.register_parameter("w_norm", None)
+            self.register_parameter("b_norm", None)
 
         self.w_in = nn.Parameter(torch.empty(hidden_features, in_features))
         self.w_out = nn.Parameter(torch.empty(out_features, hidden_features))
@@ -116,6 +133,10 @@ class MLP(nn.Module):
     def reset_parameters(self):
         nn.init.trunc_normal_(self.w_in, std=0.02)
         nn.init.trunc_normal_(self.w_out, std=0.02)
+        if self.w_norm is not None:
+            nn.init.ones_(self.w_norm)
+        if self.b_norm is not None:
+            nn.init.zeros_(self.b_norm)
         if self.b_in is not None:
             nn.init.zeros_(self.b_in)
         if self.b_out is not None:
@@ -150,4 +171,7 @@ class MLP(nn.Module):
             self.activation,
             self.gate_activation,
             self.output_dropout,
+            self.norm,
+            self.w_norm,
+            self.b_norm,
         )

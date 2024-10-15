@@ -1,4 +1,4 @@
-from typing import Any, Callable, List, Optional, Tuple, Type, cast
+from typing import Any, Callable, List, Optional, Tuple, cast
 
 import torch.nn as nn
 from deep_helpers.tokens import apply_mask
@@ -25,28 +25,24 @@ class ViT(nn.Module):
         dropout: float = 0.1,
         activation: Callable[[Tensor], Tensor] = relu2,
         gate_activation: Callable[[Tensor], Tensor] | None = None,
-        output_norm: bool = True,
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
         num_experts: int | None = None,
         num_slots: int | None = None,
         moe_layers: List[int] = [],
         layer_scale: float | None = None,
         stochastic_depth: float = 0.0,
+        bias: bool = False,
     ):
         super().__init__()
         self._dim = dim
         self._nhead = nhead if nhead is not None else self.dim // 32
         self._in_channels = in_channels
         self._dim_feedforward = dim_feedforward = dim_feedforward or 4 * dim
-        self._norm_layer = norm_layer
 
         # Stem tokenizer
         stem_type = PatchEmbed2d if isinstance(patch_size, int) or len(patch_size) == 2 else PatchEmbed3d
-        self.stem = stem_type(
-            in_channels, dim, cast(Any, patch_size), norm_layer, dropout=dropout, activation=activation
-        )
+        self.stem = stem_type(in_channels, dim, cast(Any, patch_size), dropout=dropout, activation=activation)
 
         # Transformer blocks
         self.blocks = nn.ModuleList(
@@ -60,16 +56,15 @@ class ViT(nn.Module):
                     gate_activation,
                     num_kv_heads=num_kv_heads,
                     qk_norm=qk_norm,
-                    norm_layer=norm_layer,
                     num_experts=num_experts if i in moe_layers else None,
                     num_slots=num_slots if i in moe_layers else None,
                     layer_scale=layer_scale,
                     stochastic_depth=stochastic_depth,
+                    bias=bias,
                 )
                 for i in range(depth)
             ]
         )
-        self.norm = norm_layer(dim) if output_norm else nn.Identity()
 
     @property
     def dim(self) -> int:
@@ -86,10 +81,6 @@ class ViT(nn.Module):
     @property
     def in_channels(self) -> int:
         return self._in_channels
-
-    @property
-    def norm_layer(self) -> Type[nn.Module]:
-        return self._norm_layer
 
     def forward(
         self,
@@ -109,7 +100,6 @@ class ViT(nn.Module):
         # Transformer blocks and output norm
         for block in self.blocks:
             x = block(x)
-        x = self.norm(x)
 
         # Reshape to original grid if requested
         if reshape and mask is not None and mask_fill_value is None:
@@ -144,11 +134,10 @@ class AdaptiveViT(ViT):
         dropout: float = 0.1,
         activation: Callable[[Tensor], Tensor] = relu2,
         gate_activation: Callable[[Tensor], Tensor] | None = None,
-        output_norm: bool = True,
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
         stochastic_depth: float = 0.0,
+        bias: bool = False,
         high_res_layer_scale: float | None = 1e-5,
         num_experts: int | None = None,
         num_slots: int | None = None,
@@ -166,15 +155,14 @@ class AdaptiveViT(ViT):
             dropout,
             activation,
             gate_activation,
-            output_norm,
             num_kv_heads,
             qk_norm,
-            norm_layer,
             num_experts,
             num_slots,
             moe_layers,
             layer_scale,
             stochastic_depth,
+            bias,
         )
 
         # Adaptive stem tokenizer
@@ -185,7 +173,6 @@ class AdaptiveViT(ViT):
             kv_dim,
             cast(Any, patch_size),
             cast(Any, target_shape),
-            norm_layer,
             dropout=dropout,
             activation=activation,
         )
@@ -203,7 +190,6 @@ class AdaptiveViT(ViT):
                     gate_activation,
                     num_kv_heads=num_kv_heads,
                     qk_norm=qk_norm,
-                    norm_layer=norm_layer,
                     # By default we use layer scale here to limit the high res pathway's contribution.
                     # Since AdaptiveViT will likely be trained from a ViT checkpoint, this helps set the
                     # intial condition of the model to the ViT checkpoint.
@@ -211,6 +197,7 @@ class AdaptiveViT(ViT):
                     num_experts=num_experts if i in high_res_moe_layers else None,
                     num_slots=num_slots if i in high_res_moe_layers else None,
                     stochastic_depth=stochastic_depth,
+                    bias=bias,
                 )
                 for i in range(high_res_depth)
             ]
@@ -258,9 +245,7 @@ class AdaptiveViT(ViT):
         # Cross attention blocks between fixed backbone tokens and high res input tokens
         for block in self.high_res_blocks:
             q = block(q, kv)
-
-        # Output norm
-        x = self.norm(q)
+        x = q
 
         # Reshape to original grid if requested
         if reshape and mask is not None and mask_fill_value is None:

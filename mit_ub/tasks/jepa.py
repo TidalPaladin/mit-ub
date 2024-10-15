@@ -170,13 +170,16 @@ class JEPA(Task):
         )
 
         # Projections for the input context and output predictions
-        self.context_proj = nn.Linear(self.backbone.dim, self.backbone.dim)
+        self.context_proj = nn.Sequential(
+            nn.LayerNorm(self.backbone.dim),
+            nn.Linear(self.backbone.dim, self.backbone.dim),
+        )
         self.out_proj = nn.Sequential(
             nn.LayerNorm(self.backbone.dim),
             nn.Linear(self.backbone.dim, self.backbone.dim),
         )
-        nn.init.trunc_normal_(self.context_proj.weight, std=0.02)
-        nn.init.zeros_(self.context_proj.bias)
+        nn.init.trunc_normal_(self.context_proj[1].weight, std=0.02)
+        nn.init.zeros_(self.context_proj[1].bias)
         nn.init.trunc_normal_(self.out_proj[1].weight, std=0.02)
         nn.init.zeros_(self.out_proj[1].bias)
 
@@ -188,6 +191,9 @@ class JEPA(Task):
                 "Ensure the backbone has a TransformerEncoderLayer module."
             )
         self.jepa_predictor = nn.ModuleList([deepcopy(encoder_proto) for _ in range(predictor_depth)])
+        # moe_block = next((block.mlp for block in self.backbone.blocks if isinstance(block.mlp, SoftMoE)), None)
+        # if moe_block is not None:
+        #    self.jepa_predictor[-1].mlp = moe_block
         for block in self.jepa_predictor:
             block.reset_parameters()
 
@@ -403,6 +409,7 @@ class JEPA(Task):
 
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
+        pred.shape[-1]
         loss = cosine_similarity_loss(pred, target)
 
         # Compute metrics
