@@ -16,6 +16,7 @@ from torch.optim.optimizer import Optimizer
 
 from ..model import BACKBONES, AdaptiveViT, TransformerEncoderLayer, ViT, compile_is_disabled
 from ..model.pos_enc import RelativeFactorizedPosition
+from ..model.transformer import TransformerDecoderLayer
 
 
 EPS: Final = 1e-8
@@ -170,32 +171,41 @@ class JEPA(Task):
         )
 
         # Projections for the input context and output predictions
-        self.context_proj = nn.Sequential(
-            nn.LayerNorm(self.backbone.dim),
-            nn.Linear(self.backbone.dim, self.backbone.dim),
-        )
         self.out_proj = nn.Sequential(
             nn.LayerNorm(self.backbone.dim),
             nn.Linear(self.backbone.dim, self.backbone.dim),
+            nn.LayerNorm(self.backbone.dim),
         )
-        nn.init.trunc_normal_(self.context_proj[1].weight, std=0.02)
-        nn.init.zeros_(self.context_proj[1].bias)
         nn.init.trunc_normal_(self.out_proj[1].weight, std=0.02)
         nn.init.zeros_(self.out_proj[1].bias)
 
         # JEPA predictor
-        encoder_proto = next(filter(lambda l: isinstance(l, TransformerEncoderLayer), self.backbone.modules()), None)
-        if encoder_proto is None:
-            raise ValueError(
-                "Could not find encoder prototype in backbone. "
-                "Ensure the backbone has a TransformerEncoderLayer module."
-            )
-        self.jepa_predictor = nn.ModuleList([deepcopy(encoder_proto) for _ in range(predictor_depth)])
+        #encoder_proto = next(filter(lambda l: isinstance(l, TransformerEncoderLayer), self.backbone.modules()), None)
+        #if encoder_proto is None:
+        #    raise ValueError(
+        #        "Could not find encoder prototype in backbone. "
+        #        "Ensure the backbone has a TransformerEncoderLayer module."
+        #    )
+        #self.jepa_predictor = nn.ModuleList([deepcopy(encoder_proto) for _ in range(predictor_depth)])
         # moe_block = next((block.mlp for block in self.backbone.blocks if isinstance(block.mlp, SoftMoE)), None)
         # if moe_block is not None:
         #    self.jepa_predictor[-1].mlp = moe_block
-        for block in self.jepa_predictor:
-            block.reset_parameters()
+        #for block in self.jepa_predictor:
+        #    block.reset_parameters()
+        self.jepa_predictor = nn.ModuleList([
+            TransformerDecoderLayer(
+                self.backbone.dim,
+                self.backbone.nhead,
+                self.backbone.dim,
+                self.backbone.dim_feedforward,
+                dropout=0.1,
+                num_kv_heads=self.backbone._num_kv_heads,
+                qk_norm=self.backbone._qk_norm,
+                stochastic_depth=0.1,
+                bias=False,
+            )
+            for i in range(predictor_depth)
+        ])
 
         self.save_hyperparameters()
 
@@ -231,7 +241,6 @@ class JEPA(Task):
 
         # Sample a subset of the context as input to the predictor and project
         context = sample_tokens(context, self.context_subsample_ratio)
-        context = self.context_proj(context)
 
         # Prepare positional encoding for target queries
         B, _, _ = context.shape
@@ -241,10 +250,10 @@ class JEPA(Task):
         L = query.shape[1]
 
         # Run query and context through predictor
-        query = torch.cat([query, context], dim=1)
+        #query = torch.cat([query, context], dim=1)
         for block in self.jepa_predictor:
             block = cast(TransformerEncoderLayer, block)
-            query = block(query)
+            query = block(query, context)
 
         # Separate predictions from context
         pred = self.out_proj(query[:, :L])

@@ -39,6 +39,14 @@ class ViT(nn.Module):
         self._nhead = nhead if nhead is not None else self.dim // 32
         self._in_channels = in_channels
         self._dim_feedforward = dim_feedforward = dim_feedforward or 4 * dim
+        self._num_kv_heads = num_kv_heads
+        self._qk_norm = qk_norm
+        self._num_experts = num_experts
+        self._num_slots = num_slots
+        self._moe_layers = moe_layers
+        self._layer_scale = layer_scale
+        self._stochastic_depth = stochastic_depth
+        self._bias = bias
 
         # Stem tokenizer
         stem_type = PatchEmbed2d if isinstance(patch_size, int) or len(patch_size) == 2 else PatchEmbed3d
@@ -65,6 +73,7 @@ class ViT(nn.Module):
                 for i in range(depth)
             ]
         )
+        self.norm = nn.LayerNorm(dim)
 
     @property
     def dim(self) -> int:
@@ -100,6 +109,7 @@ class ViT(nn.Module):
         # Transformer blocks and output norm
         for block in self.blocks:
             x = block(x)
+        x = self.norm(x)
 
         # Reshape to original grid if requested
         if reshape and mask is not None and mask_fill_value is None:
