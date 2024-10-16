@@ -10,7 +10,7 @@ from einops import rearrange
 from torch import Tensor
 
 from ..compile import compile_is_disabled
-from ..mlp import relu2
+from ..mlp import relu2, identity
 from ..pos_enc import RelativeFactorizedPosition, relative_factorized_position_forward
 
 
@@ -51,7 +51,7 @@ def patch_embed_forward(
     w_pos_norm: Tensor | None,
     b_pos_norm: Tensor | None,
     dropout: float = 0.0,
-    activation: Callable[[Tensor], Tensor] = relu2,
+    activation: Callable[[Tensor], Tensor] = identity,
     eps: float = 1e-5,
 ) -> Tensor:
     dims = tuple(dim_size // dim_stride for dim_size, dim_stride in zip(x.shape[2:], stride))
@@ -77,7 +77,7 @@ def _init_patch_embed(layer: nn.Module) -> None:
     layer.pos_enc.reset_parameters()
     nn.init.ones_(layer.w_norm)
     nn.init.zeros_(layer.b_norm)
-    nn.init.trunc_normal_(layer.w_in, std=0.02)
+    nn.init.xavier_uniform_(layer.w_in)
     nn.init.zeros_(layer.b_in)
 
 
@@ -89,7 +89,7 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         embed_dim: int,
         patch_size: int | Tuple[int, int],
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = relu2,
+        activation: Callable[[Tensor], Tensor] = identity,
     ):
         super().__init__()
         self._patch_size = to_tuple(patch_size, 2)
@@ -138,7 +138,7 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         embed_dim: int,
         patch_size: Tuple[int, int, int],
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = relu2,
+        activation: Callable[[Tensor], Tensor] = identity,
     ):
         super().__init__()
         self._patch_size = to_tuple(patch_size, 3)

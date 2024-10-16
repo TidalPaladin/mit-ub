@@ -66,10 +66,10 @@ def attention_forward(
     Returns:
         Output tensor of shape :math:`(B, L, D)`
     """
+    head_dim = q.shape[-1] // num_heads
     if norm:
-        q = F.layer_norm(q, (q.size(-1),), weight=pre_norm_w, bias=pre_norm_b, eps=eps)
+        q = F.layer_norm(q, q.shape[-1:], weight=pre_norm_w, bias=pre_norm_b, eps=eps)
 
-    head_dim = q.size(-1) // num_heads
     # Packed QKV projection
     if k is None and v is None and w_k is None and w_v is None and b_k is None and b_v is None:
         x = F.linear(q, w_q, b_q)
@@ -90,8 +90,8 @@ def attention_forward(
 
     # QK normalization
     if norm_w is not None:
-        q = F.layer_norm(q, (head_dim,), weight=norm_w, bias=norm_b, eps=eps)
-        k = F.layer_norm(k, (head_dim,), weight=norm_w, bias=norm_b, eps=eps)
+        q = F.layer_norm(q, q.shape[-1:], weight=norm_w, bias=norm_b, eps=eps)
+        k = F.layer_norm(k, k.shape[-1:], weight=norm_w, bias=norm_b, eps=eps)
 
     # KV expansion
     if num_kv_heads != num_heads:
@@ -129,71 +129,57 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self._embed_dim = embed_dim
         self._num_heads = num_heads
-        self._head_dim = embed_dim // num_heads
         self._num_kv_heads = num_kv_heads
-        self._kv_dim = self._head_dim * num_kv_heads
         self.dropout = dropout
         self.qk_norm = qk_norm
         self.output_dropout = output_dropout
         self.norm = norm
 
-        if norm:
-            self.pre_norm_w = nn.Parameter(torch.empty(embed_dim))
-            self.pre_norm_b = nn.Parameter(torch.empty(embed_dim))
-        else:
-            self.register_parameter("pre_norm_w", None)
-            self.register_parameter("pre_norm_b", None)
+        # Register optional parameters
+        for prefix in ("w", "b"):
+            for suffix in ("_in", "_q", "_k", "_v", "_out", "_pre_norm", "_norm"):
+                param = f"{prefix}{suffix}"
+                self.register_parameter(param, None)
 
-        # TODO: It is required to pass kdim and vdim for non-self attention. This should
-        # be handled better.
+        # Fused pre-norm
+        if norm:
+            self.w_pre_norm = nn.Parameter(torch.empty(embed_dim))
+            self.b_pre_norm = nn.Parameter(torch.empty(embed_dim))
+
+        # Packed QKV projection
         if kdim is None and vdim is None:
-            self.w_in = nn.Parameter(torch.empty(embed_dim + 2 * self._kv_dim, embed_dim))
-            self.register_parameter("w_q", None)
-            self.register_parameter("w_k", None)
-            self.register_parameter("w_v", None)
+            self.w_in = nn.Parameter(torch.empty(embed_dim + 2 * self.kv_dim, embed_dim))
+            self.b_in = nn.Parameter(torch.empty(embed_dim + 2 * self.kv_dim)) if bias else None
+        # Unpacked QKV projection
         else:
             self.w_q = nn.Parameter(torch.empty(embed_dim, embed_dim))
-            self.w_k = nn.Parameter(torch.empty(self._kv_dim, kdim or embed_dim))
-            self.w_v = nn.Parameter(torch.empty(self._kv_dim, vdim or embed_dim))
-            self.register_parameter("w_in", None)
+            self.w_k = nn.Parameter(torch.empty(self.kv_dim, kdim or embed_dim))
+            self.w_v = nn.Parameter(torch.empty(self.kv_dim, vdim or embed_dim))
+            self.b_q = nn.Parameter(torch.empty(embed_dim)) if bias else None
+            self.b_k = nn.Parameter(torch.empty(self.kv_dim)) if bias else None
+            self.b_v = nn.Parameter(torch.empty(self.kv_dim)) if bias else None
 
+        # QK normalization
         if qk_norm:
-            self.norm_w = nn.Parameter(torch.empty(self.head_dim))
-            self.norm_b = nn.Parameter(torch.empty(self.head_dim))
-        else:
-            self.register_parameter("norm_w", None)
-            self.register_parameter("norm_b", None)
+            self.w_norm = nn.Parameter(torch.empty(self.head_dim))
+            self.b_norm = nn.Parameter(torch.empty(self.head_dim))
 
+        # Output projection
         self.w_out = nn.Parameter(torch.empty(embed_dim, embed_dim))
-
-        # Bias only applied to output projection
-        if bias:
-            self.b_out = nn.Parameter(torch.empty(embed_dim))
-        else:
-            self.register_parameter("b_out", None)
+        self.b_out = nn.Parameter(torch.empty(embed_dim)) if bias else None
 
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        if self.w_in is not None:
-            nn.init.trunc_normal_(self.w_in, std=0.02)
-        else:
-            nn.init.trunc_normal_(self.w_q, std=0.02)
-            nn.init.trunc_normal_(self.w_k, std=0.02)
-            nn.init.trunc_normal_(self.w_v, std=0.02)
-
-        if self.pre_norm_w is not None:
-            nn.init.ones_(self.pre_norm_w)
-        if self.pre_norm_b is not None:
-            nn.init.zeros_(self.pre_norm_b)
-
-        if self.qk_norm:
-            nn.init.ones_(self.norm_w)
-            nn.init.zeros_(self.norm_b)
-
-        nn.init.trunc_normal_(self.w_out, std=0.02)
-        if self.b_out is not None:
-            nn.init.zeros_(self.b_out)
+        for name, param in self.named_parameters():
+            if name.startswith("b_"):
+                nn.init.zeros_(param)
+            elif "norm" in name:
+                nn.init.ones_(param)
+            elif name.startswith("w_"):
+                nn.init.xavier_uniform_(param)
+            else:
+                raise ValueError(f"Unsure how to initialize {name}")
 
     @property
     def embed_dim(self) -> int:
@@ -208,25 +194,34 @@ class MultiHeadAttention(nn.Module):
         return self._num_kv_heads
 
     @property
+    def kv_dim(self) -> int:
+        return self.head_dim * self.num_kv_heads
+
+    @property
     def head_dim(self) -> int:
-        return self._head_dim
+        return self.embed_dim // self.num_heads
 
     @property
     def is_gqa(self) -> bool:
         return self._num_kv_heads != self._num_heads
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
+        # Self attention
         if q is k and k is v:
             assert self.w_in is not None
             _k = _v = None
+        # Cross attention
         else:
             _k = k
             _v = v
 
+        # Handle selection of packed or unpacked QKV
         w_q = self.w_q if self.w_in is None else self.w_in
         w_k = self.w_k if self.w_in is None else None
         w_v = self.w_v if self.w_in is None else None
-        b_q = b_k = b_v = None
+        b_q = self.b_q if self.b_in is None else self.b_in
+        b_k = self.b_k if self.b_in is None else None
+        b_v = self.b_v if self.b_in is None else None
 
         return attention_forward(
             # fmt: off
@@ -235,11 +230,11 @@ class MultiHeadAttention(nn.Module):
             b_q, b_k, b_v,
             self.w_out, self.b_out,
             self.num_heads, self.num_kv_heads,
-            self.norm_w, self.norm_b,
+            self.w_norm, self.b_norm,
             self.dropout if self.training else 0.0,
             output_dropout=self.output_dropout,
             norm=self.norm,
-            pre_norm_w=self.pre_norm_w,
-            pre_norm_b=self.pre_norm_b,
+            pre_norm_w=self.w_pre_norm,
+            pre_norm_b=self.b_pre_norm,
             # fmt: on
         )

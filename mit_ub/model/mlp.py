@@ -16,6 +16,10 @@ def relu2(x: Tensor) -> Tensor:
     return y * y
 
 
+def identity(x: Tensor) -> Tensor:
+    return x
+
+
 @torch.compile(
     fullgraph=True,
     options={
@@ -101,50 +105,38 @@ class MLP(nn.Module):
         self.gate_activation = gate_activation
         self.norm = norm
 
-        if norm:
-            self.w_norm = nn.Parameter(torch.empty(in_features))
-            self.b_norm = nn.Parameter(torch.empty(in_features))
-        else:
-            self.register_parameter("w_norm", None)
-            self.register_parameter("b_norm", None)
+        # Register optional parameters
+        for prefix in ("w_", "b_"):
+            for suffix in ("norm", "in", "out", "gate"):
+                self.register_parameter(f"{prefix}{suffix}", None)
 
         self.w_in = nn.Parameter(torch.empty(hidden_features, in_features))
         self.w_out = nn.Parameter(torch.empty(out_features, hidden_features))
 
+        if norm:
+            self.w_norm = nn.Parameter(torch.empty(in_features))
+            self.b_norm = nn.Parameter(torch.empty(in_features))
+
         if bias:
             self.b_in = nn.Parameter(torch.empty(hidden_features))
             self.b_out = nn.Parameter(torch.empty(out_features))
-        else:
-            self.register_parameter("b_in", None)
-            self.register_parameter("b_out", None)
 
-        if gate_activation is not None and bias:
+        if gate_activation is not None:
             self.w_gate = nn.Parameter(torch.empty(hidden_features, in_features))
-            self.b_gate = nn.Parameter(torch.empty(hidden_features))
-        elif gate_activation is not None:
-            self.w_gate = nn.Parameter(torch.empty(hidden_features, in_features))
-            self.register_parameter("b_gate", None)
-        else:
-            self.register_parameter("w_gate", None)
-            self.register_parameter("b_gate", None)
+            self.b_gate = nn.Parameter(torch.empty(hidden_features)) if bias else None
 
         self.reset_parameters()
 
     def reset_parameters(self):
-        nn.init.trunc_normal_(self.w_in, std=0.02)
-        nn.init.trunc_normal_(self.w_out, std=0.02)
-        if self.w_norm is not None:
-            nn.init.ones_(self.w_norm)
-        if self.b_norm is not None:
-            nn.init.zeros_(self.b_norm)
-        if self.b_in is not None:
-            nn.init.zeros_(self.b_in)
-        if self.b_out is not None:
-            nn.init.zeros_(self.b_out)
-        if self.w_gate is not None:
-            nn.init.trunc_normal_(self.w_gate, std=0.02)
-        if self.b_gate is not None:
-            nn.init.zeros_(self.b_gate)
+        for name, param in self.named_parameters():
+            if name.startswith("b_"):
+                nn.init.zeros_(param)
+            elif "norm" in name:
+                nn.init.ones_(param)
+            elif name.startswith("w_"):
+                nn.init.xavier_uniform_(param)
+            else:
+                raise ValueError(f"Unsure how to initialize {name}")
 
     @property
     def in_features(self) -> int:
@@ -165,8 +157,8 @@ class MLP(nn.Module):
             self.w_out,
             self.b_in,
             self.b_out,
-            self.w_gate if self.w_gate is not None else None,
-            self.b_gate if self.b_gate is not None else None,
+            self.w_gate,
+            self.b_gate,
             self.dropout if self.training else 0.0,
             self.activation,
             self.gate_activation,

@@ -72,7 +72,7 @@ class ClassificationTask(Task):
             nn.Linear(dim, num_classes),
         )
         nn.init.zeros_(self.classification_head[-1].bias)
-        nn.init.trunc_normal_(self.classification_head[-1].weight, std=0.02)
+        nn.init.xavier_uniform_(self.classification_head[-1].weight)
         self.criterion = nn.CrossEntropyLoss()
         self.save_hyperparameters()
 
