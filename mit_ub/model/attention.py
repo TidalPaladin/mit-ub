@@ -28,10 +28,10 @@ def attention_forward(
     norm_w: Tensor | None = None, norm_b: Tensor | None = None,
     dropout: float = 0.0,
     eps: float = 1e-5,
-    output_dropout: bool = True,
     norm: bool = False,
     pre_norm_w: Tensor | None = None,
     pre_norm_b: Tensor | None = None,
+    training: bool = False,
     # fmt: on
 ) -> Tensor:
     """
@@ -55,7 +55,7 @@ def attention_forward(
         norm_b: Normalization bias of shape :math:`(head_dim,)` or None
         dropout: Dropout probability
         eps: Epsilon value for layer normalization
-        output_dropout: Whether to apply dropout to the output
+        training: Training or inference mode
 
     Shapes:
         q, k, v: :math:`(B, L, D)`, or :math:`(B, L, 3*D)` when packed QKV tensor
@@ -106,7 +106,7 @@ def attention_forward(
     # output projection
     o = rearrange(o, "b h l d -> b l (h d)")
     o = F.linear(o, w_out, b_out)
-    o = F.dropout(o, p=dropout, training=dropout > 0.0 and output_dropout)
+    o = F.dropout(o, p=dropout, training=training)
 
     return o
 
@@ -123,7 +123,6 @@ class MultiHeadAttention(nn.Module):
         kdim: int | None = None,
         vdim: int | None = None,
         bias: bool = True,
-        output_dropout: bool = True,
         norm: bool = False,
     ):
         super().__init__()
@@ -132,7 +131,6 @@ class MultiHeadAttention(nn.Module):
         self._num_kv_heads = num_kv_heads
         self.dropout = dropout
         self.qk_norm = qk_norm
-        self.output_dropout = output_dropout
         self.norm = norm
 
         # Register optional parameters
@@ -231,10 +229,10 @@ class MultiHeadAttention(nn.Module):
             self.w_out, self.b_out,
             self.num_heads, self.num_kv_heads,
             self.w_norm, self.b_norm,
-            self.dropout if self.training else 0.0,
-            output_dropout=self.output_dropout,
-            norm=self.norm,
+            self.dropout,
+            self.norm,
             pre_norm_w=self.w_pre_norm,
             pre_norm_b=self.b_pre_norm,
+            training=self.training,
             # fmt: on
         )

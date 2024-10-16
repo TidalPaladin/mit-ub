@@ -119,7 +119,7 @@ BACKBONES(
     dropout=0.1,
     stochastic_depth=0.1,
     bias=False,
-    qk_norm=True,
+    qk_norm=False,
     activation=identity,
     gate_activation=F.silu,
 )

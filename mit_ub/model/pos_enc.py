@@ -57,6 +57,7 @@ def relative_factorized_position_forward(
     b_norm: Tensor | None,
     activation: Callable[[Tensor], Tensor] = identity,
     dropout: float = 0.0,
+    training: bool = False,
 ) -> Tensor:
     """
     Perform the forward pass for the relative factorized position encoding.
@@ -100,8 +101,9 @@ def relative_factorized_position_forward(
 
     y = F.linear(grid, w1, b1)
     y = activation(y)
-    y = F.dropout(y, p=dropout, training=dropout > 0.0)
+    y = F.dropout(y, p=dropout, training=training)
     y = F.linear(y, w2, b2)
+    y = F.dropout(y, p=dropout, training=training)
     y = F.layer_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm, bias=b_norm)
     return y
 
@@ -160,5 +162,6 @@ class RelativeFactorizedPosition(nn.Module):
             self.w_norm,
             self.b_norm,
             self.activation,
-            dropout=self.dropout if self.training else 0.0,
+            dropout=self.dropout,
+            training=self.training,
         )

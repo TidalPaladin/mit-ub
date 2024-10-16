@@ -53,6 +53,7 @@ def patch_embed_forward(
     dropout: float = 0.0,
     activation: Callable[[Tensor], Tensor] = identity,
     eps: float = 1e-5,
+    training: bool = False,
 ) -> Tensor:
     dims = tuple(dim_size // dim_stride for dim_size, dim_stride in zip(x.shape[2:], stride))
     if x.ndim == 4:
@@ -67,7 +68,7 @@ def patch_embed_forward(
     x = F.linear(x, w_patch, b_patch)
     x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
     pos = relative_factorized_position_forward(
-        dims, w1_pos, b1_pos, w2_pos, b2_pos, w_pos_norm, b_pos_norm, activation, dropout=dropout
+        dims, w1_pos, b1_pos, w2_pos, b2_pos, w_pos_norm, b_pos_norm, activation, dropout=dropout, training=training
     )
     x += pos
     return x
@@ -126,7 +127,8 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
             self.pos_enc.b_out,
             self.pos_enc.w_norm,
             self.pos_enc.b_norm,
-            dropout=self.pos_enc.dropout if self.training else 0.0,
+            dropout=self.pos_enc.dropout,
+            training=self.training,
         )
 
 
@@ -175,5 +177,6 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
             self.pos_enc.b_out,
             self.pos_enc.w_norm,
             self.pos_enc.b_norm,
-            dropout=self.pos_enc.dropout if self.training else 0.0,
+            dropout=self.pos_enc.dropout,
+            training=self.training,
         )

@@ -171,16 +171,10 @@ class JEPA(Task):
         )
 
         # Projections for the input context and output predictions
-        self.context_proj = nn.Sequential(
-            nn.Linear(self.backbone.dim, self.backbone.dim),
-            nn.LayerNorm(self.backbone.dim),
-        )
         self.out_proj = nn.Sequential(
             nn.LayerNorm(self.backbone.dim),
             nn.Linear(self.backbone.dim, self.backbone.dim),
         )
-        nn.init.xavier_uniform_(self.context_proj[0].weight)
-        nn.init.zeros_(self.context_proj[0].bias)
         nn.init.xavier_uniform_(self.out_proj[1].weight)
         nn.init.zeros_(self.out_proj[1].bias)
 
@@ -220,7 +214,6 @@ class JEPA(Task):
 
         # Sample a subset of the context as input to the predictor and project
         context = sample_tokens(context, self.context_subsample_ratio)
-        context = self.context_proj(context)
 
         # Prepare positional encoding for target queries
         B, _, _ = context.shape

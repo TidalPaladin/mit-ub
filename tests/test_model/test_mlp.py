@@ -32,8 +32,9 @@ def test_mlp_forward(dropout, training):
         layer[3].weight,
         layer[0].bias,
         layer[3].bias,
-        dropout=dropout if training else 0.0,
+        dropout=dropout,
         activation=F.relu,
+        training=training,
     )
     assert_close(baseline, actual, atol=0.001, rtol=0)
 

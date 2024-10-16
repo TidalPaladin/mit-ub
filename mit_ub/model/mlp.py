@@ -41,11 +41,11 @@ def mlp_forward(
     dropout: float = 0.0,
     activation: Callable[[Tensor], Tensor] = relu2,
     gate_activation: Callable[[Tensor], Tensor] | None = None,
-    output_dropout: bool = True,
     norm: bool = False,
     w_norm: Tensor | None = None,
     b_norm: Tensor | None = None,
     eps: float = 1e-5,
+    training: bool = False,
 ) -> Tensor:
     if norm:
         x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
@@ -59,9 +59,9 @@ def mlp_forward(
             gate = gate_activation(gate)
         y = y * gate
 
-    y = F.dropout(y, p=dropout, training=dropout > 0.0)
+    y = F.dropout(y, p=dropout, training=training)
     y = F.linear(y, w2, b2)
-    y = F.dropout(y, p=dropout, training=dropout > 0.0 and output_dropout)
+    y = F.dropout(y, p=dropout, training=training)
     return y
 
 
@@ -77,7 +77,7 @@ class MLP(nn.Module):
         activation: Activation function to apply after the first linear layer.
         gate_activation: Activation function for the gating mechanism, or ``None`` for no gating.
         bias: Whether to use bias in the linear layers.
-        output_dropout: Whether to apply dropout to the output layer.
+        norm: Whether to apply layer normalization to the input.
 
     Basic MLP:
         >>> mlp = MLP(10, 20, 10))
@@ -95,12 +95,10 @@ class MLP(nn.Module):
         activation: Callable[[Tensor], Tensor] = relu2,
         gate_activation: Callable[[Tensor], Tensor] | None = None,
         bias: bool = True,
-        output_dropout: bool = True,
         norm: bool = False,
     ):
         super().__init__()
         self.dropout = dropout
-        self.output_dropout = output_dropout
         self.activation = activation
         self.gate_activation = gate_activation
         self.norm = norm
@@ -159,11 +157,11 @@ class MLP(nn.Module):
             self.b_out,
             self.w_gate,
             self.b_gate,
-            self.dropout if self.training else 0.0,
+            self.dropout,
             self.activation,
             self.gate_activation,
-            self.output_dropout,
             self.norm,
             self.w_norm,
             self.b_norm,
+            training=self.training,
         )
