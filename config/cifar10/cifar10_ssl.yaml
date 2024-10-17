@@ -3,7 +3,7 @@ fit:
   float32_matmul_precision: medium
   trainer:
     accelerator: gpu
-    devices: [2]
+    devices: [1]
     #strategy: "ddp_find_unused_parameters_true"
     precision: "bf16-mixed"
     max_steps: 50000
@@ -29,7 +29,7 @@ fit:
       init_args:
         save_dir: /mnt/flash/mitub
         project: mit-ub
-        name: "cifar10-vit-swiglu-sinpos"
+        name: "cifar10-vit-swiglu-bigtrunc"
 
   model:
     class_path: mit_ub.tasks.JEPAWithClassification

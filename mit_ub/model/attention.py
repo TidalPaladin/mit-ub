@@ -1,6 +1,7 @@
 from typing import cast
 
 import torch
+import math
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor, nn
@@ -173,8 +174,6 @@ class MultiHeadAttention(nn.Module):
                 nn.init.zeros_(param)
             elif "norm" in name:
                 nn.init.ones_(param)
-            elif name == "w_out":
-                nn.init.xavier_uniform_(param)
             elif name.startswith("w_"):
                 # When using QK normalization we should be safe to have more weight variance
                 if self.qk_norm:

@@ -7,11 +7,12 @@ import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.structs import State
 from deep_helpers.tasks import Task
-from einops.layers.torch import Rearrange
+from einops.layers.torch import Rearrange, Reduce
 from torch import Tensor
 
 from ..model import BACKBONES, ViT
 from .jepa import JEPAWithProbe
+from ..model.pool import MultiHeadAttentionPool
 
 
 class ClassificationTask(Task):
@@ -64,13 +65,20 @@ class ClassificationTask(Task):
 
         self.backbone = cast(ViT, self.prepare_backbone(backbone))
         dim = self.backbone.dim
+        #self.classification_head = nn.Sequential(
+        #    nn.AdaptiveAvgPool2d((1, 1)),
+        #    Rearrange("b c () () -> b c"),
+        #    nn.LayerNorm(dim),
+        #    nn.Dropout(0.1),
+        #    nn.Linear(dim, num_classes),
+        #)
         self.classification_head = nn.Sequential(
-            nn.AdaptiveAvgPool2d((1, 1)),
-            Rearrange("b c () () -> b c"),
+            MultiHeadAttentionPool(dim, self.backbone.nhead, 1),
             nn.LayerNorm(dim),
             nn.Dropout(0.1),
             nn.Linear(dim, num_classes),
         )
+
         nn.init.zeros_(self.classification_head[-1].bias)
         nn.init.xavier_uniform_(self.classification_head[-1].weight)
         self.criterion = nn.CrossEntropyLoss()
@@ -176,11 +184,11 @@ class JEPAWithClassification(JEPAWithProbe):
 
     def create_probe_head(self) -> nn.Module:
         head = nn.Sequential(
+            Reduce("b l d -> b d", "mean"),
             nn.LayerNorm(self.backbone.dim),
+            nn.Dropout(0.1),
             nn.Linear(self.backbone.dim, self.num_classes),
         )
-        nn.init.zeros_(head[-1].bias)
-        nn.init.trunc_normal_(head[-1].weight, std=0.02)
         return head
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
@@ -201,7 +209,7 @@ class JEPAWithClassification(JEPAWithProbe):
 
         assert self.linear_probe is not None
         N = features.shape[0]
-        linprobe_logits = self.linear_probe(features.mean(1).view(N, -1)).view(N, -1)
+        linprobe_logits = self.linear_probe(features).view(N, -1)
         assert linprobe_logits.requires_grad or not self.training
 
         # Build ground truth and compute loss

@@ -1,58 +1,59 @@
 import pytest
+from sklearn import base
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from torch.testing import assert_close
 
 from mit_ub.model.attention import MultiHeadAttention, attention_forward
 
 
-def test_attention_equivalence():
-    B, L, D = 1, 32, 128
-    nhead = D // 16
-
-    x = torch.randn(B, L, D)
-    q = x.clone()
-    kv = x.clone()
-
-    w_q = torch.randn(D, D)
-    w_k = torch.randn(D, D)
-    w_v = torch.randn(D, D)
-    w_in = torch.cat([w_q, w_k, w_v], dim=0)
-
-    b_q = torch.randn(D)
-    b_k = torch.randn(D)
-    b_v = torch.randn(D)
-    b_in = torch.cat([b_q, b_k, b_v], dim=0)
-
-    w_out = torch.randn(D, D)
-    b_out = torch.randn(D)
-    norm_w = torch.randn(16)
-
-    out_mhsa = attention_forward(
-        # fmt: off
-        x, None, None,
-        w_in, None, None,
-        b_in, None, None,
-        w_out, b_out,
-        nhead, nhead,
-        norm_w, None,
-        dropout=0.0,
-        # fmt: on
-    )
-    out_mha = attention_forward(
-        # fmt: off
-        q, kv, kv,
-        w_q, w_k, w_v,
-        b_q, b_k, b_v,
-        w_out, b_out,
-        nhead, nhead,
-        norm_w, None,
-        dropout=0.0,
-        # fmt: on
-    )
-    assert_close(out_mhsa, out_mha, atol=0.01, rtol=0)
 
 
 class TestMultiHeadAttention:
+
+    def test_torch_equivalence(self):
+        B, L, D = 2, 8, 32
+        nhead = 2
+        torch.random.manual_seed(0)
+
+        model = MultiHeadAttention(
+            D,
+            nhead,
+            nhead,
+            dropout=0.0,
+            bias=False,
+            kdim=D,
+            vdim=D,
+        )
+        model.eval()
+
+        q = torch.randn(B, L, D)
+        k = torch.randn(B, L, D)
+        v = torch.randn(B, L, D)
+        nn.MultiheadAttention
+
+        baseline_out = F.multi_head_attention_forward(
+            # fmt: off
+            q.transpose(0, 1), k.transpose(0, 1), v.transpose(0, 1),
+            D, nhead,
+            None, None,
+            None, None,
+            False,
+            0.0,
+            model.w_out, None,
+            training=False,
+            need_weights=False,
+            use_separate_proj_weight=True,
+            q_proj_weight=model.w_q,
+            k_proj_weight=model.w_k,
+            v_proj_weight=model.w_v,
+            average_attn_weights=True,
+            # fmt: on
+        )[0].transpose(0, 1)
+
+        out = model(q, k, v)
+        assert_close(baseline_out, out)
 
     @pytest.mark.parametrize(
         "device",
@@ -224,8 +225,15 @@ class TestMultiHeadAttention:
         k = torch.randn(B, Lk, Dk) if Lk != Lq or Dk != Dq else q
         v = torch.randn(B, Lk, Dk) if Lk != Lq or Dk != Dq else q
 
-        out_norm = model(q, k, v)
-        model.w_pre_norm = None  # type: ignore
-        model.b_pre_norm = None  # type: ignore
-        out_no_norm = model(q, k, v)
-        assert not torch.allclose(out_norm, out_no_norm)
+        w_norm = model.w_pre_norm
+        b_norm = model.b_pre_norm
+        actual = model(q, k, v)
+
+        model.w_pre_norm = model.b_pre_norm = None  # type: ignore
+        _q = F.layer_norm(q, q.shape[-1:], weight=w_norm, bias=b_norm)
+        k = F.layer_norm(k, k.shape[-1:], weight=w_norm, bias=b_norm) if k is not q else _q
+        v = F.layer_norm(v, v.shape[-1:], weight=w_norm, bias=b_norm) if v is not q else _q
+        q = _q
+        baseline = model(q, k, v)
+
+        assert_close(baseline, actual)

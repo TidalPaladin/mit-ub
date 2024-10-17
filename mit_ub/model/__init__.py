@@ -113,7 +113,7 @@ BACKBONES(
     in_channels=3,
     dim=CIFAR10_DIM,
     patch_size=4,
-    depth=12,
+    depth=9,
     nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     num_kv_heads=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     dropout=0.1,

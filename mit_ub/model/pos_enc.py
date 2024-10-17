@@ -6,10 +6,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+from .mlp import relu2
 from .compile import compile_is_disabled
 
 
-DEFAULT_POS_ENC_ACTIVATION: Final[Callable[[Tensor], Tensor]] = torch.sin
+DEFAULT_POS_ENC_ACTIVATION: Final[Callable[[Tensor], Tensor]] = relu2
 
 
 @torch.compile(fullgraph=True, disable=compile_is_disabled())

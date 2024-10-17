@@ -124,8 +124,12 @@ class TestMLP:
         torch.random.manual_seed(0)
         B, L, D = 2, 8, 32
         x = torch.randn(B, L, D)
-        layer = MLP(D, 2 * D, D, norm=True)
-        y_norm = layer(x)
-        layer.w_norm = None  # type: ignore
-        y_no_norm = layer(x)
-        assert not torch.allclose(y_norm, y_no_norm)
+        norm = nn.LayerNorm(D)
+        layer = MLP(D, 2 * D, D)
+
+        baseline = layer(norm(x))
+
+        layer.w_norm = norm.weight
+        layer.b_norm = norm.bias
+        actual = layer(x)
+        assert_close(baseline, actual)
