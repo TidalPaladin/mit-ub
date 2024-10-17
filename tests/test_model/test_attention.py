@@ -225,6 +225,7 @@ class TestMultiHeadAttention:
         v = torch.randn(B, Lk, Dk) if Lk != Lq or Dk != Dq else q
 
         out_norm = model(q, k, v)
-        model.norm = False
+        model.w_pre_norm = None  # type: ignore
+        model.b_pre_norm = None  # type: ignore
         out_no_norm = model(q, k, v)
         assert not torch.allclose(out_norm, out_no_norm)

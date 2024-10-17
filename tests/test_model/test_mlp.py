@@ -19,7 +19,6 @@ def test_mlp_forward(dropout, training):
         nn.ReLU(),
         nn.Dropout(dropout),
         nn.Linear(2 * D, D),
-        nn.Dropout(dropout),
     )
     layer.train(training)
 
@@ -127,6 +126,6 @@ class TestMLP:
         x = torch.randn(B, L, D)
         layer = MLP(D, 2 * D, D, norm=True)
         y_norm = layer(x)
-        layer.norm = False
+        layer.w_norm = None  # type: ignore
         y_no_norm = layer(x)
         assert not torch.allclose(y_norm, y_no_norm)

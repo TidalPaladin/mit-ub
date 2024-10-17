@@ -41,13 +41,12 @@ def mlp_forward(
     dropout: float = 0.0,
     activation: Callable[[Tensor], Tensor] = relu2,
     gate_activation: Callable[[Tensor], Tensor] | None = None,
-    norm: bool = False,
     w_norm: Tensor | None = None,
     b_norm: Tensor | None = None,
     eps: float = 1e-5,
     training: bool = False,
 ) -> Tensor:
-    if norm:
+    if w_norm is not None:
         x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
 
     y = F.linear(x, w1, b1)
@@ -61,7 +60,6 @@ def mlp_forward(
 
     y = F.dropout(y, p=dropout, training=training)
     y = F.linear(y, w2, b2)
-    y = F.dropout(y, p=dropout, training=training)
     return y
 
 
@@ -101,7 +99,6 @@ class MLP(nn.Module):
         self.dropout = dropout
         self.activation = activation
         self.gate_activation = gate_activation
-        self.norm = norm
 
         # Register optional parameters
         for prefix in ("w_", "b_"):
@@ -148,6 +145,10 @@ class MLP(nn.Module):
     def hidden_features(self) -> int:
         return self.w_in.shape[-2]
 
+    @property
+    def norm(self) -> bool:
+        return self.w_norm is not None
+
     def forward(self, x: Tensor) -> Tensor:
         return mlp_forward(
             x,
@@ -160,7 +161,6 @@ class MLP(nn.Module):
             self.dropout,
             self.activation,
             self.gate_activation,
-            self.norm,
             self.w_norm,
             self.b_norm,
             training=self.training,

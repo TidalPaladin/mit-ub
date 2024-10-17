@@ -42,9 +42,7 @@ def test_relative_factorized_position_forward(dropout, training):
     grid = create_grid(dims, normalize=True)
     grid = grid * math.sqrt(3)
     torch.random.manual_seed(0)
-    expected = mlp_forward(
-        grid, w_in, w_out, b_in, b_out, dropout=dropout, activation=F.relu, training=training
-    )
+    expected = mlp_forward(grid, w_in, w_out, b_in, b_out, dropout=dropout, activation=F.relu, training=training)
     expected = F.layer_norm(expected, (D,), weight=norm_w, bias=norm_b)
 
     assert_close(actual, expected, atol=0.001, rtol=0)

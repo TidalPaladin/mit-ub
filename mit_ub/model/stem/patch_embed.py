@@ -10,8 +10,7 @@ from einops import rearrange
 from torch import Tensor
 
 from ..compile import compile_is_disabled
-from ..mlp import relu2, identity
-from ..pos_enc import RelativeFactorizedPosition, relative_factorized_position_forward
+from ..pos_enc import DEFAULT_POS_ENC_ACTIVATION, RelativeFactorizedPosition, relative_factorized_position_forward
 
 
 T = TypeVar("T", bound=Tuple[int, ...])
@@ -51,7 +50,7 @@ def patch_embed_forward(
     w_pos_norm: Tensor | None,
     b_pos_norm: Tensor | None,
     dropout: float = 0.0,
-    activation: Callable[[Tensor], Tensor] = identity,
+    activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
     eps: float = 1e-5,
     training: bool = False,
 ) -> Tensor:
@@ -90,7 +89,7 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         embed_dim: int,
         patch_size: int | Tuple[int, int],
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = identity,
+        activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
     ):
         super().__init__()
         self._patch_size = to_tuple(patch_size, 2)
@@ -127,6 +126,7 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
             self.pos_enc.b_out,
             self.pos_enc.w_norm,
             self.pos_enc.b_norm,
+            activation=self.pos_enc.activation,
             dropout=self.pos_enc.dropout,
             training=self.training,
         )
@@ -140,7 +140,7 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         embed_dim: int,
         patch_size: Tuple[int, int, int],
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = identity,
+        activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
     ):
         super().__init__()
         self._patch_size = to_tuple(patch_size, 3)
@@ -178,5 +178,6 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
             self.pos_enc.w_norm,
             self.pos_enc.b_norm,
             dropout=self.pos_enc.dropout,
+            activation=self.pos_enc.activation,
             training=self.training,
         )

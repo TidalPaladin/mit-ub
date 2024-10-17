@@ -101,12 +101,13 @@ def attention_forward(
 
     # SDPA
     scale = 1.0 if norm_w is not None else None
-    o = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout if training else 0.0, is_causal=False, scale=scale)
+    o = F.scaled_dot_product_attention(
+        q, k, v, attn_mask=None, dropout_p=dropout if training else 0.0, is_causal=False, scale=scale
+    )
 
     # output projection
     o = rearrange(o, "b h l d -> b l (h d)")
     o = F.linear(o, w_out, b_out)
-    o = F.dropout(o, p=dropout, training=training)
 
     return o
 
@@ -130,8 +131,6 @@ class MultiHeadAttention(nn.Module):
         self._num_heads = num_heads
         self._num_kv_heads = num_kv_heads
         self.dropout = dropout
-        self.qk_norm = qk_norm
-        self.norm = norm
 
         # Register optional parameters
         for prefix in ("w", "b"):
@@ -174,8 +173,15 @@ class MultiHeadAttention(nn.Module):
                 nn.init.zeros_(param)
             elif "norm" in name:
                 nn.init.ones_(param)
-            elif name.startswith("w_"):
+            elif name == "w_out":
                 nn.init.xavier_uniform_(param)
+            elif name.startswith("w_"):
+                # When using QK normalization we should be safe to have more weight variance
+                if self.qk_norm:
+                    nn.init.trunc_normal_(param, std=0.02)
+                # Otherwise xavier uniform is a safe bet for stability
+                else:
+                    nn.init.xavier_uniform_(param)
             else:
                 raise ValueError(f"Unsure how to initialize {name}")
 
@@ -202,6 +208,14 @@ class MultiHeadAttention(nn.Module):
     @property
     def is_gqa(self) -> bool:
         return self._num_kv_heads != self._num_heads
+
+    @property
+    def qk_norm(self) -> bool:
+        return self.w_norm is not None
+
+    @property
+    def norm(self) -> bool:
+        return self.w_pre_norm is not None
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
         # Self attention

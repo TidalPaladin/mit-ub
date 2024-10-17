@@ -1,5 +1,5 @@
 import math
-from typing import Callable, Sequence
+from typing import Callable, Final, Sequence
 
 import torch
 import torch.nn as nn
@@ -7,7 +7,9 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from .compile import compile_is_disabled
-from .mlp import identity
+
+
+DEFAULT_POS_ENC_ACTIVATION: Final[Callable[[Tensor], Tensor]] = torch.sin
 
 
 @torch.compile(fullgraph=True, disable=compile_is_disabled())
@@ -55,7 +57,7 @@ def relative_factorized_position_forward(
     b2: Tensor | None,
     w_norm: Tensor | None,
     b_norm: Tensor | None,
-    activation: Callable[[Tensor], Tensor] = identity,
+    activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
     dropout: float = 0.0,
     training: bool = False,
 ) -> Tensor:
@@ -103,7 +105,6 @@ def relative_factorized_position_forward(
     y = activation(y)
     y = F.dropout(y, p=dropout, training=training)
     y = F.linear(y, w2, b2)
-    y = F.dropout(y, p=dropout, training=training)
     y = F.layer_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm, bias=b_norm)
     return y
 
@@ -130,7 +131,13 @@ class RelativeFactorizedPosition(nn.Module):
         * Output - :math:`(1, L, D)` where :math:`L` is the product of input dimensions and :math:`D` is the output dimension
     """
 
-    def __init__(self, d_in: int, d_out: int, dropout: float = 0.0, activation: Callable[[Tensor], Tensor] = identity):
+    def __init__(
+        self,
+        d_in: int,
+        d_out: int,
+        dropout: float = 0.0,
+        activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
+    ):
         super().__init__()
         self.dropout = dropout
         self.activation = activation

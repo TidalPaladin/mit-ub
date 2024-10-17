@@ -57,7 +57,7 @@ class ViT(nn.Module):
 
         # Transformer blocks
         self.blocks = nn.ModuleList([self.create_encoder_layer(i) for i in range(depth)])
-        self.norm = nn.LayerNorm(dim)
+        self.embedding_norm = nn.LayerNorm(dim)
 
     @property
     def dim(self) -> int:
@@ -162,7 +162,7 @@ class ViT(nn.Module):
         # Transformer blocks and output norm
         for block in self.blocks:
             x = block(x)
-        x = self.norm(x)
+        x = self.embedding_norm(x)
 
         # Reshape to original grid if requested
         if reshape and mask is not None and mask_fill_value is None:
@@ -240,7 +240,10 @@ class AdaptiveViT(ViT):
 
         # Cross attention to high res tokens
         self.high_res_blocks = nn.ModuleList(
-            [self.create_decoder_layer(i + len(self.blocks), kv_dim, layer_scale=high_res_layer_scale) for i in range(high_res_depth)]
+            [
+                self.create_decoder_layer(i + len(self.blocks), kv_dim, layer_scale=high_res_layer_scale)
+                for i in range(high_res_depth)
+            ]
         )
 
     def convert_mask_to_kv_mask(
@@ -285,7 +288,7 @@ class AdaptiveViT(ViT):
         # Cross attention blocks between fixed backbone tokens and high res input tokens
         for block in self.high_res_blocks:
             q = block(q, kv)
-        x = q
+        x = self.embedding_norm(q)
 
         # Reshape to original grid if requested
         if reshape and mask is not None and mask_fill_value is None:

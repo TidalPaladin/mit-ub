@@ -28,6 +28,7 @@ def dispatch(
     norm_w: Tensor | None = None,
     norm_b: Tensor | None = None,
     eps: float = 1e-5,
+    training: bool = False,
 ) -> Tensor:
     """Dispatch tokens to expert slots using attention mechanism.
 
@@ -40,7 +41,8 @@ def dispatch(
         dropout: Dropout probability.
         norm_w: Weight matrix for normalization.
         norm_b: Bias vector for normalization.
-
+        eps: Epsilon value for normalization.
+        training: State of the training flag.
     Shapes:
         - tokens: :math:`(B, L, D)` where :math:`B` is batch size, :math:`L` is sequence length, and :math:`D` is the embedding dimension.
         - slot_query: :math:`(H, S, D / H)` where :math:`H` is the number of heads and :math:`S` is the number of slots
@@ -54,7 +56,7 @@ def dispatch(
     if norm_w is not None:
         q = F.layer_norm(q, (q.shape[-1],), norm_w, norm_b, eps)
         k = F.layer_norm(k, (k.shape[-1],), norm_w, norm_b, eps)
-    o = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout)
+    o = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout if training else 0.0)
     return rearrange(o, "b h l d -> b l (h d)")
 
 
@@ -76,6 +78,7 @@ def combine(
     norm_w: Tensor | None = None,
     norm_b: Tensor | None = None,
     eps: float = 1e-5,
+    training: bool = False,
 ) -> Tensor:
     """Combine expert outputs using attention mechanism.
 
@@ -88,6 +91,8 @@ def combine(
         dropout: Dropout probability.
         norm_w: Weight matrix for normalization.
         norm_b: Bias vector for normalization.
+        eps: Epsilon value for normalization.
+        training: State of the training flag.
 
     Shapes:
         - tokens: :math:`(B, L, D)` where :math:`B` is batch size, :math:`L` is sequence length, and :math:`D` is the embedding dimension.
@@ -102,7 +107,7 @@ def combine(
     if norm_w is not None:
         q = F.layer_norm(q, (q.shape[-1],), norm_w, norm_b, eps)
         k = F.layer_norm(k, (k.shape[-1],), norm_w, norm_b, eps)
-    o = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout)
+    o = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout if training else 0.0)
     return rearrange(o, "b h l d -> b l (h d)")
 
 
@@ -117,7 +122,7 @@ def forward_experts(
     w_gate: Tensor | None = None,
     b_gate: Tensor | None = None,
     gate_activation: Callable[[Tensor], Tensor] | None = None,
-    output_dropout: bool = True,
+    training: bool = False,
 ) -> Tensor:
     """Perform forward pass through experts.
 
@@ -132,7 +137,7 @@ def forward_experts(
         w_gate: Gate weight matrices for each expert (optional).
         b_gate: Gate bias vectors for each expert (optional).
         gate_activation: Gate activation function (optional).
-        output_dropout: Whether to apply output dropout.
+        training: State of the training flag.
     Returns:
         Output tensor after passing through experts.
 
@@ -171,7 +176,7 @@ def forward_experts(
             dropout,
             activation,
             gate_activation,
-            output_dropout,
+            training=training,
         )
         output.append(o_i)
     return torch.cat(output, dim=1)
@@ -193,22 +198,20 @@ def soft_moe_forward(
     w_gate: Tensor | None = None,
     b_gate: Tensor | None = None,
     gate_activation: Callable[[Tensor], Tensor] | None = None,
-    output_dropout: bool = True,
     norm_w: Tensor | None = None,
     norm_b: Tensor | None = None,
     norm: bool = True,
     pre_norm_w: Tensor | None = None,
     pre_norm_b: Tensor | None = None,
     eps: float = 1e-5,
+    training: bool = False,
 ) -> Tensor:
     if norm:
         x = F.layer_norm(x, x.shape[-1:], pre_norm_w, pre_norm_b, eps)
 
     nhead = slot_query.shape[0]
     y = dispatch(x, slot_query, w_dispatch_k, w_dispatch_v, nhead, dropout, norm_w, norm_b, eps)
-    y = forward_experts(
-        y, w_in, b_in, w_out, b_out, activation, dropout, w_gate, b_gate, gate_activation, output_dropout
-    )
+    y = forward_experts(y, w_in, b_in, w_out, b_out, activation, dropout, w_gate, b_gate, gate_activation, training)
     y = combine(x, slot_key, y, w_combine_q, nhead, dropout, norm_w, norm_b, eps)
     return y
 
@@ -231,6 +234,11 @@ class SoftMoE(nn.Module):
         num_slots: The number of slots for routing tokens. Must be greater than or equal to `num_experts`.
         nhead: The number of attention heads.
         dropout: Dropout probability for the attention mechanism.
+        activation: Activation function.
+        gate_activation: Gate activation function (optional).
+        bias: Whether to use bias in the experts.
+        qk_norm: Whether to use QK normalization in the dispatch and combine steps.
+        norm: Whether to use layer normalization on the input.
 
     Raises:
         - ValueError: If `num_slots` is less than `num_experts`
@@ -253,16 +261,13 @@ class SoftMoE(nn.Module):
         activation: Callable[[Tensor], Tensor] = relu2,
         gate_activation: Callable[[Tensor], Tensor] | None = None,
         bias: bool = True,
-        output_dropout: bool = True,
         qk_norm: bool = False,
-        norm: bool = True,
+        norm: bool = False,
     ):
         super().__init__()
         self.dropout = dropout
-        self.output_dropout = output_dropout
         self.activation = activation
         self.gate_activation = gate_activation
-        self.norm = norm
 
         if num_slots < num_experts:
             raise ValueError("num_slots must be greater than or equal to num_experts")
@@ -312,10 +317,17 @@ class SoftMoE(nn.Module):
                 nn.init.zeros_(param)
             elif "norm" in name:
                 nn.init.ones_(param)
-            elif name.startswith("w_"):
-                nn.init.xavier_uniform_(param)
             elif "slot" in name:
                 nn.init.trunc_normal_(param, std=0.2)
+            elif "dispatch" in name or "combine" in name:
+                if self.qk_norm:
+                    # When using QK normalization we should be safe to have more weight variance
+                    nn.init.trunc_normal_(param, std=0.02)
+                else:
+                    # Otherwise xavier uniform is a safe bet for stability
+                    nn.init.xavier_uniform_(param)
+            elif name.startswith("w_"):
+                nn.init.xavier_uniform_(param)
             else:
                 raise ValueError(f"Unsure how to initialize {name}")
 
@@ -330,6 +342,14 @@ class SoftMoE(nn.Module):
     @property
     def nhead(self) -> int:
         return self.slot_query.shape[0]
+
+    @property
+    def qk_norm(self) -> bool:
+        return self.w_norm is not None
+
+    @property
+    def norm(self) -> bool:
+        return self.w_pre_norm is not None
 
     def forward(self, x: Tensor) -> Tensor:
         return soft_moe_forward(
@@ -348,10 +368,10 @@ class SoftMoE(nn.Module):
             self.w_gate,
             self.b_gate,
             self.gate_activation,
-            self.output_dropout,
             self.w_norm,
             self.b_norm,
             self.norm,
             self.w_pre_norm,
             self.b_pre_norm,
+            training=self.training,
         )
