@@ -101,7 +101,7 @@ def attention_forward(
 
     # SDPA
     scale = 1.0 if norm_w is not None else None
-    o = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout, is_causal=False, scale=scale)
+    o = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout if training else 0.0, is_causal=False, scale=scale)
 
     # output projection
     o = rearrange(o, "b h l d -> b l (h d)")
@@ -229,8 +229,8 @@ class MultiHeadAttention(nn.Module):
             self.w_out, self.b_out,
             self.num_heads, self.num_kv_heads,
             self.w_norm, self.b_norm,
-            self.dropout,
-            self.norm,
+            dropout=self.dropout,
+            norm=self.norm,
             pre_norm_w=self.w_pre_norm,
             pre_norm_b=self.b_pre_norm,
             training=self.training,
