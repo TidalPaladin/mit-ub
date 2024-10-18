@@ -17,6 +17,7 @@ from torch.optim.optimizer import Optimizer
 from ..model import BACKBONES, AdaptiveViT, ViT, compile_is_disabled
 from ..model.pos_enc import RelativeFactorizedPosition
 from ..model.transformer import TransformerDecoderLayer
+from ..model.mlp import relu2
 
 
 EPS: Final = 1e-8
@@ -179,7 +180,10 @@ class JEPA(Task):
         nn.init.zeros_(self.out_proj[1].bias)
 
         # JEPA predictor
-        self.jepa_predictor = nn.ModuleList([self.backbone.create_decoder_layer(i) for i in range(predictor_depth)])
+        self.jepa_predictor = nn.ModuleList([
+            self.backbone.create_decoder_layer(i, activation=relu2, gate_activation=None, stochastic_depth=0.0) 
+            for i in range(predictor_depth)
+        ])
         self.save_hyperparameters()
 
     def prepare_backbone(self, name: str) -> nn.Module:
@@ -389,7 +393,6 @@ class JEPA(Task):
 
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
-        pred.shape[-1]
         loss = cosine_similarity_loss(pred, target)
 
         # Compute metrics
