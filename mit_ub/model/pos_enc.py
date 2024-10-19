@@ -1,16 +1,18 @@
 import math
-from typing import Callable, Sequence
+from typing import Callable, Final, Sequence
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from .compile import compile_is_disabled
-from .mlp import relu2
+from .helpers import compile_backend, compile_is_disabled
 
 
-@torch.compile(fullgraph=True, disable=compile_is_disabled())
+DEFAULT_POS_ENC_ACTIVATION: Final[Callable[[Tensor], Tensor]] = F.silu
+
+
+@torch.compile(fullgraph=True, backend=compile_backend(), disable=compile_is_disabled())
 def create_grid(
     dims: Sequence[int],
     dtype: torch.dtype = torch.float32,
@@ -40,6 +42,7 @@ def create_grid(
 
 @torch.compile(
     fullgraph=True,
+    backend=compile_backend(),
     disable=compile_is_disabled(),
     options={
         "max_autotune": True,
@@ -55,8 +58,9 @@ def relative_factorized_position_forward(
     b2: Tensor | None,
     w_norm: Tensor | None,
     b_norm: Tensor | None,
-    activation: Callable[[Tensor], Tensor] = relu2,
+    activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
     dropout: float = 0.0,
+    training: bool = False,
 ) -> Tensor:
     """
     Perform the forward pass for the relative factorized position encoding.
@@ -100,7 +104,7 @@ def relative_factorized_position_forward(
 
     y = F.linear(grid, w1, b1)
     y = activation(y)
-    y = F.dropout(y, p=dropout, training=dropout > 0.0)
+    y = F.dropout(y, p=dropout, training=training, inplace=True)
     y = F.linear(y, w2, b2)
     y = F.layer_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm, bias=b_norm)
     return y
@@ -128,7 +132,13 @@ class RelativeFactorizedPosition(nn.Module):
         * Output - :math:`(1, L, D)` where :math:`L` is the product of input dimensions and :math:`D` is the output dimension
     """
 
-    def __init__(self, d_in: int, d_out: int, dropout: float = 0.0, activation: Callable[[Tensor], Tensor] = relu2):
+    def __init__(
+        self,
+        d_in: int,
+        d_out: int,
+        dropout: float = 0.0,
+        activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
+    ):
         super().__init__()
         self.dropout = dropout
         self.activation = activation
@@ -141,12 +151,15 @@ class RelativeFactorizedPosition(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        nn.init.trunc_normal_(self.w_in, std=0.02)
-        nn.init.trunc_normal_(self.w_out, std=0.02)
-        nn.init.zeros_(self.b_in)
-        nn.init.zeros_(self.b_out)
+        for weight in (self.w_in, self.w_out):
+            # nn.init.xavier_uniform_(weight)
+            nn.init.trunc_normal_(weight, std=0.02)
+
+        for bias in (self.b_in, self.b_out, self.b_norm):
+            if bias is not None:
+                nn.init.zeros_(bias)
+
         nn.init.ones_(self.w_norm)
-        nn.init.zeros_(self.b_norm)
 
     def forward(self, dims: Sequence[int]) -> Tensor:
         return relative_factorized_position_forward(
@@ -158,5 +171,6 @@ class RelativeFactorizedPosition(nn.Module):
             self.w_norm,
             self.b_norm,
             self.activation,
-            dropout=self.dropout if self.training else 0.0,
+            dropout=self.dropout,
+            training=self.training,
         )

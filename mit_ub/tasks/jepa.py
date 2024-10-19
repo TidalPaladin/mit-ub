@@ -14,8 +14,9 @@ from torch.distributed import ReduceOp, all_reduce
 from torch.distributed import barrier as dist_barrier
 from torch.optim.optimizer import Optimizer
 
-from ..model import BACKBONES, AdaptiveViT, TransformerEncoderLayer, ViT, compile_is_disabled
+from ..model import BACKBONES, AdaptiveViT, ViT, compile_is_disabled
 from ..model.pos_enc import RelativeFactorizedPosition
+from ..model.transformer import TransformerDecoderLayer
 
 
 EPS: Final = 1e-8
@@ -38,32 +39,6 @@ def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: 
     y = x.mean(pairwise_dim, keepdim=True).norm(dim=embed_dim, keepdim=True).pow(2).squeeze(embed_dim, pairwise_dim)
     y.sub(1 / N).mul(N / (N - 1))
     return y
-
-
-@torch.compile(fullgraph=True, disable=compile_is_disabled())
-def cosine_similarity_loss(x: Tensor, y: Tensor, eps: float = EPS) -> Tensor:
-    y = 1 - F.cosine_similarity(x, y, dim=-1, eps=eps)
-    return y.mean()
-
-
-@torch.compile(fullgraph=True, disable=compile_is_disabled())
-def sample_tokens(x: Tensor, ratio: float) -> Tensor:
-    B, L_in, _ = x.shape
-    L_out = int(L_in * ratio)
-
-    # Create array of token indices
-    token_idx = torch.arange(L_in).unsqueeze_(0).expand(B, -1)
-
-    # Create a random sort order for each example
-    sort_order = torch.rand_like(token_idx, dtype=torch.float32)
-
-    # Sort each example's tokens by it's random sort order
-    indices = torch.argsort(sort_order, dim=-1)[..., :L_out]
-    token_idx = torch.gather(token_idx, dim=-1, index=indices)
-
-    # Build final result with
-    batch_idx = torch.arange(B).view(B, 1).expand(-1, L_out)
-    return x[batch_idx.flatten(), token_idx.flatten()].view(B, L_out, -1).contiguous()
 
 
 class JEPA(Task):
@@ -170,27 +145,15 @@ class JEPA(Task):
         )
 
         # Projections for the input context and output predictions
-        self.context_proj = nn.Linear(self.backbone.dim, self.backbone.dim)
-        self.out_proj = nn.Sequential(
-            nn.LayerNorm(self.backbone.dim),
-            nn.Linear(self.backbone.dim, self.backbone.dim),
-        )
-        nn.init.trunc_normal_(self.context_proj.weight, std=0.02)
-        nn.init.zeros_(self.context_proj.bias)
-        nn.init.trunc_normal_(self.out_proj[1].weight, std=0.02)
-        nn.init.zeros_(self.out_proj[1].bias)
+        self.jepa_norm = nn.LayerNorm(self.backbone.dim)
+        self.jepa_out_proj = nn.Linear(self.backbone.dim, self.backbone.dim)
+        nn.init.xavier_uniform_(self.jepa_out_proj.weight)
+        nn.init.zeros_(self.jepa_out_proj.bias)
 
         # JEPA predictor
-        encoder_proto = next(filter(lambda l: isinstance(l, TransformerEncoderLayer), self.backbone.modules()), None)
-        if encoder_proto is None:
-            raise ValueError(
-                "Could not find encoder prototype in backbone. "
-                "Ensure the backbone has a TransformerEncoderLayer module."
-            )
-        self.jepa_predictor = nn.ModuleList([deepcopy(encoder_proto) for _ in range(predictor_depth)])
-        for block in self.jepa_predictor:
-            block.reset_parameters()
-
+        self.jepa_predictor = nn.ModuleList(
+            [self.backbone.create_decoder_layer(i, stochastic_depth=0.0) for i in range(predictor_depth)]
+        )
         self.save_hyperparameters()
 
     def prepare_backbone(self, name: str) -> nn.Module:
@@ -215,7 +178,6 @@ class JEPA(Task):
             {
                 "example_sim": tm.MeanMetric(),
                 "token_sim": tm.MeanMetric(),
-                "normalized_jepa_loss": tm.MeanMetric(),
             }
         )
 
@@ -224,25 +186,23 @@ class JEPA(Task):
         context: Tensor = self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
 
         # Sample a subset of the context as input to the predictor and project
-        context = sample_tokens(context, self.context_subsample_ratio)
-        context = self.context_proj(context)
+        B, L, _ = context.shape
+        subsample_mask = create_mask((L,), mask_ratio=1 - self.context_subsample_ratio, batch_size=B)
+        context = apply_mask(subsample_mask, context, fill_value=None)
 
         # Prepare positional encoding for target queries
         B, _, _ = context.shape
         tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
         query = self.pos_enc(tokenized_size).expand(B, -1, -1)
         query = apply_mask(target_mask, query, fill_value=None)
-        L = query.shape[1]
 
         # Run query and context through predictor
-        query = torch.cat([query, context], dim=1)
         for block in self.jepa_predictor:
-            block = cast(TransformerEncoderLayer, block)
-            query = block(query)
+            block = cast(TransformerDecoderLayer, block)
+            query = block(query, context)
 
-        # Separate predictions from context
-        pred = self.out_proj(query[:, :L])
-
+        pred = self.jepa_norm(query)
+        pred = self.jepa_out_proj(pred)
         return {"jepa": pred, "jepa_context": context}
 
     @property
@@ -403,7 +363,7 @@ class JEPA(Task):
 
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
-        loss = cosine_similarity_loss(pred, target)
+        loss = F.smooth_l1_loss(pred, target)
 
         # Compute metrics
         if metrics is not None:
@@ -412,10 +372,6 @@ class JEPA(Task):
                 metrics["example_sim"].update(example_sim)
                 token_sim = average_pairwise_cosine_similarity(full_target, 1, 2)
                 metrics["token_sim"].update(token_sim)
-                # Normalize JEPA loss by target similarity
-                target_sim = average_pairwise_cosine_similarity(target.view(-1, target.shape[-1]), 0, 1)
-                normalized_jepa_loss = loss / (1 - target_sim.clip(min=0, max=1 - EPS))
-                metrics["normalized_jepa_loss"].update(normalized_jepa_loss)
 
         output = {
             "log": {

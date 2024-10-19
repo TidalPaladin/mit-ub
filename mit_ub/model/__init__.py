@@ -2,11 +2,13 @@ from typing import Final
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from registry import Registry
 
 from .backbone import AdaptiveViT, ViT
-from .compile import compile_is_disabled
 from .convnext import ConvNext
+from .helpers import compile_is_disabled
+from .mlp import identity
 from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
 
@@ -114,7 +116,12 @@ BACKBONES(
     depth=12,
     nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     num_kv_heads=CIFAR10_DIM // CIFAR10_HEAD_DIM,
+    dropout=0.1,
     stochastic_depth=0.1,
+    bias=False,
+    qk_norm=True,
+    activation=identity,
+    gate_activation=F.silu,
 )
 
 
@@ -128,11 +135,14 @@ BACKBONES(
     nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     num_kv_heads=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     dropout=0.1,
+    stochastic_depth=0.1,
+    bias=False,
+    qk_norm=True,
+    activation=identity,
+    gate_activation=F.silu,
     num_experts=8,
-    # 1 slot per token
     num_slots=32,
     moe_layers=[11],
-    stochastic_depth=0.1,
 )
 
 
@@ -199,4 +209,5 @@ __all__ = [
     "AdaptiveViT",
     "ConvNext",
     "compile_is_disabled",
+    "identity",
 ]

@@ -1,4 +1,4 @@
-from typing import Any, Callable, List, Optional, Tuple, Type, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import torch.nn as nn
 from deep_helpers.tokens import apply_mask
@@ -25,51 +25,39 @@ class ViT(nn.Module):
         dropout: float = 0.1,
         activation: Callable[[Tensor], Tensor] = relu2,
         gate_activation: Callable[[Tensor], Tensor] | None = None,
-        output_norm: bool = True,
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
         num_experts: int | None = None,
         num_slots: int | None = None,
         moe_layers: List[int] = [],
         layer_scale: float | None = None,
         stochastic_depth: float = 0.0,
+        bias: bool = False,
     ):
         super().__init__()
         self._dim = dim
         self._nhead = nhead if nhead is not None else self.dim // 32
         self._in_channels = in_channels
         self._dim_feedforward = dim_feedforward = dim_feedforward or 4 * dim
-        self._norm_layer = norm_layer
+        self._num_kv_heads = num_kv_heads
+        self._qk_norm = qk_norm
+        self._num_experts = num_experts
+        self._num_slots = num_slots
+        self._moe_layers = moe_layers
+        self._layer_scale = layer_scale
+        self._stochastic_depth = stochastic_depth
+        self._activation = activation
+        self._gate_activation = gate_activation
+        self._bias = bias
+        self._dropout = dropout
 
         # Stem tokenizer
         stem_type = PatchEmbed2d if isinstance(patch_size, int) or len(patch_size) == 2 else PatchEmbed3d
-        self.stem = stem_type(
-            in_channels, dim, cast(Any, patch_size), norm_layer, dropout=dropout, activation=activation
-        )
+        self.stem = stem_type(in_channels, dim, cast(Any, patch_size), dropout=dropout)
 
         # Transformer blocks
-        self.blocks = nn.ModuleList(
-            [
-                TransformerEncoderLayer(
-                    dim,
-                    nhead,
-                    dim_feedforward,
-                    dropout,
-                    activation,
-                    gate_activation,
-                    num_kv_heads=num_kv_heads,
-                    qk_norm=qk_norm,
-                    norm_layer=norm_layer,
-                    num_experts=num_experts if i in moe_layers else None,
-                    num_slots=num_slots if i in moe_layers else None,
-                    layer_scale=layer_scale,
-                    stochastic_depth=stochastic_depth,
-                )
-                for i in range(depth)
-            ]
-        )
-        self.norm = norm_layer(dim) if output_norm else nn.Identity()
+        self.blocks = nn.ModuleList([self.create_encoder_layer(i) for i in range(depth)])
+        self.embedding_norm = nn.LayerNorm(dim)
 
     @property
     def dim(self) -> int:
@@ -87,9 +75,74 @@ class ViT(nn.Module):
     def in_channels(self) -> int:
         return self._in_channels
 
-    @property
-    def norm_layer(self) -> Type[nn.Module]:
-        return self._norm_layer
+    def create_encoder_layer(self, i: int = 0, **kwargs) -> TransformerEncoderLayer:
+        """
+        Creates a Transformer encoder layer.
+
+        This method initializes a Transformer encoder layer with the specified
+        parameters. It supports various configurations such as the number of
+        attention heads, feedforward dimension, dropout rate, activation functions,
+        and more.
+
+        Args:
+            i: Index of the encoder layer. Default is 0.
+
+        Keyword Args:
+            Additional keyword arguments to override default layer parameters.
+        """
+        _kwargs: Dict[str, Any] = dict(
+            d_model=self._dim,
+            nhead=self._nhead,
+            dim_feedforward=self._dim_feedforward,
+            dropout=self._dropout,
+            activation=self._activation,
+            gate_activation=self._gate_activation,
+            num_kv_heads=self._num_kv_heads,
+            qk_norm=self._qk_norm,
+            num_experts=self._num_experts if i in self._moe_layers else None,
+            num_slots=self._num_slots if i in self._moe_layers else None,
+            layer_scale=self._layer_scale,
+            stochastic_depth=self._stochastic_depth,
+            bias=self._bias,
+        )
+        _kwargs.update(kwargs)
+        return TransformerEncoderLayer(**_kwargs)
+
+    def create_decoder_layer(self, i: int = 0, d_kv: int | None = None, **kwargs) -> TransformerDecoderLayer:
+        """
+        Creates a Transformer decoder layer.
+
+        This method initializes a Transformer decoder layer with the specified
+        parameters. It supports various configurations such as the number of
+        attention heads, feedforward dimension, dropout rate, activation functions,
+        and more.
+
+        Args:
+            i: Index of the encoder layer. Default is 0.
+            d_kv: Dimension of the key and value vectors. By default this will be the same as the model dimension.
+
+        Keyword Args:
+            Additional keyword arguments to override default layer parameters.
+        """
+        d_kv = d_kv or self._dim
+        _kwargs: Dict[str, Any] = dict(
+            d_model=self._dim,
+            nhead=self._nhead,
+            d_kv=d_kv,
+            dim_feedforward=self._dim_feedforward,
+            dropout=self._dropout,
+            activation=self._activation,
+            gate_activation=self._gate_activation,
+            num_kv_heads=self._num_kv_heads,
+            qk_norm=self._qk_norm,
+            num_experts=self._num_experts if i in self._moe_layers else None,
+            num_slots=self._num_slots if i in self._moe_layers else None,
+            layer_scale=self._layer_scale,
+            stochastic_depth=self._stochastic_depth,
+            bias=self._bias,
+        )
+        _kwargs.update(kwargs)
+        return TransformerDecoderLayer(**_kwargs)
 
     def forward(
         self,
@@ -109,7 +162,7 @@ class ViT(nn.Module):
         # Transformer blocks and output norm
         for block in self.blocks:
             x = block(x)
-        x = self.norm(x)
+        x = self.embedding_norm(x)
 
         # Reshape to original grid if requested
         if reshape and mask is not None and mask_fill_value is None:
@@ -134,7 +187,6 @@ class AdaptiveViT(ViT):
         self,
         in_channels: int,
         dim: int,
-        kv_dim: int,
         patch_size: int | Tuple[int, int] | Tuple[int, int, int],
         target_shape: Tuple[int, int] | Tuple[int, int, int],
         depth: int,
@@ -144,16 +196,14 @@ class AdaptiveViT(ViT):
         dropout: float = 0.1,
         activation: Callable[[Tensor], Tensor] = relu2,
         gate_activation: Callable[[Tensor], Tensor] | None = None,
-        output_norm: bool = True,
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
         stochastic_depth: float = 0.0,
+        bias: bool = False,
         high_res_layer_scale: float | None = 1e-5,
         num_experts: int | None = None,
         num_slots: int | None = None,
         moe_layers: List[int] = [],
-        high_res_moe_layers: List[int] = [],
         layer_scale: float | None = None,
     ):
         super().__init__(
@@ -166,15 +216,14 @@ class AdaptiveViT(ViT):
             dropout,
             activation,
             gate_activation,
-            output_norm,
             num_kv_heads,
             qk_norm,
-            norm_layer,
             num_experts,
             num_slots,
             moe_layers,
             layer_scale,
             stochastic_depth,
+            bias,
         )
 
         # Adaptive stem tokenizer
@@ -182,36 +231,15 @@ class AdaptiveViT(ViT):
         self.stem = stem_type(
             in_channels,
             dim,
-            kv_dim,
             cast(Any, patch_size),
             cast(Any, target_shape),
-            norm_layer,
             dropout=dropout,
-            activation=activation,
         )
 
         # Cross attention to high res tokens
         self.high_res_blocks = nn.ModuleList(
             [
-                TransformerDecoderLayer(
-                    dim,
-                    nhead,
-                    kv_dim,
-                    self.dim_feedforward,
-                    dropout,
-                    activation,
-                    gate_activation,
-                    num_kv_heads=num_kv_heads,
-                    qk_norm=qk_norm,
-                    norm_layer=norm_layer,
-                    # By default we use layer scale here to limit the high res pathway's contribution.
-                    # Since AdaptiveViT will likely be trained from a ViT checkpoint, this helps set the
-                    # intial condition of the model to the ViT checkpoint.
-                    layer_scale=high_res_layer_scale,
-                    num_experts=num_experts if i in high_res_moe_layers else None,
-                    num_slots=num_slots if i in high_res_moe_layers else None,
-                    stochastic_depth=stochastic_depth,
-                )
+                self.create_decoder_layer(i + len(self.blocks), layer_scale=high_res_layer_scale)
                 for i in range(high_res_depth)
             ]
         )
@@ -258,9 +286,7 @@ class AdaptiveViT(ViT):
         # Cross attention blocks between fixed backbone tokens and high res input tokens
         for block in self.high_res_blocks:
             q = block(q, kv)
-
-        # Output norm
-        x = self.norm(q)
+        x = self.embedding_norm(q)
 
         # Reshape to original grid if requested
         if reshape and mask is not None and mask_fill_value is None:

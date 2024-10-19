@@ -1,7 +1,12 @@
+import math
+
 import pytest
 import torch
+import torch.nn.functional as F
+from torch.testing import assert_close
 
-from mit_ub.model.pos_enc import RelativeFactorizedPosition, create_grid
+from mit_ub.model.mlp import mlp_forward
+from mit_ub.model.pos_enc import RelativeFactorizedPosition, create_grid, relative_factorized_position_forward
 
 
 @pytest.mark.parametrize("normalize", [True, False])
@@ -15,6 +20,31 @@ def test_create_grid(normalize):
     else:
         assert torch.all(grid[0, 0] == torch.tensor([0, 0]))
         assert torch.all(grid[0, -1] == torch.tensor([3, 3]))
+
+
+def test_relative_factorized_position_forward():
+    C, D = 2, 16
+    dims = (4, 4)
+    w_in = torch.randn(2 * D, C)
+    b_in = torch.randn(2 * D)
+    w_out = torch.randn(D, 2 * D)
+    b_out = torch.randn(D)
+    norm_w = torch.randn(D)
+    norm_b = torch.randn(D)
+
+    torch.random.manual_seed(0)
+    actual = relative_factorized_position_forward(
+        dims, w_in, b_in, w_out, b_out, norm_w, norm_b, F.relu, training=False
+    )
+
+    grid = create_grid(dims, normalize=True)
+    grid = grid * math.sqrt(3)
+    torch.random.manual_seed(0)
+    # MLP uses output dropout, position encoding does not. So we must set training=False.
+    expected = mlp_forward(grid, w_in, w_out, b_in, b_out, activation=F.relu, training=False)
+    expected = F.layer_norm(expected, (D,), weight=norm_w, bias=norm_b)
+
+    assert_close(actual, expected, atol=0.001, rtol=0)
 
 
 class TestRelativeFactorizedPosition:

@@ -126,6 +126,14 @@ class TestTransformerEncoderLayer:
             out2 = layer(x)
             assert_close(out1, out2)
 
+    @pytest.mark.parametrize("num_experts", [None, 2])
+    def test_norm(self, num_experts):
+        B, L, D = 1, 128, 128
+        nhead = D // 16
+        layer = TransformerEncoderLayer(D, nhead, D, num_experts=num_experts, num_slots=num_experts)
+        assert layer.mlp.norm
+        assert layer.self_attn.norm
+
 
 class TestTransformerDecoderLayer:
 
@@ -257,3 +265,12 @@ class TestTransformerDecoderLayer:
             out1 = layer(q, k)
             out2 = layer(q, k)
             assert_close(out1, out2)
+
+    @pytest.mark.parametrize("num_experts", [None, 2])
+    def test_norm(self, num_experts):
+        B, Lq, Dq = 1, 64, 128
+        B, Lk, Dk = 1, 128, 32
+        nhead = Dq // 16
+        layer = TransformerDecoderLayer(Dq, nhead, Dk, Dq, num_experts=num_experts, num_slots=num_experts)
+        assert layer.mlp.norm
+        assert layer.self_attn.norm

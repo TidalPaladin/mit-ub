@@ -3,7 +3,7 @@ fit:
   float32_matmul_precision: medium
   trainer:
     accelerator: gpu
-    devices: [1]
+    devices: [2]
     #strategy: "ddp_find_unused_parameters_true"
     precision: "bf16-mixed"
     max_steps: 50000
@@ -24,12 +24,12 @@ fit:
         init_args:
           log_momentum: true
 
-    logger:
+    logger: 
       class_path: pytorch_lightning.loggers.wandb.WandbLogger
       init_args:
         save_dir: /mnt/flash/mitub
         project: mit-ub
-        name: "cifar10-vit-rsqrt-cycle-noclip"
+        name: "cifar10-vit"
 
   model:
     class_path: mit_ub.tasks.JEPAWithClassification
@@ -52,7 +52,7 @@ fit:
         class_path: bitsandbytes.optim.AdamW8bit
         init_args:
           lr: 0.0005
-          weight_decay: 0.1
+          weight_decay: 0.05
           betas: [0.85, 0.999]
       lr_interval: "step"
       lr_scheduler_init:
@@ -66,10 +66,11 @@ fit:
           initial_momentum: 0.95
       parameter_groups:
         - params:
-            - "linear_probe"
             - "jepa_predictor"
-            - "context_proj"
-            - "out_proj"
+            - "jepa_out_proj"
+          weight_decay: 0.25
+        - params:
+            - "linear_probe"
           weight_decay: 1.0
 
   data:

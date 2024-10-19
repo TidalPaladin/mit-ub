@@ -34,6 +34,10 @@ readme = "README.md"
 license = {text = "Apache"}
 dynamic = ["version"]
 
+[project.optional-dependencies]
+docs = [
+    "manim>=0.18.1",
+]
 [tool.autoflake]
 remove-all-unused-imports = true
 remove-unused-variables = true

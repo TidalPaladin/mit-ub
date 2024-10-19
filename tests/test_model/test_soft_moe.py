@@ -22,9 +22,7 @@ class TestSoftMoE:
         x = torch.randn(B, S, D)
 
         torch.manual_seed(0)
-        out1 = forward_experts(
-            x, w_in, b_in, w_out, b_out, F.relu, dropout, w_gate, b_gate, F.relu, output_dropout=output_dropout
-        )
+        out1 = forward_experts(x, w_in, b_in, w_out, b_out, F.relu, dropout, w_gate, b_gate, F.relu, training=True)
         torch.manual_seed(0)
         out2 = mlp_forward(
             x,
@@ -37,7 +35,7 @@ class TestSoftMoE:
             dropout,
             F.relu,
             F.relu,
-            output_dropout=output_dropout,
+            training=True,
         )
         assert_close(out1, out2, atol=0.01, rtol=0)
 
@@ -60,6 +58,7 @@ class TestSoftMoE:
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(x)
         assert out.shape == x.shape
+        assert not out.isnan().any()
 
     @pytest.mark.parametrize(
         "device",
@@ -130,3 +129,19 @@ class TestSoftMoE:
             if (v == 0).all() or (v == 1).all():
                 continue
             assert not torch.allclose(v, weight_reset[k], equal_nan=True)
+
+    def test_fused_norm(self):
+        torch.random.manual_seed(0)
+        B, L, D = 1, 128, 128
+        nhead = D // 32
+        num_experts = 4
+        num_slots = 16
+
+        x = torch.randn(B, L, D)
+        layer = SoftMoE(D, D, num_experts, num_slots, nhead=nhead, norm=True)
+
+        y_norm = layer(x)
+        layer.w_pre_norm = None  # type: ignore
+        layer.b_pre_norm = None  # type: ignore
+        y_no_norm = layer(x)
+        assert not torch.allclose(y_norm, y_no_norm)

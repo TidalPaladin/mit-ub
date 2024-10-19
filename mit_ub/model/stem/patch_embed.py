@@ -1,6 +1,6 @@
 import math
 from abc import ABC, abstractmethod
-from typing import Callable, Generic, Sequence, Tuple, Type, TypeVar
+from typing import Callable, Generic, Sequence, Tuple, TypeVar
 
 import torch
 import torch.nn as nn
@@ -9,9 +9,8 @@ from deep_helpers.helpers import to_tuple
 from einops import rearrange
 from torch import Tensor
 
-from ..compile import compile_is_disabled
-from ..mlp import relu2
-from ..pos_enc import RelativeFactorizedPosition, relative_factorized_position_forward
+from ..helpers import compile_backend, compile_is_disabled
+from ..pos_enc import DEFAULT_POS_ENC_ACTIVATION, RelativeFactorizedPosition, relative_factorized_position_forward
 
 
 T = TypeVar("T", bound=Tuple[int, ...])
@@ -31,6 +30,7 @@ class PatchEmbed(ABC, Generic[T]):
 
 @torch.compile(
     fullgraph=True,
+    backend=compile_backend(),
     disable=compile_is_disabled(),
     options={
         "max_autotune": True,
@@ -51,7 +51,9 @@ def patch_embed_forward(
     w_pos_norm: Tensor | None,
     b_pos_norm: Tensor | None,
     dropout: float = 0.0,
-    activation: Callable[[Tensor], Tensor] = relu2,
+    activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
+    eps: float = 1e-5,
+    training: bool = False,
 ) -> Tensor:
     dims = tuple(dim_size // dim_stride for dim_size, dim_stride in zip(x.shape[2:], stride))
     if x.ndim == 4:
@@ -64,9 +66,9 @@ def patch_embed_forward(
         raise ValueError(f"Invalid input dimension: {x.ndim}")
 
     x = F.linear(x, w_patch, b_patch)
-    x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm)
+    x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
     pos = relative_factorized_position_forward(
-        dims, w1_pos, b1_pos, w2_pos, b2_pos, w_pos_norm, b_pos_norm, activation, dropout=dropout
+        dims, w1_pos, b1_pos, w2_pos, b2_pos, w_pos_norm, b_pos_norm, activation, dropout=dropout, training=training
     )
     x += pos
     return x
@@ -74,9 +76,10 @@ def patch_embed_forward(
 
 def _init_patch_embed(layer: nn.Module) -> None:
     layer.pos_enc.reset_parameters()
-    layer.norm.reset_parameters()
-    nn.init.trunc_normal_(layer.patch.weight, std=0.02)
-    nn.init.zeros_(layer.patch.bias)
+    nn.init.ones_(layer.w_norm)
+    nn.init.zeros_(layer.b_norm)
+    nn.init.xavier_uniform_(layer.w_in)
+    nn.init.zeros_(layer.b_in)
 
 
 class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
@@ -86,15 +89,16 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         in_channels: int,
         embed_dim: int,
         patch_size: int | Tuple[int, int],
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = relu2,
+        activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
     ):
         super().__init__()
         self._patch_size = to_tuple(patch_size, 2)
         d_in = math.prod(self.patch_size) * in_channels
-        self.patch = nn.Linear(d_in, embed_dim)
-        self.norm = norm_layer(embed_dim)
+        self.w_in = nn.Parameter(torch.empty(embed_dim, d_in))
+        self.b_in = nn.Parameter(torch.empty(embed_dim))
+        self.w_norm = nn.Parameter(torch.empty(embed_dim))
+        self.b_norm = nn.Parameter(torch.empty(embed_dim))
         self.pos_enc = RelativeFactorizedPosition(2, embed_dim, dropout=dropout, activation=activation)
         self.reset_parameters()
 
@@ -112,18 +116,20 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
     def forward(self, x: Tensor) -> Tensor:
         return patch_embed_forward(
             x,
-            self.patch.weight,
-            self.patch.bias,
+            self.w_in,
+            self.b_in,
             self.patch_size,
-            self.norm.weight,
-            self.norm.bias,
+            self.w_norm,
+            self.b_norm,
             self.pos_enc.w_in,
             self.pos_enc.b_in,
             self.pos_enc.w_out,
             self.pos_enc.b_out,
             self.pos_enc.w_norm,
             self.pos_enc.b_norm,
-            dropout=self.pos_enc.dropout if self.training else 0.0,
+            activation=self.pos_enc.activation,
+            dropout=self.pos_enc.dropout,
+            training=self.training,
         )
 
 
@@ -134,15 +140,16 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         in_channels: int,
         embed_dim: int,
         patch_size: Tuple[int, int, int],
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = relu2,
+        activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
     ):
         super().__init__()
         self._patch_size = to_tuple(patch_size, 3)
         d_in = math.prod(self.patch_size) * in_channels
-        self.patch = nn.Linear(d_in, embed_dim)
-        self.norm = norm_layer(embed_dim)
+        self.w_in = nn.Parameter(torch.empty(embed_dim, d_in))
+        self.b_in = nn.Parameter(torch.empty(embed_dim))
+        self.w_norm = nn.Parameter(torch.empty(embed_dim))
+        self.b_norm = nn.Parameter(torch.empty(embed_dim))
         self.pos_enc = RelativeFactorizedPosition(3, embed_dim, dropout=dropout, activation=activation)
         self.reset_parameters()
 
@@ -160,16 +167,18 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
     def forward(self, x: Tensor) -> Tensor:
         return patch_embed_forward(
             x,
-            self.patch.weight,
-            self.patch.bias,
+            self.w_in,
+            self.b_in,
             self.patch_size,
-            self.norm.weight,
-            self.norm.bias,
+            self.w_norm,
+            self.b_norm,
             self.pos_enc.w_in,
             self.pos_enc.b_in,
             self.pos_enc.w_out,
             self.pos_enc.b_out,
             self.pos_enc.w_norm,
             self.pos_enc.b_norm,
-            dropout=self.pos_enc.dropout if self.training else 0.0,
+            dropout=self.pos_enc.dropout,
+            activation=self.pos_enc.activation,
+            training=self.training,
         )

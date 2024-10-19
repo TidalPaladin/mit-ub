@@ -1,19 +1,91 @@
+import math
 from enum import StrEnum
-from typing import Callable, Tuple, Type, cast
+from typing import Callable, Sequence, Tuple, cast
 
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from deep_helpers.helpers import to_tuple
-from einops.layers.torch import Rearrange
+from einops import rearrange
 from torch import Tensor
 
-from ..mlp import relu2
-from ..pos_enc import RelativeFactorizedPosition
-from .patch_embed import PatchEmbed
+from ..helpers import compile_backend, compile_is_disabled
+from ..pos_enc import DEFAULT_POS_ENC_ACTIVATION, RelativeFactorizedPosition, relative_factorized_position_forward
+from .patch_embed import PatchEmbed, _init_patch_embed
 
 
 class PoolType(StrEnum):
     MAX = "max"
     AVG = "avg"
+
+
+@torch.compile(
+    fullgraph=True,
+    backend=compile_backend(),
+    disable=compile_is_disabled(),
+    options={
+        "max_autotune": True,
+        "shape_padding": True,
+    },
+)
+def adaptive_patch_embed_forward(
+    x: Tensor,
+    target_size: Sequence[int],
+    pool_type: PoolType,
+    w_patch: Tensor,
+    b_patch: Tensor | None,
+    stride: Sequence[int],
+    w_norm: Tensor | None,
+    b_norm: Tensor | None,
+    w1_pos: Tensor,
+    b1_pos: Tensor | None,
+    w2_pos: Tensor,
+    b2_pos: Tensor | None,
+    w_pos_norm: Tensor | None,
+    b_pos_norm: Tensor | None,
+    dropout: float = 0.0,
+    activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
+    eps: float = 1e-5,
+    training: bool = False,
+) -> Tuple[Tensor, Tensor]:
+    # Rearrange into patches
+    dims = tuple(dim_size // dim_stride for dim_size, dim_stride in zip(x.shape[2:], stride))
+    if x.ndim == 4:
+        x = rearrange(x, "b c (ht hp) (wt wp) -> b ht wt (hp wp c)", hp=stride[0], wp=stride[1])
+    elif x.ndim == 5:
+        x = rearrange(
+            x, "b c (dt dp) (ht hp) (wt wp) -> b dt ht wt (dp hp wp c)", dp=stride[0], hp=stride[1], wp=stride[2]
+        )
+    else:
+        raise ValueError(f"Invalid input dimension: {x.ndim}")
+
+    # Project and patch
+    x = F.linear(x, w_patch, b_patch)
+    x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
+
+    # Add position encoding
+    pos = relative_factorized_position_forward(
+        dims, w1_pos, b1_pos, w2_pos, b2_pos, w_pos_norm, b_pos_norm, activation, dropout=dropout, training=training
+    )
+    x = x + pos.expand(x.shape[0], -1, -1).view_as(x)
+
+    # Pool to fixed size
+    pooled = rearrange(x, "b ... d -> b d ...")
+    match (x.ndim, pool_type):
+        case (4, PoolType.MAX):
+            pooled = F.adaptive_max_pool2d(pooled, cast(Tuple[int, int], target_size))
+        case (4, PoolType.AVG):
+            pooled = F.adaptive_avg_pool2d(pooled, cast(Tuple[int, int], target_size))
+        case (5, PoolType.MAX):
+            pooled = F.adaptive_max_pool3d(pooled, cast(Tuple[int, int, int], target_size))
+        case (5, PoolType.AVG):
+            pooled = F.adaptive_avg_pool3d(pooled, cast(Tuple[int, int, int], target_size))
+        case _:
+            raise ValueError(f"Invalid input dimension / pool type: {x.ndim} / {pool_type}")
+
+    x = rearrange(x, "b ... d -> b (...) d")
+    pooled = rearrange(pooled, "b d ... -> b (...) d")
+    return pooled, x
 
 
 class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
@@ -22,39 +94,27 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         self,
         in_channels: int,
         embed_dim: int,
-        kv_dim: int,
         patch_size: int | Tuple[int, int],
         target_shape: Tuple[int, int],
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
-        position_noise: bool = False,
-        autocast: bool = False,
-        pool_type: PoolType = PoolType.MAX,
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = relu2,
+        activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
+        pool_type: PoolType = PoolType.MAX,
     ):
         super().__init__()
         self._target_shape = to_tuple(target_shape, 2)
         self._patch_size = to_tuple(patch_size, 2)
-        self._kv_dim = kv_dim
-        self.position_noise = position_noise
-        self.autocast = autocast
+        self._pool_type = pool_type
 
-        # NOTE: We intentionally choose names and structure of parameters to facilitate easy loading
-        # of weights from a PatchEmbed module.
-        pool_cls = nn.AdaptiveMaxPool2d if pool_type == PoolType.MAX else nn.AdaptiveAvgPool2d
-        self.patch = nn.Sequential(
-            nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size, bias=True),
-            pool_cls(target_shape),
-            Rearrange("b c h w -> b (h w) c"),
-        )
-        self.kv = nn.Sequential(
-            nn.Conv2d(in_channels, kv_dim, kernel_size=patch_size, stride=patch_size, bias=True),
-            Rearrange("b c h w -> b (h w) c"),
-        )
-        self.norm = norm_layer(embed_dim)
-        self.norm_kv = norm_layer(kv_dim)
+        d_in = math.prod(self.patch_size) * in_channels
+        self.w_in = nn.Parameter(torch.empty(embed_dim, d_in))
+        self.b_in = nn.Parameter(torch.empty(embed_dim))
+        self.w_norm = nn.Parameter(torch.empty(embed_dim))
+        self.b_norm = nn.Parameter(torch.empty(embed_dim))
         self.pos_enc = RelativeFactorizedPosition(2, embed_dim, dropout=dropout, activation=activation)
-        self.pos_enc_kv = RelativeFactorizedPosition(2, kv_dim, dropout=dropout, activation=activation)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        _init_patch_embed(self)
 
     @property
     def patch_size(self) -> Tuple[int, int]:
@@ -76,17 +136,25 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         return h, w
 
     def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
-        B, _, H, W = x.shape
-
-        q = self.patch(x)
-        q = self.norm(q)
-        q = q + self.pos_enc(self.tokenized_size((H, W)))
-
-        kv = self.kv(x)
-        kv = self.norm_kv(kv)
-        kv = kv + self.pos_enc_kv(self.kv_size((H, W)))
-
-        return q, kv
+        return adaptive_patch_embed_forward(
+            x,
+            self._target_shape,
+            self._pool_type,
+            self.w_in,
+            self.b_in,
+            self.patch_size,
+            self.w_norm,
+            self.b_norm,
+            self.pos_enc.w_in,
+            self.pos_enc.b_in,
+            self.pos_enc.w_out,
+            self.pos_enc.b_out,
+            self.pos_enc.w_norm,
+            self.pos_enc.b_norm,
+            dropout=self.pos_enc.dropout,
+            activation=self.pos_enc.activation,
+            training=self.training,
+        )
 
 
 class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
@@ -95,37 +163,26 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         self,
         in_channels: int,
         embed_dim: int,
-        kv_dim: int,
         patch_size: int | Tuple[int, int, int],
         target_shape: Tuple[int, int, int],
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
-        position_noise: bool = False,
-        autocast: bool = False,
-        pool_type: PoolType = PoolType.MAX,
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = relu2,
+        activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
+        pool_type: PoolType = PoolType.MAX,
     ):
         super().__init__()
         self._target_shape = to_tuple(target_shape, 3)
         self._patch_size = to_tuple(patch_size, 3)
-        self._kv_dim = kv_dim
-        self.position_noise = position_noise
-        self.autocast = autocast
-
-        pool_cls = nn.AdaptiveMaxPool3d if pool_type == PoolType.MAX else nn.AdaptiveAvgPool3d
-        self.patch = nn.Sequential(
-            nn.Conv3d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size, bias=False),
-            pool_cls(target_shape),
-            Rearrange("b c d h w -> b (h w d) c"),
-        )
-        self.kv = nn.Sequential(
-            nn.Conv3d(in_channels, kv_dim, kernel_size=patch_size, stride=patch_size, bias=False),
-            Rearrange("b c d h w -> b (h w d) c"),
-        )
-        self.norm = norm_layer(embed_dim)
-        self.norm_kv = norm_layer(kv_dim)
+        self._pool_type = pool_type
+        d_in = math.prod(self.patch_size) * in_channels
+        self.w_in = nn.Parameter(torch.empty(embed_dim, d_in))
+        self.b_in = nn.Parameter(torch.empty(embed_dim))
+        self.w_norm = nn.Parameter(torch.empty(embed_dim))
+        self.b_norm = nn.Parameter(torch.empty(embed_dim))
         self.pos_enc = RelativeFactorizedPosition(3, embed_dim, dropout=dropout, activation=activation)
-        self.pos_enc_kv = RelativeFactorizedPosition(3, kv_dim, dropout=dropout, activation=activation)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        _init_patch_embed(self)
 
     @property
     def patch_size(self) -> Tuple[int, int, int]:
@@ -143,14 +200,22 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         return d, h, w
 
     def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
-        B, _, D, H, W = x.shape
-
-        q = self.patch(x)
-        q = self.norm(q)
-        q = q + self.pos_enc(self.tokenized_size((D, H, W)))
-
-        kv = self.kv(x)
-        kv = self.norm_kv(kv)
-        kv = kv + self.pos_enc_kv(self.kv_size((D, H, W)))
-
-        return q, kv
+        return adaptive_patch_embed_forward(
+            x,
+            self._target_shape,
+            self._pool_type,
+            self.w_in,
+            self.b_in,
+            self.patch_size,
+            self.w_norm,
+            self.b_norm,
+            self.pos_enc.w_in,
+            self.pos_enc.b_in,
+            self.pos_enc.w_out,
+            self.pos_enc.b_out,
+            self.pos_enc.w_norm,
+            self.pos_enc.b_norm,
+            dropout=self.pos_enc.dropout,
+            activation=self.pos_enc.activation,
+            training=self.training,
+        )

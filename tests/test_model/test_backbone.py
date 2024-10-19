@@ -95,7 +95,7 @@ class TestAdaptiveViT:
     def test_forward(self, device):
         x = torch.randn(1, 3, 224, 224, device=device)
         nhead = 128 // 16
-        model = AdaptiveViT(3, 128, 32, (16, 16), (4, 4), 3, 3, nhead).to(device)
+        model = AdaptiveViT(3, 128, (16, 16), (4, 4), 3, 3, nhead).to(device)
         with torch.autocast(device_type=device, dtype=torch.float16, enabled=True):
             out = model(x)
         assert out.shape[:2] == (1, 128)
@@ -110,7 +110,7 @@ class TestAdaptiveViT:
     def test_backward(self, device):
         x = torch.randn(1, 3, 224, 224, device=device, requires_grad=True)
         nhead = 128 // 16
-        model = AdaptiveViT(3, 128, 32, (16, 16), (4, 4), 3, 3, nhead).to(device)
+        model = AdaptiveViT(3, 128, (16, 16), (4, 4), 3, 3, nhead).to(device)
 
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = model(x)
@@ -127,9 +127,9 @@ class TestAdaptiveViT:
     def test_token_mask(self, device):
         torch.random.manual_seed(0)
         B, C, H, W = 1, 3, 256, 256
-        D, D_kv, patch_size, target_size, depth = 128, 32, (16, 16), (4, 4), 3
+        D, patch_size, target_size, depth = 128, (16, 16), (4, 4), 3
         nhead = 128 // 16
-        model = AdaptiveViT(C, D, D_kv, patch_size, target_size, depth, depth, nhead).to(device)
+        model = AdaptiveViT(C, D, patch_size, target_size, depth, depth, nhead).to(device)
 
         mask_size = model.stem.tokenized_size(cast(Any, (H, W)))
         mask = create_mask(mask_size, batch_size=B, mask_ratio=0.25, scale=1)
@@ -143,7 +143,7 @@ class TestAdaptiveViT:
     def test_forward_deterministic(self):
         x = torch.randn(1, 3, 224, 224)
         nhead = 128 // 16
-        model = AdaptiveViT(3, 128, 32, (16, 16), (4, 4), 3, 3, nhead)
+        model = AdaptiveViT(3, 128, (16, 16), (4, 4), 3, 3, nhead)
 
         model.train()
         with torch.autocast(device_type="cpu", dtype=torch.float16):
@@ -162,7 +162,7 @@ class TestAdaptiveViT:
         depth = 3
         depth_adaptive = 2
         nhead = 128 // 16
-        model = AdaptiveViT(C, D, D_kv, (16, 16), (4, 4), depth, depth_adaptive, nhead)
+        model = AdaptiveViT(C, D, (16, 16), (4, 4), depth, depth_adaptive, nhead)
         model2 = ViT(C, D, (16, 16), depth, nhead)
         for p1, p2 in zip(model.blocks.parameters(), model2.blocks.parameters()):
             assert p1.shape == p2.shape
