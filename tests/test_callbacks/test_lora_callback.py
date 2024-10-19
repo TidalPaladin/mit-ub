@@ -35,7 +35,6 @@ class TestLoRACallback:
             backbone = AdaptiveViT(
                 in_channels=3,
                 dim=32,
-                kv_dim=32,
                 patch_size=4,
                 target_shape=(8, 8),
                 depth=2,

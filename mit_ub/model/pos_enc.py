@@ -6,14 +6,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from .mlp import relu2
-from .compile import compile_is_disabled
+from .helpers import compile_backend, compile_is_disabled
 
 
-DEFAULT_POS_ENC_ACTIVATION: Final[Callable[[Tensor], Tensor]] = relu2
+DEFAULT_POS_ENC_ACTIVATION: Final[Callable[[Tensor], Tensor]] = F.silu
 
 
-@torch.compile(fullgraph=True, disable=compile_is_disabled())
+@torch.compile(fullgraph=True, backend=compile_backend(), disable=compile_is_disabled())
 def create_grid(
     dims: Sequence[int],
     dtype: torch.dtype = torch.float32,
@@ -43,6 +42,7 @@ def create_grid(
 
 @torch.compile(
     fullgraph=True,
+    backend=compile_backend(),
     disable=compile_is_disabled(),
     options={
         "max_autotune": True,
@@ -104,7 +104,7 @@ def relative_factorized_position_forward(
 
     y = F.linear(grid, w1, b1)
     y = activation(y)
-    y = F.dropout(y, p=dropout, training=training)
+    y = F.dropout(y, p=dropout, training=training, inplace=True)
     y = F.linear(y, w2, b2)
     y = F.layer_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm, bias=b_norm)
     return y
@@ -152,7 +152,8 @@ class RelativeFactorizedPosition(nn.Module):
 
     def reset_parameters(self) -> None:
         for weight in (self.w_in, self.w_out):
-            nn.init.xavier_uniform_(weight)
+            # nn.init.xavier_uniform_(weight)
+            nn.init.trunc_normal_(weight, std=0.02)
 
         for bias in (self.b_in, self.b_out, self.b_norm):
             if bias is not None:

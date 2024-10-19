@@ -6,8 +6,8 @@ import torch.nn.functional as F
 from registry import Registry
 
 from .backbone import AdaptiveViT, ViT
-from .compile import compile_is_disabled
 from .convnext import ConvNext
+from .helpers import compile_is_disabled
 from .mlp import identity
 from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
@@ -119,7 +119,7 @@ BACKBONES(
     dropout=0.1,
     stochastic_depth=0.1,
     bias=False,
-    qk_norm=False,
+    qk_norm=True,
     activation=identity,
     gate_activation=F.silu,
 )

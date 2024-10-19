@@ -1,16 +1,16 @@
 from typing import cast
 
 import torch
-import math
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor, nn
 
-from .compile import compile_is_disabled
+from .helpers import compile_backend, compile_is_disabled
 
 
 @torch.compile(
     fullgraph=True,
+    backend=compile_backend(),
     options={
         "max_autotune": True,
         "triton.cudagraph_trees": True,
@@ -29,7 +29,6 @@ def attention_forward(
     norm_w: Tensor | None = None, norm_b: Tensor | None = None,
     dropout: float = 0.0,
     eps: float = 1e-5,
-    norm: bool = False,
     pre_norm_w: Tensor | None = None,
     pre_norm_b: Tensor | None = None,
     training: bool = False,
@@ -55,7 +54,9 @@ def attention_forward(
         norm_w: Normalization weight of shape :math:`(head_dim,)` or None
         norm_b: Normalization bias of shape :math:`(head_dim,)` or None
         dropout: Dropout probability
-        eps: Epsilon value for layer normalization
+        eps: Epsilon value for normalization
+        pre_norm_w: Weight for pre-normalization, or ``None`` for no pre-normalization
+        pre_norm_b: Bias for pre-normalization
         training: Training or inference mode
 
     Shapes:
@@ -68,7 +69,7 @@ def attention_forward(
         Output tensor of shape :math:`(B, L, D)`
     """
     head_dim = q.shape[-1] // num_heads
-    if norm:
+    if pre_norm_w is not None:
         q = F.layer_norm(q, q.shape[-1:], weight=pre_norm_w, bias=pre_norm_b, eps=eps)
 
     # Packed QKV projection
@@ -109,6 +110,7 @@ def attention_forward(
     # output projection
     o = rearrange(o, "b h l d -> b l (h d)")
     o = F.linear(o, w_out, b_out)
+    o = F.dropout(o, p=dropout, training=training, inplace=True)
 
     return o
 
@@ -175,12 +177,7 @@ class MultiHeadAttention(nn.Module):
             elif "norm" in name:
                 nn.init.ones_(param)
             elif name.startswith("w_"):
-                # When using QK normalization we should be safe to have more weight variance
-                if self.qk_norm:
-                    nn.init.trunc_normal_(param, std=0.02)
-                # Otherwise xavier uniform is a safe bet for stability
-                else:
-                    nn.init.xavier_uniform_(param)
+                nn.init.xavier_uniform_(param)
             else:
                 raise ValueError(f"Unsure how to initialize {name}")
 
@@ -243,7 +240,6 @@ class MultiHeadAttention(nn.Module):
             self.num_heads, self.num_kv_heads,
             self.w_norm, self.b_norm,
             dropout=self.dropout,
-            norm=self.norm,
             pre_norm_w=self.w_pre_norm,
             pre_norm_b=self.b_pre_norm,
             training=self.training,

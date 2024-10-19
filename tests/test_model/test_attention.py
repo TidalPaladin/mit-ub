@@ -1,13 +1,10 @@
 import pytest
-from sklearn import base
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.testing import assert_close
 
-from mit_ub.model.attention import MultiHeadAttention, attention_forward
-
-
+from mit_ub.model.attention import MultiHeadAttention
 
 
 class TestMultiHeadAttention:
@@ -81,6 +78,7 @@ class TestMultiHeadAttention:
             qk_norm=norm,
             kdim=Dk if Dk != Dq or Lk != Lq else None,
             vdim=Dk if Dk != Dq or Lk != Lq else None,
+            dropout=0.1,
         ).to(device)
 
         B = 2
@@ -120,7 +118,9 @@ class TestMultiHeadAttention:
             qk_norm=norm,
             kdim=Dk if Dk != Dq or Lk != Lq else None,
             vdim=Dk if Dk != Dq or Lk != Lq else None,
+            dropout=0.1,
         ).to(device)
+        model.train()
 
         B = 2
         q = torch.randn(B, Lq, Dq, device=device, requires_grad=True)

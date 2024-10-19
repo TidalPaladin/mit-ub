@@ -1,8 +1,9 @@
-import torch
 import pytest
+import torch
+from torch.testing import assert_close
 
 from mit_ub.model.pool import MultiHeadAttentionPool
-from torch.testing import assert_close
+
 
 class TestMultiHeadAttentionPool:
 

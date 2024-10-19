@@ -4,9 +4,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
-
-from .attention import attention_forward
-from .compile import compile_is_disabled
+from .helpers import compile_is_disabled
 
 
 @torch.compile(
@@ -56,7 +54,7 @@ class MultiHeadAttentionPool(nn.Module):
     def reset_parameters(self):
         for name, param in self.named_parameters():
             if name == "query":
-                nn.init.trunc_normal_(param, std=0.2)
+                nn.init.trunc_normal_(param, std=0.02)
             elif name.startswith("w_"):
                 nn.init.xavier_uniform_(param)
             elif name.startswith("b_"):
@@ -76,4 +74,3 @@ class MultiHeadAttentionPool(nn.Module):
             training=self.training,
             # fmt: on
         )
-

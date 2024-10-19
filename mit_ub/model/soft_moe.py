@@ -6,8 +6,8 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
-from .compile import compile_is_disabled
-from .mlp import mlp_forward, relu2
+from .helpers import compile_backend
+from .mlp import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, mlp_forward
 
 
 @torch.compile(
@@ -16,7 +16,9 @@ from .mlp import mlp_forward, relu2
         "shape_padding": True,
         "triton.cudagraph_trees": True,
     },
-    disable=compile_is_disabled(),
+    # This seems to be bugged when compiled, gives nan loss
+    disable=True,
+    backend=compile_backend(),
 )
 def dispatch(
     tokens: Tensor,
@@ -54,8 +56,8 @@ def dispatch(
     k = rearrange(F.linear(tokens, w_k), "b l (h d) -> b h l d", h=nhead)
     v = rearrange(F.linear(tokens, w_v), "b l (h d) -> b h l d", h=nhead)
     if norm_w is not None:
-        q = F.layer_norm(q, (q.shape[-1],), norm_w, norm_b, eps)
-        k = F.layer_norm(k, (k.shape[-1],), norm_w, norm_b, eps)
+        q = F.layer_norm(q, q.shape[-1:], norm_w, norm_b, eps)
+        k = F.layer_norm(k, k.shape[-1:], norm_w, norm_b, eps)
     o = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout if training else 0.0)
     return rearrange(o, "b h l d -> b l (h d)")
 
@@ -66,7 +68,8 @@ def dispatch(
         "shape_padding": True,
         "triton.cudagraph_trees": True,
     },
-    disable=compile_is_disabled(),
+    disable=True,
+    backend=compile_backend(),
 )
 def combine(
     tokens: Tensor,
@@ -105,8 +108,8 @@ def combine(
     k = slot_key
     v = rearrange(expert_out, "b l (h d) -> b h l d", h=nhead)
     if norm_w is not None:
-        q = F.layer_norm(q, (q.shape[-1],), norm_w, norm_b, eps)
-        k = F.layer_norm(k, (k.shape[-1],), norm_w, norm_b, eps)
+        q = F.layer_norm(q, q.shape[-1:], norm_w, norm_b, eps)
+        k = F.layer_norm(k, k.shape[-1:], norm_w, norm_b, eps)
     o = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout if training else 0.0)
     return rearrange(o, "b h l d -> b l (h d)")
 
@@ -117,11 +120,11 @@ def forward_experts(
     b_in: Tensor | None,
     w_out: Tensor,
     b_out: Tensor | None,
-    activation: Callable[[Tensor], Tensor],
+    activation: Callable[[Tensor], Tensor] = DEFAULT_MLP_ACTIVATION,
     dropout: float = 0.0,
     w_gate: Tensor | None = None,
     b_gate: Tensor | None = None,
-    gate_activation: Callable[[Tensor], Tensor] | None = None,
+    gate_activation: Callable[[Tensor], Tensor] | None = DEFAULT_MLP_GATE_ACTIVATION,
     training: bool = False,
 ) -> Tensor:
     """Perform forward pass through experts.
@@ -193,26 +196,25 @@ def soft_moe_forward(
     b_in: Tensor | None,
     w_out: Tensor,
     b_out: Tensor | None,
-    activation: Callable[[Tensor], Tensor],
+    activation: Callable[[Tensor], Tensor] = DEFAULT_MLP_ACTIVATION,
     dropout: float = 0.0,
     w_gate: Tensor | None = None,
     b_gate: Tensor | None = None,
-    gate_activation: Callable[[Tensor], Tensor] | None = None,
+    gate_activation: Callable[[Tensor], Tensor] | None = DEFAULT_MLP_GATE_ACTIVATION,
     norm_w: Tensor | None = None,
     norm_b: Tensor | None = None,
-    norm: bool = True,
     pre_norm_w: Tensor | None = None,
     pre_norm_b: Tensor | None = None,
     eps: float = 1e-5,
     training: bool = False,
 ) -> Tensor:
-    if norm:
+    if pre_norm_w is not None:
         x = F.layer_norm(x, x.shape[-1:], pre_norm_w, pre_norm_b, eps)
 
     nhead = slot_query.shape[0]
-    y = dispatch(x, slot_query, w_dispatch_k, w_dispatch_v, nhead, dropout, norm_w, norm_b, eps)
+    y = dispatch(x, slot_query, w_dispatch_k, w_dispatch_v, nhead, dropout, norm_w, norm_b, eps, training)
     y = forward_experts(y, w_in, b_in, w_out, b_out, activation, dropout, w_gate, b_gate, gate_activation, training)
-    y = combine(x, slot_key, y, w_combine_q, nhead, dropout, norm_w, norm_b, eps)
+    y = combine(x, slot_key, y, w_combine_q, nhead, dropout, norm_w, norm_b, eps, training)
     return y
 
 
@@ -258,8 +260,8 @@ class SoftMoE(nn.Module):
         num_slots: int,
         nhead: int,
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = relu2,
-        gate_activation: Callable[[Tensor], Tensor] | None = None,
+        activation: Callable[[Tensor], Tensor] = DEFAULT_MLP_ACTIVATION,
+        gate_activation: Callable[[Tensor], Tensor] | None = DEFAULT_MLP_GATE_ACTIVATION,
         bias: bool = True,
         qk_norm: bool = False,
         norm: bool = False,
@@ -318,14 +320,7 @@ class SoftMoE(nn.Module):
             elif "norm" in name:
                 nn.init.ones_(param)
             elif "slot" in name:
-                nn.init.trunc_normal_(param, std=0.2)
-            elif "dispatch" in name or "combine" in name:
-                if self.qk_norm:
-                    # When using QK normalization we should be safe to have more weight variance
-                    nn.init.trunc_normal_(param, std=0.02)
-                else:
-                    # Otherwise xavier uniform is a safe bet for stability
-                    nn.init.xavier_uniform_(param)
+                nn.init.trunc_normal_(param, std=0.02)
             elif name.startswith("w_"):
                 nn.init.xavier_uniform_(param)
             else:
@@ -370,7 +365,6 @@ class SoftMoE(nn.Module):
             self.gate_activation,
             self.w_norm,
             self.b_norm,
-            self.norm,
             self.w_pre_norm,
             self.b_pre_norm,
             training=self.training,

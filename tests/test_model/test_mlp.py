@@ -19,6 +19,7 @@ def test_mlp_forward(dropout, training):
         nn.ReLU(),
         nn.Dropout(dropout),
         nn.Linear(2 * D, D),
+        nn.Dropout(dropout),
     )
     layer.train(training)
 
@@ -88,7 +89,8 @@ class TestMLP:
         torch.random.manual_seed(0)
         B, L, D = 2, 8, 32
         x = torch.randn(B, L, D, requires_grad=True).to(device)
-        layer = MLP(D, D, D).to(device)
+        layer = MLP(D, D, D, dropout=0.1).to(device)
+        layer.train()
         y = layer(x)
         y.sum().backward()
 

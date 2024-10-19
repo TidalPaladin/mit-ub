@@ -1,14 +1,14 @@
-from typing import Callable
+from typing import Callable, Final
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from .compile import compile_is_disabled
+from .helpers import compile_backend, compile_is_disabled
 
 
-@torch.compile(fullgraph=True, disable=compile_is_disabled())
+@torch.compile(fullgraph=True, backend=compile_backend(), disable=compile_is_disabled())
 def relu2(x: Tensor) -> Tensor:
     r"""Computes squared ReLU of an input."""
     # NOTE: This is roughly as fast as the custom triton kernel
@@ -20,8 +20,13 @@ def identity(x: Tensor) -> Tensor:
     return x
 
 
+DEFAULT_MLP_ACTIVATION: Final = relu2
+DEFAULT_MLP_GATE_ACTIVATION: Final = None
+
+
 @torch.compile(
     fullgraph=True,
+    backend=compile_backend(),
     options={
         "max_autotune": True,
         "epilogue_fusion": True,
@@ -39,8 +44,8 @@ def mlp_forward(
     w_gate: Tensor | None = None,
     b_gate: Tensor | None = None,
     dropout: float = 0.0,
-    activation: Callable[[Tensor], Tensor] = relu2,
-    gate_activation: Callable[[Tensor], Tensor] | None = None,
+    activation: Callable[[Tensor], Tensor] = DEFAULT_MLP_ACTIVATION,
+    gate_activation: Callable[[Tensor], Tensor] | None = DEFAULT_MLP_GATE_ACTIVATION,
     w_norm: Tensor | None = None,
     b_norm: Tensor | None = None,
     eps: float = 1e-5,
@@ -58,8 +63,9 @@ def mlp_forward(
             gate = gate_activation(gate)
         y = y * gate
 
-    y = F.dropout(y, p=dropout, training=training)
+    y = F.dropout(y, p=dropout, training=training, inplace=True)
     y = F.linear(y, w2, b2)
+    y = F.dropout(y, p=dropout, training=training, inplace=True)
     return y
 
 
@@ -90,8 +96,8 @@ class MLP(nn.Module):
         hidden_features: int,
         out_features: int,
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = relu2,
-        gate_activation: Callable[[Tensor], Tensor] | None = None,
+        activation: Callable[[Tensor], Tensor] = DEFAULT_MLP_ACTIVATION,
+        gate_activation: Callable[[Tensor], Tensor] | None = DEFAULT_MLP_GATE_ACTIVATION,
         bias: bool = True,
         norm: bool = False,
     ):

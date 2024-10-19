@@ -3,7 +3,7 @@ fit:
   float32_matmul_precision: medium
   trainer:
     accelerator: gpu
-    devices: [0]
+    devices: [2]
     #strategy: "ddp_find_unused_parameters_true"
     precision: "bf16-mixed"
     max_steps: 50000
@@ -29,7 +29,7 @@ fit:
       init_args:
         save_dir: /mnt/flash/mitub
         project: mit-ub
-        name: "cifar10-vit-swiglu-nocompile"
+        name: "cifar10-vit"
 
   model:
     class_path: mit_ub.tasks.JEPAWithClassification
@@ -66,8 +66,11 @@ fit:
           initial_momentum: 0.95
       parameter_groups:
         - params:
+            - "jepa_predictor"
+            - "jepa_out_proj"
+          weight_decay: 0.25
+        - params:
             - "linear_probe"
-            #- "embedding_norm"
           weight_decay: 1.0
 
   data:

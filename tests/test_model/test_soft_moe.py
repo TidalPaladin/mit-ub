@@ -58,6 +58,7 @@ class TestSoftMoE:
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(x)
         assert out.shape == x.shape
+        assert not out.isnan().any()
 
     @pytest.mark.parametrize(
         "device",

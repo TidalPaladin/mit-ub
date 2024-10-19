@@ -5,8 +5,8 @@ import torch
 import torch.nn.functional as F
 from torch.testing import assert_close
 
-from mit_ub.model.stem import PatchEmbed2d, PatchEmbed3d
 from mit_ub.model.pos_enc import relative_factorized_position_forward
+from mit_ub.model.stem import PatchEmbed2d, PatchEmbed3d
 
 
 class TestPatchEmbed2d:
@@ -37,7 +37,6 @@ class TestPatchEmbed2d:
         )
         expected += pos
         assert_close(actual, expected)
-
 
     @pytest.mark.parametrize(
         "device",

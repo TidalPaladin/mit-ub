@@ -9,7 +9,7 @@ from deep_helpers.helpers import to_tuple
 from einops import rearrange
 from torch import Tensor
 
-from ..compile import compile_is_disabled
+from ..helpers import compile_backend, compile_is_disabled
 from ..pos_enc import DEFAULT_POS_ENC_ACTIVATION, RelativeFactorizedPosition, relative_factorized_position_forward
 
 
@@ -30,6 +30,7 @@ class PatchEmbed(ABC, Generic[T]):
 
 @torch.compile(
     fullgraph=True,
+    backend=compile_backend(),
     disable=compile_is_disabled(),
     options={
         "max_autotune": True,

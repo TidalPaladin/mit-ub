@@ -187,7 +187,6 @@ class AdaptiveViT(ViT):
         self,
         in_channels: int,
         dim: int,
-        kv_dim: int,
         patch_size: int | Tuple[int, int] | Tuple[int, int, int],
         target_shape: Tuple[int, int] | Tuple[int, int, int],
         depth: int,
@@ -232,7 +231,6 @@ class AdaptiveViT(ViT):
         self.stem = stem_type(
             in_channels,
             dim,
-            kv_dim,
             cast(Any, patch_size),
             cast(Any, target_shape),
             dropout=dropout,
@@ -241,7 +239,7 @@ class AdaptiveViT(ViT):
         # Cross attention to high res tokens
         self.high_res_blocks = nn.ModuleList(
             [
-                self.create_decoder_layer(i + len(self.blocks), kv_dim, layer_scale=high_res_layer_scale)
+                self.create_decoder_layer(i + len(self.blocks), layer_scale=high_res_layer_scale)
                 for i in range(high_res_depth)
             ]
         )
