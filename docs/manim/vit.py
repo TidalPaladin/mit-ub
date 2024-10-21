@@ -1,5 +1,7 @@
 from manim import *
 
+logger.setLevel("DEBUG")
+
 def create_neural_network(scale=1.0):
     radius = 0.1 * scale
 
@@ -58,6 +60,186 @@ def draw_rcc(size=3):
 
     # Group the shapes together
     return VGroup(rectangle, hemisphere, text)
+
+
+class SliceInterpolation(Scene):
+    def construct(self):
+        text = Text("Interpolation of Tomographic Projections")
+        self.play(Write(text))
+        self.wait(2)
+        self.play(FadeOut(text))
+        self.wait(0.5)
+
+
+class Hemisphere3D(ThreeDScene):
+    def construct(self):
+        fast = False
+
+        # Create the raw breast
+        raw_breast = Surface(
+            lambda u, v: np.array([
+                np.cos(u) * np.sin(v),
+                np.cos(v),
+                np.sin(u) * np.sin(v),
+            ]),
+            u_range=[0, TAU],
+            v_range=[0, PI/2],
+            fill_color=DARK_GRAY,
+            checkerboard_colors=[WHITE, WHITE],
+            color=WHITE,
+            fill_opacity=0.5,
+            stroke_opacity=0.25,
+        )
+
+        # Create the dense tissue
+        dense_tissue = Surface(
+            lambda u, v: np.array([
+                0.75 * np.cos(u) * np.sin(v),
+                0.5 * np.cos(v),
+                0.75 * np.sin(u) * np.sin(v),
+            ]),
+            u_range=[0, TAU],
+            v_range=[0, PI/2],
+            fill_color=DARK_GRAY,
+            checkerboard_colors=[WHITE, WHITE],
+            color=WHITE,
+            fill_opacity=0.8,
+            stroke_opacity=0.25,
+        )
+        dense_tissue.move_to(raw_breast.get_corner(DOWN), aligned_edge=DOWN)
+
+        # Display the breast
+        breast = VGroup(raw_breast, dense_tissue)
+        axes = ThreeDAxes()
+        axes.scale(0.5)
+        x_label = Text("x").scale(0.5).next_to(axes.x_axis.get_end(), RIGHT)
+        y_label = Text("y").scale(0.5).next_to(axes.y_axis.get_end(), UP)
+        z_label = Text("z").scale(0.5).rotate(PI/2, axis=RIGHT).rotate(PI, axis=OUT).next_to(axes.z_axis.get_end(), OUT)
+        axes.add(x_label, y_label, z_label)
+        self.set_camera_orientation(phi=PI/4, theta=PI/4)
+        if fast:
+            self.add(breast, axes)
+        else:
+            self.play(FadeIn(breast), DrawBorderThenFill(axes))
+        self.wait(0.5)
+
+        # Move the camera to point along y-axis
+        phi = PI / 2
+        theta = PI / 2
+        gamma = 0
+
+        if fast:
+            self.set_camera_orientation(phi=phi, theta=theta, gamma=gamma)
+            self.remove(axes)
+        else:
+            self.move_camera(phi=phi, theta=theta, run_time=1)
+            self.play(FadeOut(axes))
+        self.wait(2)
+
+        # Draw rectangles aboev and below the breast
+        paddle_size = (breast.width * 1.1, breast.height * 1.1, breast.depth * 0.1)
+        top_paddle = Prism(dimensions=paddle_size, fill_color=BLUE, fill_opacity=0.5)
+        top_paddle.move_to(breast.get_corner(OUT), aligned_edge=IN)
+        bottom_paddle = Prism(dimensions=paddle_size, fill_color=BLUE, fill_opacity=0.5)
+        bottom_paddle.move_to(breast.get_corner(IN), aligned_edge=OUT)
+        if fast:
+            self.add(top_paddle, bottom_paddle)
+        else:
+            self.play(FadeIn(top_paddle), FadeIn(bottom_paddle))
+        self.wait(2)
+
+        # Animate the breast compression
+        compression_factor = 0.66
+        clipping_factor = 0.8
+        compressed_raw_breast = Surface(
+            lambda u, v: np.array([
+                np.cos(u) * np.sin(v),
+                np.cos(v),
+                compression_factor * (np.sin(u) * np.sin(v)).clip(-clipping_factor, clipping_factor),
+            ]),
+            u_range=[0, TAU],
+            v_range=[0, PI/2],
+            fill_color=DARK_GRAY,
+            checkerboard_colors=[WHITE, WHITE],
+            color=WHITE,
+            fill_opacity=0.5,
+            stroke_opacity=0.25,
+        )
+        compressed_dense_tissue = Surface(
+            lambda u, v: np.array([
+                0.75 * np.cos(u) * np.sin(v),
+                0.5 * np.cos(v),
+                compression_factor * (0.75 * np.sin(u) * np.sin(v)).clip(-clipping_factor, clipping_factor),
+            ]),
+            u_range=[0, TAU],
+            v_range=[0, PI/2],
+            fill_color=DARK_GRAY,
+            checkerboard_colors=[WHITE, WHITE],
+            color=WHITE,
+            fill_opacity=0.8,
+            stroke_opacity=0.25,
+        )
+        top_paddle.generate_target()
+        top_paddle.target.move_to(compressed_raw_breast.get_corner(OUT), aligned_edge=IN)
+        bottom_paddle.generate_target()
+        bottom_paddle.target.move_to(compressed_raw_breast.get_corner(IN), aligned_edge=OUT)
+
+        if fast:
+            self.add(compressed_raw_breast, compressed_dense_tissue)
+        else:
+            self.play(
+                ReplacementTransform(raw_breast, compressed_raw_breast), 
+                ReplacementTransform(dense_tissue, compressed_dense_tissue),
+                MoveToTarget(top_paddle),
+                MoveToTarget(bottom_paddle),
+            )
+        self.wait(2)
+
+        # Move back to 3d view
+        phi, theta, gamma = PI / 4, PI / 4, 0
+        if fast:
+            self.remove(top_paddle, bottom_paddle)
+            self.set_camera_orientation(phi=phi, theta=theta, gamma=gamma)
+            self.add(axes)
+        else:
+            self.play(FadeIn(axes), FadeOut(top_paddle), FadeOut(bottom_paddle))
+            self.move_camera(phi=phi, theta=theta, run_time=2)
+        self.wait(2)
+
+        # Draw the tomography projection locations
+        N = 8
+        angle = 30 * DEGREES
+        angles = np.linspace(-angle + PI / 2, angle + PI / 2, N)
+        arc_radius = 3
+        lines = VGroup()
+        for angle in angles:
+            x = arc_radius * np.cos(angle)
+            z = arc_radius * np.sin(angle)
+            line = Line(start=[x, 0, z], end=[0, 0, 0], color=RED)
+            lines.add(line)
+        if fast:
+            self.add(lines)
+        else:
+            for line in lines:
+                self.play(DrawBorderThenFill(line), run_time=0.5)
+        self.wait(2)
+
+
+
+
+
+        #self.set_camera_orientation(phi=90 * DEGREES, theta=90 * DEGREES)
+        ## Create the top rectangular prism
+        #top_prism = Prism(dimensions=[1, 1, 0.33], fill_color=BLUE, fill_opacity=0.5)
+        #top_prism.move_to(breast.get_corner(UP) + np.array([0, 0, 0.165]))
+
+        ## Create the bottom rectangular prism
+        #bottom_prism = Prism(dimensions=[1, 1, 0.33], fill_color=GREEN, fill_opacity=0.5)
+        #bottom_prism.move_to(breast.get_corner(DOWN) + np.array([0, 0, -0.165]))
+
+        # Add the prisms to the scene
+        #self.add(top_prism, bottom_prism)
+        
 
 
 class Title(Scene):
