@@ -1,6 +1,5 @@
 from manim import *
 
-logger.setLevel("DEBUG")
 
 def create_neural_network(scale=1.0):
     radius = 0.1 * scale
@@ -259,7 +258,7 @@ class JEPA(Scene):
         mammogram = draw_rcc(size=1.5)
         mammogram.to_edge(UL)
         text = Text("Mammogram", font="Helvetica Neue", color=WHITE)
-        text.scale(0.25).next_to(mammogram, DOWN, buff=0.1)
+        text.scale(0.33).next_to(mammogram, DOWN, buff=0.1)
         self.play(DrawBorderThenFill(mammogram), Write(text))
         self.wait(2)
 
@@ -273,7 +272,7 @@ class JEPA(Scene):
         teacher = create_neural_network()
         teacher.next_to(arrow, RIGHT, buff=0.5)
         text = Text("Teacher Network", font="Helvetica Neue", color=WHITE)
-        text.scale(0.25).next_to(teacher, DOWN, buff=0.1)
+        text.scale(0.33).next_to(teacher, DOWN, buff=0.1)
         self.play(DrawBorderThenFill(arrow), DrawBorderThenFill(teacher), Write(text))
         self.wait(1)
 
@@ -295,7 +294,7 @@ class JEPA(Scene):
         ])
         teacher_output.next_to(arrow, RIGHT, buff=0.5)
         text = Text("Teacher Embeddings", font="Helvetica Neue", color=WHITE)
-        text.scale(0.25).next_to(teacher_output, DOWN, buff=0.1)
+        text.scale(0.33).next_to(teacher_output, DOWN, buff=0.1)
         self.play(DrawBorderThenFill(arrow), DrawBorderThenFill(teacher_output), Write(text))
         self.wait(2)
 
@@ -325,7 +324,7 @@ class JEPA(Scene):
             m.set_fill(BLUE, opacity=0.5)
         masked_mammogram = VGroup(masked_mammogram, mask, unmasked)
         text = Text("Masked Mammogram", font="Helvetica Neue", color=WHITE)
-        text.scale(0.25).next_to(masked_mammogram, DOWN, buff=0.1)
+        text.scale(0.33).next_to(masked_mammogram, DOWN, buff=0.1)
         self.play(DrawBorderThenFill(masked_mammogram), Write(text))
         self.wait(2)
 
@@ -339,7 +338,7 @@ class JEPA(Scene):
         student = create_neural_network()
         student.next_to(arrow, RIGHT, buff=0.5)
         text = Text("Student Network", font="Helvetica Neue", color=WHITE)
-        text.scale(0.25).next_to(student, DOWN, buff=0.1)
+        text.scale(0.33).next_to(student, DOWN, buff=0.1)
         self.play(DrawBorderThenFill(arrow), DrawBorderThenFill(student), Write(text))
         self.wait(1)
 
@@ -355,7 +354,7 @@ class JEPA(Scene):
             s.set_fill(BLUE, opacity=1.0)
         unmasked_squares.next_to(arrow, RIGHT, buff=0.5)
         text = Text("Student Embeddings", font="Helvetica Neue", color=WHITE)
-        text.scale(0.25).next_to(unmasked_squares, DOWN, buff=0.1)
+        text.scale(0.33).next_to(unmasked_squares, DOWN, buff=0.1)
         self.play(DrawBorderThenFill(arrow), DrawBorderThenFill(unmasked_squares), Write(text))
         self.wait(1)
 
@@ -380,7 +379,7 @@ class JEPA(Scene):
         )
         predictor.next_to(arrow, RIGHT, buff=0.5)
         text = Text("Predictor", font="Helvetica Neue", color=WHITE)
-        text.scale(0.25).next_to(predictor, DOWN, buff=0.1)
+        text.scale(0.33).next_to(predictor, DOWN, buff=0.1)
         self.play(DrawBorderThenFill(arrow), DrawBorderThenFill(predictor), Write(text))
         self.wait(1)
 
@@ -398,7 +397,7 @@ class JEPA(Scene):
             np.array([predictor.get_corner(UP)[0], teacher_output.get_corner(RIGHT)[1], 0]),
         )
         text = Text("Predicted Embeddings", font="Helvetica Neue", color=WHITE)
-        text.scale(0.25).next_to(predictor_output, DOWN, buff=0.1)
+        text.scale(0.33).next_to(predictor_output, DOWN, buff=0.1)
         self.play(DrawBorderThenFill(arrow), DrawBorderThenFill(predictor_output), Write(text))
         self.wait(2)
             
@@ -413,31 +412,27 @@ class JEPAUpdate(Scene):
         self.wait(0.25)
 
         # Draw the targets and predictions
-        square_size = 1.0
-        target = Square(
-            side_length=square_size,
-            color=WHITE,
-            fill_color=RED,
-            fill_opacity=1.0,
-            stroke_width=2.0
-        )
-        target_text = Text("Target Embeddings", font="Helvetica Neue", color=RED)
-        target_text.scale(0.25)
-        prediction = Square(
-            side_length=square_size,
-            color=WHITE,
-            fill_color=BLUE,
-            fill_opacity=1.0,
-            stroke_width=2.0
-        )
-        predicted_text = Text("Predicted Embeddings", font="Helvetica Neue", color=BLUE)
-        predicted_text.scale(0.25)
-        target.move_to(ORIGIN + np.array([-square_size, 0, 0]))
-        prediction.move_to(ORIGIN + np.array([square_size, 0, 0]))
-        target_text.next_to(target, DOWN, buff=0.1)
-        predicted_text.next_to(prediction, DOWN, buff=0.1)
+        target = Matrix([[0.1], [-3.0], [8.1], [-1.4], [7.2]]).set_color(RED)
+        prediction = Matrix([[0.4], [-3.2], [8.9], [-1.0], [7.5]]).set_color(BLUE)
+        target_text = Paragraph("Target\nEmbeddings", font="Helvetica Neue", color=RED, alignment="center")
+        predicted_text = Paragraph("Predicted\nEmbeddings", font="Helvetica Neue", color=BLUE, alignment="center")
+        target_text.scale(0.5)
+        predicted_text.scale(0.5)
+        spacing = 2.0
+        target.move_to(ORIGIN + np.array([-spacing, 0, 0]))
+        prediction.move_to(ORIGIN + np.array([spacing, 0, 0]))
+        target_text.next_to(target, DOWN, buff=0.5)
+        predicted_text.next_to(prediction, DOWN, buff=0.5)
         self.play(DrawBorderThenFill(target), Write(target_text), DrawBorderThenFill(prediction), Write(predicted_text))
-        self.wait(1)
+        self.wait(2)
+
+        target.generate_target()
+        prediction.generate_target()
+        target.target.to_edge(LEFT)
+        prediction.target.to_edge(RIGHT)
+        self.play(Unwrite(target_text), Unwrite(predicted_text), MoveToTarget(target), MoveToTarget(prediction))
+        self.wait(2)
+        
 
         # Define loss function
         brace = Brace(VGroup(target, prediction), direction=UP, buff=0.2)
@@ -463,7 +458,7 @@ class JEPAUpdate(Scene):
         predictor_update = create_neural_network()
         predictor_update.next_to(arrow, LEFT, buff=0.5)
         predictor_update_text = Text("Predictor", font="Helvetica Neue", color=WHITE)
-        predictor_update_text.scale(0.25).next_to(predictor_update, DOWN, buff=0.5)
+        predictor_update_text.scale(0.5).next_to(predictor_update, DOWN, buff=0.5)
         self.play(DrawBorderThenFill(arrow), DrawBorderThenFill(predictor_update), Write(predictor_update_text))
         self.wait(2)
 
@@ -477,7 +472,7 @@ class JEPAUpdate(Scene):
         student_update = create_neural_network()
         student_update.next_to(arrow, LEFT, buff=0.5)
         student_update_text = Text("Student", font="Helvetica Neue", color=WHITE)
-        student_update_text.scale(0.25).next_to(student_update, DOWN, buff=0.5)
+        student_update_text.scale(0.5).next_to(student_update, DOWN, buff=0.5)
         self.play(DrawBorderThenFill(arrow), DrawBorderThenFill(student_update), Write(student_update_text))
         self.wait(2)
 
@@ -493,7 +488,7 @@ class JEPAUpdate(Scene):
         teacher_update = create_neural_network()
         teacher_update.next_to(arrow, LEFT, buff=0.5)
         teacher_update_text = Text("Teacher", font="Helvetica Neue", color=RED)
-        teacher_update_text.scale(0.25).next_to(teacher_update, DOWN, buff=0.5)
+        teacher_update_text.scale(0.5).next_to(teacher_update, DOWN, buff=0.5)
         self.play(DrawBorderThenFill(arrow), DrawBorderThenFill(teacher_update), Write(teacher_update_text), Write(arrow_text))
         self.wait(2)
 
