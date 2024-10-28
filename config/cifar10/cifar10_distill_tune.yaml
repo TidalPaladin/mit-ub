@@ -1,4 +1,3 @@
-# This configuration should achieve ~91% accuracy on CIFAR-10
 fit:
   compile: true
   float32_matmul_precision: medium
@@ -25,13 +24,16 @@ fit:
       init_args:
         save_dir: /mnt/flash/mitub
         project: mit-ub
-        name: cifar10-convnext
+        name: cifar10-convnext-distill
 
   model:
     class_path: mit_ub.tasks.ClassificationTask
     init_args:
       backbone: "convnext-cifar10"
       num_classes: 10
+      checkpoint: /mnt/flash/mitub/mit-ub/dg7m0wby/checkpoints/last.ckpt
+      strict_checkpoint: false
+
       optimizer_init:
         class_path: bitsandbytes.optim.AdamW8bit
         init_args:

@@ -87,7 +87,7 @@ class ConvEncoderLayer2d(nn.Module):
         super().__init__()
         kernel_size = to_tuple(kernel_size, 2)
         stride = to_tuple(stride, 2)
-        padding = cast(Tuple[int, int], tuple(k // 2 for k in kernel_size))
+        padding = cast(Tuple[int, int], tuple(k // 2 for k in cast(Tuple[int, int], kernel_size)))
         self.conv = nn.Conv2d(
             d_model,
             d_model,
@@ -148,7 +148,7 @@ class ConvEncoderLayer3d(nn.Module):
         super().__init__()
         kernel_size = to_tuple(kernel_size, 3)
         stride = to_tuple(stride, 3)
-        padding = cast(Tuple[int, int, int], tuple(k // 2 for k in kernel_size))
+        padding = cast(Tuple[int, int, int], tuple(k // 2 for k in cast(Tuple[int, int, int], kernel_size)))
         self.conv = nn.Conv3d(
             d_model,
             d_model,

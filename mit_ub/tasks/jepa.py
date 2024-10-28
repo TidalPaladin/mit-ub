@@ -41,6 +41,48 @@ def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: 
     return y
 
 
+@torch.compile(disable=compile_is_disabled())
+@torch.no_grad()
+def mixup(x: Tensor, target: Tensor, p: float, alpha: float) -> Tuple[Tensor, Tensor]:
+    r"""Implements MixUp on inputs and teacher network outputs.
+
+    At a high level, this involves linearly combining two inputs and their
+    corresponding targets in a random manner.
+
+    Args:
+        x: The input tensor.
+        target: The target tensor.
+        p: The probability of applying mixup.
+        alpha: The alpha parameter for the Beta distribution used to sample the mixup weight.
+
+    Returns:
+        A tuple containing the mixed input and target.
+    """
+    # Generate mixup weight
+    N = x.shape[0]
+    dist = torch.distributions.Beta(alpha, alpha)
+    lam = dist.sample((N,)).to(x.device)
+
+    # Generate mask of mixup samples
+    mixup_mask = torch.rand_like(lam) < p
+
+    def right_broadcast(inp: Tensor, proto: Tensor) -> Tensor:
+        return inp.view(-1, *(1,) * len(proto.shape[1:]))
+
+    # Apply mixup to input and target
+    x = torch.where(
+        right_broadcast(mixup_mask, x),
+        x.roll(1, 0).lerp_(x, right_broadcast(lam, x)),
+        x,
+    )
+    target = torch.where(
+        right_broadcast(mixup_mask, target),
+        target.roll(1, 0).lerp_(target, right_broadcast(lam.type_as(target), target)),
+        target,
+    )
+    return x, target
+
+
 class JEPA(Task):
     """
     Joint Embedding Predictive Architecture (JEPA) Task.
@@ -284,44 +326,6 @@ class JEPA(Task):
         )
         return list(updates)
 
-    @torch.no_grad()
-    def mixup(self, x: Tensor, target: Tensor) -> Tuple[Tensor, Tensor]:
-        r"""Implements MixUp on inputs and teacher network outputs.
-
-        At a high level, this involves linearly combining two inputs and their
-        corresponding targets in a random manner.
-
-        Args:
-            x: The input tensor.
-            target: The target tensor.
-
-        Returns:
-            A tuple containing the mixed input and target.
-        """
-        # Generate mixup weight
-        N = x.shape[0]
-        dist = torch.distributions.Beta(self.mixup_alpha, self.mixup_alpha)
-        lam = dist.sample(torch.Size((N,))).to(x.device)
-
-        # Generate mask of mixup samples
-        mixup_mask = torch.rand_like(lam) < self.mixup_prob
-
-        def right_broadcast(inp: Tensor, proto: Tensor) -> Tensor:
-            return inp.view(-1, *(1,) * len(proto.shape[1:]))
-
-        # Apply mixup to input and target
-        x = torch.where(
-            right_broadcast(mixup_mask, x),
-            x.roll(1, 0).lerp_(x, right_broadcast(lam, x)),
-            x,
-        )
-        target = torch.where(
-            right_broadcast(mixup_mask, target),
-            target.roll(1, 0).lerp_(target, right_broadcast(lam.type_as(target), target)),
-            target,
-        )
-        return x, target
-
     def step(
         self,
         batch: Any,
@@ -350,7 +354,7 @@ class JEPA(Task):
 
             # apply mixup, not overwriting full_target
             if self.training and self.mixup_prob > 0:
-                x, full_target_mixed = self.mixup(x, full_target)
+                x, full_target_mixed = mixup(x, full_target, self.mixup_prob, self.mixup_alpha)
                 target = apply_mask(target_mask, full_target_mixed, fill_value=None)
             else:
                 target = apply_mask(target_mask, full_target, fill_value=None)
