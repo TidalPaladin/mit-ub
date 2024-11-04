@@ -184,14 +184,14 @@ class JEPA(Task):
     def forward(self, x: Tensor, context_mask: Tensor, target_mask: Tensor) -> Dict[str, Tensor]:
         # Run encoder on context
         context: Tensor = self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
+        B, L, _ = context.shape
 
         # Sample a subset of the context as input to the predictor and project
-        B, L, _ = context.shape
-        subsample_mask = create_mask((L,), mask_ratio=1 - self.context_subsample_ratio, batch_size=B)
-        context = apply_mask(subsample_mask, context, fill_value=None)
+        if self.context_subsample_ratio < 1.0:
+            subsample_mask = create_mask((L,), mask_ratio=1 - self.context_subsample_ratio, batch_size=B)
+            context = apply_mask(subsample_mask, context, fill_value=None)
 
         # Prepare positional encoding for target queries
-        B, _, _ = context.shape
         tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
         query = self.pos_enc(tokenized_size).expand(B, -1, -1)
         query = apply_mask(target_mask, query, fill_value=None)

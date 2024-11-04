@@ -5,7 +5,7 @@
 
 ## Description
 
-MiT-UB is a vision transformer model that is tailored for unbiased medical image analysis. It was designed
+MiT-UB is a vision transformer model designed to
 to accomodate the diverse nature of medical images, such as varying image sizes and resolutions, while
 maintaining a high level of performance. Data scarcity is a common problem in medical image analysis,
 so we adopt a self-supervised pre-training strategy to leverage unlabeled data and improve generalization to minority populations.
