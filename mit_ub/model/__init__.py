@@ -30,6 +30,11 @@ BACKBONES(
     nhead=dim // HEAD_DIM,
     num_kv_heads=dim // HEAD_DIM // QUERY_GROUPS,
     dropout=0.1,
+    stochastic_depth=0.1,
+    bias=False,
+    qk_norm=True,
+    activation=identity,
+    gate_activation=F.silu,
 )
 BACKBONES(
     AdaptiveViT,
