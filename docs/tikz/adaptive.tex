@@ -1,0 +1,30 @@
+\documentclass[tikz,convert={outfile=\jobname.svg}]{standalone}
+\usepackage{pgf} 
+\usepackage{amsmath}
+\usepackage{ifthen}
+\usetikzlibrary{decorations.pathreplacing}
+\usetikzlibrary{positioning}
+\usetikzlibrary{calc}
+
+\begin{document}
+\include{macros}
+\tikzset{every picture/.style={/utils/exec={\sffamily}}}
+
+\begin{tikzpicture}
+    % Input image
+    \node[name=rcc, outer sep=0, inner sep=0] at (0, 0){\drawRCC};
+    % Brace indicating height
+    \draw[decorate,decoration={brace,amplitude=10pt,raise=4pt},yshift=0pt]
+    (rcc.south west) -- (rcc.north west) node [black,midway,xshift=-1.1cm] 
+    {\footnotesize 3072px};
+    % Brace indicating width
+    \draw[decorate,decoration={brace,amplitude=10pt,raise=4pt},yshift=0pt]
+    (rcc.north west) -- (rcc.north east) node [black,midway,yshift=0.8cm] 
+    {\footnotesize 2304px};
+
+    % Resized image
+    \node[name=resized, outer sep=0, inner sep=0] at (6, 0){\drawRCC};
+
+
+\end{tikzpicture}
+\end{document}

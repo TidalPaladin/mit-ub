@@ -244,28 +244,6 @@ class ViTInput(Scene):
         )
         self.wait(1)
 
-        ## Loop over each of the squares
-        #embeddings = VGroup()
-        #for square in squares:
-        #    # Fill the square with a blue background
-        #    square.set_fill(BLACK, opacity=1.0)
-        #    square.set_stroke(WHITE, width=2)
-        #    
-        #    # Generate a random number between -10 and 10
-        #    random_number = np.random.uniform(-10, 10)
-        #    
-        #    # Create a text object with the random number, formatted to one decimal place
-        #    number_text = Text(f"{random_number:.1f}", font=FONT, color=WHITE)
-        #    number_text.scale(0.5).move_to(square.get_center())
-        #    embeddings.add(VGroup(square, number_text))
-        #    
-        #    # Add the number text to the scene
-        #    self.play(FadeIn(square), Write(number_text), run_time=0.2)
-        #    self.wait(0.05)
-        #self.remove(mammogram)
-        #self.play(FadeOut(linear_projection))
-        #self.wait(2)
-
         # Create curved arrows from each patch to embeddings on the right
         linear_projection = Text("Linear Projection", font=FONT, color=RED)
         linear_projection.scale(0.6).next_to(mammogram_with_patches, DOWN, buff=0.4)

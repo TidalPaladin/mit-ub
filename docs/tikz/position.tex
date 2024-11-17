@@ -1,0 +1,92 @@
+\documentclass[tikz,convert={outfile=\jobname.svg}]{standalone}
+\usepackage{pgf} 
+\usepackage{amsmath}
+\usepackage{ifthen}
+\usetikzlibrary{positioning}
+\usetikzlibrary{calc}
+
+\begin{document}
+\include{macros}
+\tikzset{every picture/.style={/utils/exec={\sffamily}}}
+
+
+\newcommand{\drawRCCPosition}[2]{
+  \begin{tikzpicture}
+    \node[inner sep=0, outer sep=0, name=rcc] at (0, 0){\drawRCC};
+    \ifthenelse{\equal{#1}{x}}{
+        \fill[left color=purple, right color=yellow, opacity=0.33] (rcc.south west) rectangle (rcc.north east);
+    }{
+        \fill[top color=purple, bottom color=yellow, opacity=0.33] (rcc.south west) rectangle (rcc.north east);
+    }
+    \node[circle, fill=red, inner sep=1pt, name=point1] at (1, 1) {};
+    \node[circle, fill=red, inner sep=1pt, name=point2] at (-0.5, -0.5) {};
+  \end{tikzpicture}
+}
+
+\begin{tikzpicture}
+    % Draw RCCs with overlay
+    \node[name=rccx] at (0, 0){\drawRCCPosition{x}{0.33}};
+    \node[name=rccy] at (0, -5){\drawRCCPosition{y}{0.33}};
+
+    % Vector for x-coordinate
+    \node[name=vector1] at (3, 0) {
+      $\begin{bmatrix}
+        0.8 \\
+        -0.3
+      \end{bmatrix}$
+    };
+    \node[below=0.2cm of vector1] {$x_i \in [-1, 1]$};
+    \draw[<-, orange, >=stealth, thick] (vector1.north west) to[out=135, in=0] ($(rccx) + (1, 1)$);
+    \draw[<-, purple, >=stealth, thick] (vector1.south west) to[out=200, in=-45] ($(rccx) + (-0.5, -0.5)$);
+    
+    % Vector for y-coordinate
+    \node[name=vector2] at (3, -5) {
+      $\begin{bmatrix}
+        -0.2 \\
+        0.6 
+      \end{bmatrix}$
+    };
+    \node[below=0.2cm of vector2] {$y_i \in [-1, 1]$};
+    \draw[<-, purple, >=stealth, thick] (vector2.north west) to[out=135, in=0] ($(rccy) + (1, 1)$);
+    \draw[<-, orange, >=stealth, thick] (vector2.south west) to[out=200, in=-45] ($(rccy) + (-0.5, -0.5)$);
+
+    % Vector for combined coordinate
+    \node[name=pos_in] at (7, -2.5) {
+      $\begin{bmatrix}
+        0.8 \\
+        -0.2 
+      \end{bmatrix}$
+      $\begin{bmatrix}
+        -0.3 \\
+        0.6
+      \end{bmatrix}$
+    };
+    \node[below=0.2cm of pos_in, align=center] {Relative\\Fractional\\Position};
+    \draw[->, black, >=stealth] (vector1.east) to[out=0, in=180] ($(pos_in.north west) + (0, -0.3)$);
+    \draw[->, black, >=stealth] (vector2.east) to[out=0, in=180] ($(pos_in.south west) + (0, 0.3)$);
+
+    % MLP
+    \node[name=mlp] at (10.5, -2.5){\drawMLP};
+    \node[below=0.5cm of mlp.south, anchor=center] {MLP};
+    \draw[->, black, >=stealth] (pos_in) -- (mlp);
+
+    % Position embeddings
+    \node[name=posemb] at (14, -2.5) {
+      $\begin{bmatrix}
+        p_{0, 1} \\
+        p_{0, 2} \\
+        \vdots \\
+        p_{0, d}
+      \end{bmatrix}$
+      $\begin{bmatrix}
+        p_{1, 1} \\
+        p_{1, 2} \\
+        \vdots \\
+        p_{1, d}
+      \end{bmatrix}$
+    };
+    \node[below=0.5cm of posemb.south, anchor=center, align=center] {Position\\Embeddings};
+    \draw[->, black, >=stealth] (mlp) -- (posemb);
+
+\end{tikzpicture}
+\end{document}

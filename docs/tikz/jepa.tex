@@ -1,0 +1,67 @@
+\documentclass[tikz,convert={outfile=\jobname.svg}]{standalone}
+\usepackage{pgf} 
+\usepackage{amsmath}
+\usetikzlibrary{positioning}
+
+\begin{document}
+\include{macros}
+\tikzset{every picture/.style={/utils/exec={\sffamily}}}
+
+\begin{tikzpicture}
+
+  % Innput mammogram
+  \node[name=rcc] at (0, 0){\drawRCC};
+
+  % Teacher network 
+  \node[name=teacher] at (4, 0){\drawMLP};
+  \node[below=0.5cm of teacher.south, anchor=center] {Teacher Network};
+  \draw[->, thick, black, >=stealth, line width=1.5pt] (rcc) -- (teacher);
+
+  % Masked mammogram
+  \node[name=masked_rcc] at (0, -6){\drawMaskedRCC{3}{0.5}{blue}{0.0}};
+  \node[below=0.5cm of masked_rcc.south, anchor=center] {Masked Mammogram};
+  \draw[->, thick, black, >=stealth, line width=1.5pt] (rcc) -- (masked_rcc);
+
+  % Student network
+  \node[name=student] at (4, -6){\drawMLP};
+  \node[below=0.5cm of student.south, anchor=center] {Student Network};
+  \draw[->, thick, black, >=stealth, line width=1.5pt] (masked_rcc) -- (student);
+
+  % Student features
+  \node[name=student_features] at (8, -6){\drawMaskedRCC{3}{0.5}{blue}{0.25}};
+  \node[below=0.5cm of student_features.south, anchor=center] {Student Features};
+  \draw[->, thick, black, >=stealth, line width=1.5pt] (student) -- (student_features);
+
+  % Teacher features
+  \node[name=teacher_features] at (8, 0){\drawMaskedRCC{5}{1.0}{red}{0.25}};
+  \node[below=0.5cm of teacher_features.south, anchor=center] {Teacher Features};
+  \draw[->, thick, black, >=stealth, line width=1.5pt] (teacher) -- (teacher_features);
+
+  % Masked teacher features
+  \node[name=masked_teacher_features] at (13, 0){\drawMaskedRCC{8}{0.25}{red}{0.25}};
+  \node[below=0.5cm of masked_teacher_features.south, anchor=center] {Selected Teacher Features};
+  \draw[->, thick, black, >=stealth, line width=1.5pt] (teacher_features) -- (masked_teacher_features);
+
+  % Predictor
+  \node[name=predictor] at (13, -6){\drawMLP};
+  \node[below=0.5cm of predictor.south, anchor=center] {Predictor Network};
+  \draw[->, thick, black, >=stealth, line width=1.5pt] (student_features) -- (predictor);
+
+  % Positions
+  %\draw[->, thick, black, >=stealth, line width=1.5pt] (teacher_features.east) to[out=0, in=180] node[midway, right] {Selected Positions} (predictor.west);
+
+  % Predictions
+  \node[name=predictions] at (18, -6){\drawMaskedRCC{8}{0.25}{green}{0.25}};
+  \node[below=0.5cm of predictions.south, anchor=center] {Predictions};
+  \draw[->, thick, black, >=stealth, line width=1.5pt] (predictor) -- (predictions);
+
+  % Loss
+  \node[name=loss] at (18, 0){\Large $\mathcal{L}(x, \hat{x})$};
+
+  % Arrows to loss
+  \draw[->, thick, black, >=stealth, line width=1.5pt] (masked_teacher_features) to[out=0, in=180] (loss);
+  \draw[->, thick, black, >=stealth, line width=1.5pt] (predictions.north) to[out=90, in=270] (loss);
+
+
+\end{tikzpicture}
+\end{document}
