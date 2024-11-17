@@ -6,12 +6,11 @@ fit:
     devices: 2
     strategy: "ddp"
     precision: "bf16-mixed"
-    max_steps: 250000
-    num_sanity_val_steps: 0
+    max_steps: 100000
+    num_sanity_val_steps: 2
     default_root_dir: /mnt/flash/vindr
-    val_check_interval: 5000
     #accumulate_grad_batches: 4
-    #check_val_every_n_epoch: 10
+    check_val_every_n_epoch: 10
     callbacks:
       - class_path: pytorch_lightning.callbacks.ModelCheckpoint
         init_args:
@@ -28,65 +27,57 @@ fit:
     logger:
       class_path: pytorch_lightning.loggers.wandb.WandbLogger
       init_args:
-        save_dir: /mnt/storage/users/chase/mitub
+        save_dir: /mnt/flash/vindr
         project: vindr
         name: vindr-base-p1
 
   model:
-    class_path: mit_ub.tasks.BreastTriage
+    class_path: mit_ub.tasks.JEPA
     init_args:
-      backbone: "vit-i1-p16-d768-a32_24"
-      #checkpoint: /mnt/storage/users/chase/mitub/mit-ub/lmj01ch6/checkpoints/last.ckpt
-      #checkpoint: /mnt/storage/users/chase/mitub/mit-ub/tzm3hgq0/checkpoints/last.ckpt
-      #checkpoint: /mnt/storage/users/chase/mitub/mit-ub/f9lk7i0a/checkpoints/last.ckpt
-      checkpoint: /mnt/storage/users/chase/mitub/mit-ub/h5jiaqad/checkpoints/last.ckpt
-      strict_checkpoint: false
-
+      backbone: "vit-i1-p16-d512"
       log_train_metrics_interval: 50
+
+      # JEPA parameters
+      ema_alpha: 0.98
+      weight_decay_final: null
+      momentum_schedule: false
+      predictor_depth: 4
+      context_ratio: 0.5
+      target_ratio: 0.25
+      context_subsample_ratio: 0.5
+      context_scale: 2
+      target_scale: 2
+
       optimizer_init:
-        class_path: torch.optim.AdamW
+        class_path: bitsandbytes.optim.AdamW8bit
         init_args:
-          lr: 0.00001
+          lr: 0.00025
           weight_decay: 0.05
-      weight_decay_exemptions:
-        - "bias"
-        - "LayerNorm"
+          betas: [0.85, 0.999]
       lr_interval: "step"
       lr_scheduler_init:
-        class_path: torch.optim.lr_scheduler.OneCycleLR
+        class_path: deep_helpers.optim.ReciprocalSquareRootLR
         init_args:
-          max_lr: 0.00001
-          div_factor: 1
-          final_div_factor: 50
-          pct_start: 0.20
-          three_phase: false
-          total_steps: 250000
+          warmup_steps: 5000
+          cooldown_steps: 25000
+          total_steps: 100000
+          timescale: 10000
+          initial_lr: 0.00005
+          initial_momentum: 0.95
+      parameter_groups:
+        - params:
+            - "jepa_predictor"
+            - "jepa_out_proj"
+          weight_decay: 0.25
 
   data:
-    class_path: mit_ub.data.triage.PreprocessedPNGDataModule
+    class_path: mit_ub.data.VinDrDataModule
     init_args:
+      root: "/mnt/data/vindr/lowres"
 
-      train_inputs: 
-        - "/mnt/active_1/chase/data/optimam_highres"
-        - "/mnt/active_1/chase/data/medcog_highres"
-        #- "/mnt/active_2/chase/data/test"
-      val_inputs: 
-        #- "/mnt/active_2/chase/data/test"
-        - "/mnt/active_2/chase/data/test"
-
-      batch_size: 4
+      batch_size: 32
       num_workers: 12
       pin_memory: true
-      persistent_workers: true
-      malign_weight: 0.33
-
-      metadata_filenames:
-        manifest: "manifest.csv"
-        annotation: "annotation.csv"
-      boxes_filename: "traces.csv"
-      boxes_extra_keys:
-        - "trait"
-        - "types"
 
       train_transforms:
         class_path: torchvision.transforms.v2.Compose
@@ -95,7 +86,7 @@ fit:
 
             - class_path: torchvision.transforms.v2.RandomResizedCrop
               init_args:
-                size: [3072, 2304]
+                size: [512, 384]
                 scale: [0.8, 1.0]
                 ratio: [0.8, 1.2]
                 antialias: true
@@ -124,5 +115,5 @@ fit:
       val_transforms:
         class_path: torchvision.transforms.v2.Resize
         init_args:
-          size: [3072, 2304]
+          size: [512, 384]
           antialias: true
