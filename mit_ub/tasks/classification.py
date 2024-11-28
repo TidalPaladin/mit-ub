@@ -1,5 +1,5 @@
 from copy import copy
-from typing import Any, Dict, Optional, Set, cast
+from typing import Any, Dict, List, Optional, cast
 
 import torch
 import torch.nn as nn
@@ -46,7 +46,7 @@ class ClassificationTask(Task):
         strict_checkpoint: bool = True,
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
-        weight_decay_exemptions: Set[str] = set(),
+        parameter_groups: List[Dict[str, Any]] = [],
     ):
         super().__init__(
             optimizer_init,
@@ -58,7 +58,7 @@ class ClassificationTask(Task):
             strict_checkpoint,
             log_train_metrics_interval,
             log_train_metrics_on_epoch,
-            weight_decay_exemptions,
+            parameter_groups,
         )
         self.num_classes = num_classes
 
@@ -71,6 +71,8 @@ class ClassificationTask(Task):
             nn.Dropout(0.1),
             nn.Linear(dim, num_classes),
         )
+        nn.init.zeros_(self.classification_head[-1].bias)
+        nn.init.trunc_normal_(self.classification_head[-1].weight, std=0.02)
         self.criterion = nn.CrossEntropyLoss()
         self.save_hyperparameters()
 
@@ -130,6 +132,7 @@ class JEPAWithClassification(JEPAWithProbe):
         target_scale: int = 2,
         context_subsample_ratio: float = 0.5,
         ema_alpha: float = 0.95,
+        momentum_schedule: bool = False,
         predictor_depth: int = 4,
         mixup_alpha: float = 1.0,
         mixup_prob: float = 0.2,
@@ -142,7 +145,7 @@ class JEPAWithClassification(JEPAWithProbe):
         strict_checkpoint: bool = True,
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
-        weight_decay_exemptions: Set[str] = set(),
+        parameter_groups: List[Dict[str, Any]] = [],
         weight_decay_final: float | None = None,
     ):
         self.num_classes = num_classes
@@ -154,6 +157,7 @@ class JEPAWithClassification(JEPAWithProbe):
             target_scale,
             context_subsample_ratio,
             ema_alpha,
+            momentum_schedule,
             predictor_depth,
             mixup_alpha,
             mixup_prob,
@@ -166,7 +170,7 @@ class JEPAWithClassification(JEPAWithProbe):
             strict_checkpoint,
             log_train_metrics_interval,
             log_train_metrics_on_epoch,
-            weight_decay_exemptions,
+            parameter_groups,
             weight_decay_final,
         )
 

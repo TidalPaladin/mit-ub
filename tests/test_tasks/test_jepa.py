@@ -64,15 +64,18 @@ class TestJEPA:
         return JEPA(backbone, optimizer_init=optimizer_init, context_scale=1)
 
     @pytest.mark.parametrize(
-        "max_steps,current_step,ema_alpha,expected",
+        "momentum_schedule,max_steps,current_step,ema_alpha,expected",
         [
-            (1000, 0, 0.95, 0.95),
-            (1000, 1000, 0.95, 1.0),
-            (1000, 500, 0.95, 0.975),
+            (True, 1000, 0, 0.95, 0.95),
+            (True, 1000, 1000, 0.95, 1.0),
+            (True, 1000, 500, 0.95, 0.975),
+            (False, 1000, 1000, 0.95, 0.95),
         ],
     )
-    def test_ema_momentum_step(self, mocker, vit_dummy, optimizer_init, max_steps, current_step, ema_alpha, expected):
-        task = JEPA(vit_dummy, optimizer_init=optimizer_init, ema_alpha=ema_alpha)
+    def test_ema_momentum_step(
+        self, mocker, vit_dummy, optimizer_init, momentum_schedule, max_steps, current_step, ema_alpha, expected
+    ):
+        task = JEPA(vit_dummy, optimizer_init=optimizer_init, ema_alpha=ema_alpha, momentum_schedule=momentum_schedule)
         trainer = mocker.MagicMock(spec_set=pl.Trainer)
         trainer.max_steps = max_steps
         trainer.global_step = current_step
@@ -84,17 +87,18 @@ class TestJEPA:
         assert actual == expected
 
     @pytest.mark.parametrize(
-        "max_epochs,current_epoch,ema_alpha,expected",
+        "momentum_schedule,max_epochs,current_epoch,ema_alpha,expected",
         [
-            (100, 0, 0.95, 0.95),
-            (100, 100, 0.95, 1.0),
-            (100, 50, 0.95, 0.975),
+            (True, 100, 0, 0.95, 0.95),
+            (True, 100, 100, 0.95, 1.0),
+            (True, 100, 50, 0.95, 0.975),
+            (False, 100, 100, 0.95, 0.95),
         ],
     )
     def test_ema_momentum_epoch(
-        self, mocker, vit_dummy, optimizer_init, max_epochs, current_epoch, ema_alpha, expected
+        self, mocker, vit_dummy, optimizer_init, momentum_schedule, max_epochs, current_epoch, ema_alpha, expected
     ):
-        task = JEPA(vit_dummy, optimizer_init=optimizer_init, ema_alpha=ema_alpha)
+        task = JEPA(vit_dummy, optimizer_init=optimizer_init, ema_alpha=ema_alpha, momentum_schedule=momentum_schedule)
         trainer = mocker.MagicMock(spec_set=pl.Trainer)
         trainer.max_steps = None
         trainer.global_step = None
@@ -159,6 +163,23 @@ class TestJEPA:
             task.synchronize_ema_weights()
             for param in task.ema_backbone.parameters():
                 assert_close(param.data, expected.expand_as(param.data))
+
+    def test_update_weight_decay(self, mocker, task):
+        task.parameter_groups = [
+            {"params": ("jepa_predictor",), "weight_decay": 1.0},
+        ]
+        task.weight_decay_final = 0.5
+        trainer = mocker.MagicMock(spec_set=pl.Trainer)
+        trainer.global_step = 100
+        trainer.max_steps = 100
+        mocker.patch.object(task, "_trainer", trainer)
+        opt = task.configure_optimizers()["optimizer"]
+        mocker.patch.object(task, "optimizers", side_effect=lambda: opt)
+        task.update_weight_decay()
+        # We shouldn't decrease weight decay, only increase it.
+        # The first parameter group is the custom one for jepa_predictor.
+        assert opt.param_groups[0]["weight_decay"] == 1.0
+        assert opt.param_groups[1]["weight_decay"] == 0.5
 
     def test_fit(self, task, datamodule, logger):
         task.weight_decay_final = 4.0

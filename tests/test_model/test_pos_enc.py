@@ -1,40 +1,50 @@
+import math
+
 import pytest
 import torch
-from torchtune.modules.peft.lora import LoRALinear
+import torch.nn.functional as F
+from torch.testing import assert_close
 
-from mit_ub.model.lora import LoRATarget
-from mit_ub.model.pos_enc import PositionEncoder, RelativeFactorizedPosition
+from mit_ub.model.mlp import mlp_forward
+from mit_ub.model.pos_enc import RelativeFactorizedPosition, create_grid, relative_factorized_position_forward
 
 
-class TestPositionEncoder:
+@pytest.mark.parametrize("normalize", [True, False])
+def test_create_grid(normalize):
+    dims = (4, 4)
+    grid = create_grid(dims, normalize=normalize)
+    assert grid.shape == (1, 16, 2)
+    if normalize:
+        assert torch.all(grid[0, 0] == torch.tensor([-1.0, -1.0]))
+        assert torch.all(grid[0, -1] == torch.tensor([1.0, 1.0]))
+    else:
+        assert torch.all(grid[0, 0] == torch.tensor([0, 0]))
+        assert torch.all(grid[0, -1] == torch.tensor([3, 3]))
 
-    @pytest.mark.parametrize("normalize", [True, False])
-    def test_create_grid(self, normalize):
-        dims = (4, 4)
-        grid = PositionEncoder.create_grid(dims, normalize=normalize)
-        assert grid.shape == (1, 16, 2)
-        if normalize:
-            assert torch.all(grid[0, 0] == torch.tensor([-1.0, -1.0]))
-            assert torch.all(grid[0, -1] == torch.tensor([1.0, 1.0]))
-        else:
-            assert torch.all(grid[0, 0] == torch.tensor([0, 0]))
-            assert torch.all(grid[0, -1] == torch.tensor([3, 3]))
 
-    @pytest.mark.parametrize("size", [(4, 4), (32, 32)])
-    def test_create_grid_with_noise(self, size):
-        torch.random.manual_seed(0)
-        grid1 = PositionEncoder.create_grid(size, normalize=False, add_noise=True)
-        grid2 = PositionEncoder.create_grid(size, normalize=False)
-        assert grid1.shape == grid2.shape == (1, size[0] * size[1], 2)
-        assert ((grid1 - grid2).abs() <= 0.5).all()
+def test_relative_factorized_position_forward():
+    C, D = 2, 16
+    dims = (4, 4)
+    w_in = torch.randn(2 * D, C)
+    b_in = torch.randn(2 * D)
+    w_out = torch.randn(D, 2 * D)
+    b_out = torch.randn(D)
+    norm_w = torch.randn(D)
+    norm_b = torch.randn(D)
 
-    @pytest.mark.parametrize("size", [(4, 4), (32, 32)])
-    def test_create_normalized_grid_with_noise(self, size):
-        torch.random.manual_seed(0)
-        grid1 = PositionEncoder.create_grid(size, normalize=True, add_noise=True)
-        grid2 = PositionEncoder.create_grid(size, normalize=True)
-        assert grid1.shape == grid2.shape == (1, size[0] * size[1], 2)
-        assert ((grid1 - grid2).abs() <= 1 / (max(size) - 1)).all()
+    torch.random.manual_seed(0)
+    actual = relative_factorized_position_forward(
+        dims, w_in, b_in, w_out, b_out, norm_w, norm_b, F.relu, training=False
+    )
+
+    grid = create_grid(dims, normalize=True)
+    grid = grid * math.sqrt(3)
+    torch.random.manual_seed(0)
+    # MLP uses output dropout, position encoding does not. So we must set training=False.
+    expected = mlp_forward(grid, w_in, w_out, b_in, b_out, activation=F.relu, training=False)
+    expected = F.layer_norm(expected, (D,), weight=norm_w, bias=norm_b)
+
+    assert_close(actual, expected, atol=0.001, rtol=0)
 
 
 class TestRelativeFactorizedPosition:
@@ -47,12 +57,12 @@ class TestRelativeFactorizedPosition:
         ],
     )
     def test_forward(self, device):
-        B, L, C, D = 2, 32, 2, 16
+        C, D = 2, 16
         torch.random.manual_seed(0)
         layer = RelativeFactorizedPosition(C, D).to(device)
-        grid = torch.randn(B, L, C, device=device)
-        out = layer(grid)
-        assert out.shape == (B, L, D)
+        out = layer((8, 8))
+        L = 64
+        assert out.shape == (1, L, D)
 
     @pytest.mark.parametrize(
         "device",
@@ -61,19 +71,44 @@ class TestRelativeFactorizedPosition:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
-    def test_lora(self, device):
-        B, L, C, D = 2, 32, 2, 16
+    def test_backward(self, device):
+        C, D = 2, 16
         torch.random.manual_seed(0)
         layer = RelativeFactorizedPosition(C, D).to(device)
-        grid = torch.randn(B, L, C, device=device, requires_grad=True)
+        out = layer((8, 8))
+        out.sum().backward()
 
-        layer = layer.apply_lora(target=[LoRATarget.POSITION], rank=4, alpha=16)
-        assert isinstance(layer.proj.fc1, LoRALinear)
-        assert isinstance(layer.proj.fc2, LoRALinear)
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    def test_forward_deterministic(self, device):
+        C, D = 2, 16
+        torch.random.manual_seed(0)
+        layer = RelativeFactorizedPosition(C, D, dropout=0.1).to(device)
+        out1 = layer((8, 8))
+        out2 = layer((8, 8))
+        assert not torch.allclose(out1, out2)
 
-        with torch.autocast(device_type=device, dtype=torch.float16):
-            out = layer(grid)
-        assert out.shape == (B, L, D)
+        layer.eval()
+        out1 = layer((8, 8))
+        out2 = layer((8, 8))
+        assert torch.allclose(out1, out2)
 
-        for name, param in layer.named_parameters():
-            assert param.requires_grad == ("lora_a" in name or "lora_b" in name)
+    def test_reset_parameters(self, mocker):
+        C, D = 2, 16
+        spy = mocker.spy(RelativeFactorizedPosition, "reset_parameters")
+        layer = RelativeFactorizedPosition(C, D, dropout=0.1)
+        spy.assert_called_once()
+        weights_original = {name: param.clone() for name, param in layer.named_parameters()}
+        layer.reset_parameters()
+        weights_reset = {name: param for name, param in layer.named_parameters()}
+
+        for name, param in weights_original.items():
+            # Ignore constant weights or biases
+            if (param == 0).all() or (param == 1).all():
+                continue
+            assert not torch.allclose(param, weights_reset[name], equal_nan=True)

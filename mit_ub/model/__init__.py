@@ -1,12 +1,18 @@
 from typing import Final
 
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from registry import Registry
 
 from .backbone import AdaptiveViT, ViT
 from .convnext import ConvNext
+from .helpers import compile_is_disabled
+from .mlp import identity
 from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
+
+torch._dynamo.config.cache_size_limit = 32  # type: ignore
 
 BACKBONES = Registry("backbones")
 QUERY_GROUPS: Final = 2
@@ -111,8 +117,11 @@ BACKBONES(
     nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     num_kv_heads=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     dropout=0.1,
-    position_noise=False,
     stochastic_depth=0.1,
+    bias=False,
+    qk_norm=True,
+    activation=identity,
+    gate_activation=F.silu,
 )
 
 
@@ -126,11 +135,14 @@ BACKBONES(
     nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     num_kv_heads=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     dropout=0.1,
-    num_experts=4,
-    # 1 slot per token
-    num_slots=4,
-    moe_layers=[6, 11],
     stochastic_depth=0.1,
+    bias=False,
+    qk_norm=True,
+    activation=identity,
+    gate_activation=F.silu,
+    num_experts=8,
+    num_slots=32,
+    moe_layers=[11],
 )
 
 
@@ -189,4 +201,13 @@ BACKBONES(
     norm_layer=nn.BatchNorm2d,
 )
 
-__all__ = ["BACKBONES", "ViT", "TransformerEncoderLayer", "TransformerDecoderLayer", "AdaptiveViT", "ConvNext"]
+__all__ = [
+    "BACKBONES",
+    "ViT",
+    "TransformerEncoderLayer",
+    "TransformerDecoderLayer",
+    "AdaptiveViT",
+    "ConvNext",
+    "compile_is_disabled",
+    "identity",
+]

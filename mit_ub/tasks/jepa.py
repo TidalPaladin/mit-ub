@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from typing import Any, Dict, Final, List, Optional, Set, Tuple, cast
+from typing import Any, Dict, Final, List, Optional, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -8,20 +8,21 @@ import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
-from ssl_tasks.tokens import TokenMask
+from deep_helpers.tokens import apply_mask, create_mask
 from torch import Tensor
 from torch.distributed import ReduceOp, all_reduce
 from torch.distributed import barrier as dist_barrier
 from torch.optim.optimizer import Optimizer
 
-from ..model import BACKBONES, AdaptiveViT, TransformerEncoderLayer, ViT
+from ..model import BACKBONES, AdaptiveViT, ViT, compile_is_disabled
 from ..model.pos_enc import RelativeFactorizedPosition
+from ..model.transformer import TransformerDecoderLayer
 
 
 EPS: Final = 1e-8
 
 
-@torch.compile(fullgraph=True)
+@torch.compile(fullgraph=True, disable=compile_is_disabled())
 def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: int, eps: float = EPS) -> Tensor:
     r"""Compute the average pairwise cosine similarity without manifesting the full pairwise matrix.
 
@@ -38,32 +39,6 @@ def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: 
     y = x.mean(pairwise_dim, keepdim=True).norm(dim=embed_dim, keepdim=True).pow(2).squeeze(embed_dim, pairwise_dim)
     y.sub(1 / N).mul(N / (N - 1))
     return y
-
-
-@torch.compile(fullgraph=True)
-def cosine_similarity_loss(x: Tensor, y: Tensor, eps: float = EPS) -> Tensor:
-    y = 1 - F.cosine_similarity(x, y, dim=-1, eps=eps)
-    return y.mean()
-
-
-@torch.compile(fullgraph=True)
-def sample_tokens(x: Tensor, ratio: float) -> Tensor:
-    B, L_in, _ = x.shape
-    L_out = int(L_in * ratio)
-
-    # Create array of token indices
-    token_idx = torch.arange(L_in).unsqueeze_(0).expand(B, -1)
-
-    # Create a random sort order for each example
-    sort_order = torch.rand_like(token_idx, dtype=torch.float32)
-
-    # Sort each example's tokens by it's random sort order
-    indices = torch.argsort(sort_order, dim=-1)[..., :L_out]
-    token_idx = torch.gather(token_idx, dim=-1, index=indices)
-
-    # Build final result with
-    batch_idx = torch.arange(B).view(B, 1).expand(-1, L_out)
-    return x[batch_idx.flatten(), token_idx.flatten()].view(B, L_out, -1).contiguous()
 
 
 class JEPA(Task):
@@ -85,6 +60,7 @@ class JEPA(Task):
         context_subsample_ratio: Sampling ratio for encoded context just before passing
             it to the predictor.
         ema_alpha: Smoothing factor for EMA updates.
+        momentum_schedule: If True, use a momentum schedule for EMA updates.
         predictor_depth: Depth of the predictor network.
         mixup_alpha: Alpha parameter for the Beta distribution used to sample the mixup weight.
         mixup_prob: Probability of applying mixup to the input and target.
@@ -97,7 +73,7 @@ class JEPA(Task):
         strict_checkpoint: If True, the model must exactly match the checkpoint.
         log_train_metrics_interval: Interval (in steps) at which to log training metrics.
         log_train_metrics_on_epoch: If True, log training metrics at the end of each epoch.
-        weight_decay_exemptions: Set of parameter names to exempt from weight decay.
+        parameter_groups: Dictionary of parameter groups and their corresponding weight decay values.
         weight_decay_final: Final weight decay value. If set, the weight decay will be linearly
             annealed from the current value to this value over the course of training.
     """
@@ -113,6 +89,7 @@ class JEPA(Task):
         target_scale: int = 2,
         context_subsample_ratio: float = 0.5,
         ema_alpha: float = 0.95,
+        momentum_schedule: bool = False,
         predictor_depth: int = 4,
         mixup_alpha: float = 1.0,
         mixup_prob: float = 0.2,
@@ -125,7 +102,7 @@ class JEPA(Task):
         strict_checkpoint: bool = True,
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
-        weight_decay_exemptions: Set[str] = set(),
+        parameter_groups: List[Dict[str, Any]] = [],
         weight_decay_final: float | None = None,
     ):
         super().__init__(
@@ -138,7 +115,7 @@ class JEPA(Task):
             strict_checkpoint,
             log_train_metrics_interval,
             log_train_metrics_on_epoch,
-            weight_decay_exemptions,
+            parameter_groups,
         )
         self.context_ratio = context_ratio
         self.context_scale = context_scale
@@ -149,6 +126,7 @@ class JEPA(Task):
         assert self.target_ratio > 0
         assert self.context_subsample_ratio > 0
         self.ema_alpha = ema_alpha
+        self.momentum_schedule = momentum_schedule
         self.weight_decay_final = weight_decay_final
         self.mixup_alpha = mixup_alpha
         self.mixup_prob = mixup_prob
@@ -167,52 +145,31 @@ class JEPA(Task):
         )
 
         # Projections for the input context and output predictions
-        self.context_proj = nn.Linear(self.backbone.dim, self.backbone.dim)
-        self.out_proj = nn.Sequential(
-            nn.LayerNorm(self.backbone.dim),
-            nn.Linear(self.backbone.dim, self.backbone.dim),
-        )
+        self.jepa_norm = nn.LayerNorm(self.backbone.dim)
+        self.jepa_out_proj = nn.Linear(self.backbone.dim, self.backbone.dim)
+        nn.init.xavier_uniform_(self.jepa_out_proj.weight)
+        nn.init.zeros_(self.jepa_out_proj.bias)
 
         # JEPA predictor
-        encoder_proto = next(filter(lambda l: isinstance(l, TransformerEncoderLayer), self.backbone.modules()), None)
-        if encoder_proto is None:
-            raise ValueError(
-                "Could not find encoder prototype in backbone. "
-                "Ensure the backbone has a TransformerEncoderLayer module."
-            )
-        self.jepa_predictor = nn.ModuleList([deepcopy(encoder_proto) for _ in range(predictor_depth)])
-        for block in self.jepa_predictor:
-            block.reset_parameters()
-
+        self.jepa_predictor = nn.ModuleList(
+            [self.backbone.create_decoder_layer(i, stochastic_depth=0.0) for i in range(predictor_depth)]
+        )
         self.save_hyperparameters()
 
     def prepare_backbone(self, name: str) -> nn.Module:
         return BACKBONES.get(name).instantiate_with_metadata().fn
 
-    def create_mask(self, x: Tensor, unmasked_ratio: float, scale: int) -> TokenMask:
-        size = x.shape[2:]
-
-        # For AdaptiveViT we choose a token mask that matches the size of the fixed token grid produced
-        # by the ViT.
-        if isinstance(self.backbone, AdaptiveViT):
-            size = self.backbone.stem.equivalent_size(cast(Any, size))
-
+    def create_mask(self, x: Tensor, unmasked_ratio: float, scale: int) -> Tensor:
         batch_size = x.shape[0]
         device = x.device
-        mask = TokenMask.create(
+        size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
+        mask = create_mask(
             size,
-            self.backbone.stem.patch_size,
-            batch_size,
-            device=device,
             mask_ratio=1 - unmasked_ratio,
+            batch_size=batch_size,
             scale=scale,
+            device=device,
         )
-
-        # If we get unlucky and sample a complete mask, just sample again
-        if not mask.mask.any():
-            return self.create_mask(x, unmasked_ratio, scale)
-
-        assert not mask.is_ragged, "Mask should not be ragged"
         return mask
 
     def create_metrics(self, state: State) -> tm.MetricCollection:
@@ -224,37 +181,28 @@ class JEPA(Task):
             }
         )
 
-    def forward(self, x: Tensor, context_mask: TokenMask, target_mask: TokenMask) -> Dict[str, Tensor]:
+    def forward(self, x: Tensor, context_mask: Tensor, target_mask: Tensor) -> Dict[str, Tensor]:
         # Run encoder on context
         context: Tensor = self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
+        B, L, _ = context.shape
 
         # Sample a subset of the context as input to the predictor and project
-        context = sample_tokens(context, self.context_subsample_ratio)
-        context = self.context_proj(context)
+        if self.context_subsample_ratio < 1.0:
+            subsample_mask = create_mask((L,), mask_ratio=1 - self.context_subsample_ratio, batch_size=B)
+            context = apply_mask(subsample_mask, context, fill_value=None)
 
         # Prepare positional encoding for target queries
-        B, _, _ = context.shape
         tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
-        with torch.autocast(device_type=x.device.type, dtype=torch.float32):
-            query = self.pos_enc.from_grid(
-                tokenized_size,
-                B,
-                proto=context.to(torch.float32, copy=False),
-                normalize=True,
-                add_noise=self.training and self.backbone._position_noise,
-            ).contiguous()
-        query = target_mask.apply_to_tokens(query, fill_value=None)
-        L = query.shape[1]
+        query = self.pos_enc(tokenized_size).expand(B, -1, -1)
+        query = apply_mask(target_mask, query, fill_value=None)
 
         # Run query and context through predictor
-        query = torch.cat([query, context], dim=1)
         for block in self.jepa_predictor:
-            block = cast(TransformerEncoderLayer, block)
-            query = block(query)
+            block = cast(TransformerDecoderLayer, block)
+            query = block(query, context)
 
-        # Separate predictions from context
-        pred = self.out_proj(query[:, :L])
-
+        pred = self.jepa_norm(query)
+        pred = self.jepa_out_proj(pred)
         return {"jepa": pred, "jepa_context": context}
 
     @property
@@ -272,6 +220,8 @@ class JEPA(Task):
 
     def get_ema_momentum(self) -> float:
         r"""Get the momentum for the EMA update based on the current step or epoch."""
+        if not self.momentum_schedule:
+            return self.ema_alpha
         fraction_complete = self.fraction_complete
         fraction_complete = fraction_complete if fraction_complete is not None else 0.0
         return self.ema_alpha + (1 - self.ema_alpha) * fraction_complete
@@ -301,21 +251,21 @@ class JEPA(Task):
                 ema_param.data /= self.trainer.world_size
             dist_barrier()
 
-    def update_weight_decay(self) -> None:
+    def update_weight_decay(self) -> List[float | None]:
         """Update the weight decay for each parameter group based on the current training progress."""
         assert self.weight_decay_final is not None
-
-        # Check where we are in the training loop, abort if we can't determine
-        fraction_complete = self.fraction_complete
-        if fraction_complete is None:
-            return
 
         # Get optimizer and wrap as a list if necessary
         optimizers = self.optimizers()
         optimizers = [optimizers] if isinstance(optimizers, Optimizer) else optimizers
         optimizers = cast(List[Optimizer], optimizers)
 
-        def update_weight_decay(pg: Dict[str, Any]) -> None:
+        # Check where we are in the training loop, abort if we can't determine
+        fraction_complete = self.fraction_complete
+        if fraction_complete is None:
+            return [pg.get("weight_decay", None) for opt in optimizers for pg in opt.param_groups]
+
+        def update_weight_decay(pg: Dict[str, Any]) -> float | None:
             current_wd = pg["weight_decay"]
             # Some layers may be exempt from weight decay
             if current_wd == 0:
@@ -323,14 +273,16 @@ class JEPA(Task):
 
             initial_wd = pg.setdefault("initial_weight_decay", current_wd)
             final_wd = self.weight_decay_final
-            new_wd = initial_wd + (final_wd - initial_wd) * fraction_complete
+            new_wd = max(current_wd, initial_wd + (final_wd - initial_wd) * fraction_complete)
             pg["weight_decay"] = new_wd
+            return new_wd
 
         # Update weight decay for each optimizer
-        map(
+        updates = map(
             update_weight_decay,
             (pg for optimizer in optimizers for pg in optimizer.param_groups if "weight_decay" in pg),
         )
+        return list(updates)
 
     @torch.no_grad()
     def mixup(self, x: Tensor, target: Tensor) -> Tuple[Tensor, Tensor]:
@@ -365,7 +317,7 @@ class JEPA(Task):
         )
         target = torch.where(
             right_broadcast(mixup_mask, target),
-            target.roll(1, 0).lerp_(target, right_broadcast(lam, target)),
+            target.roll(1, 0).lerp_(target, right_broadcast(lam.type_as(target), target)),
             target,
         )
         return x, target
@@ -377,6 +329,7 @@ class JEPA(Task):
         state: State,
         metrics: Optional[tm.MetricCollection] = None,
     ) -> Dict[str, Any]:
+        torch.compiler.cudagraph_mark_step_begin()
         x: Tensor = batch["img"]
 
         # ema update from previous step when training
@@ -398,9 +351,9 @@ class JEPA(Task):
             # apply mixup, not overwriting full_target
             if self.training and self.mixup_prob > 0:
                 x, full_target_mixed = self.mixup(x, full_target)
-                target = target_mask.apply_to_tokens(full_target_mixed, fill_value=None)
+                target = apply_mask(target_mask, full_target_mixed, fill_value=None)
             else:
-                target = target_mask.apply_to_tokens(full_target, fill_value=None)
+                target = apply_mask(target_mask, full_target, fill_value=None)
 
         # generate predictions by encoding the context and then running the encoded context
         # plus the positional target queries through the predictor
@@ -410,7 +363,7 @@ class JEPA(Task):
 
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
-        loss = cosine_similarity_loss(pred, target)
+        loss = F.smooth_l1_loss(pred, target)
 
         # Compute metrics
         if metrics is not None:
@@ -449,6 +402,7 @@ class JEPAWithProbe(JEPA, ABC):
         target_scale: int = 2,
         context_subsample_ratio: float = 0.5,
         ema_alpha: float = 0.95,
+        momentum_schedule: bool = False,
         predictor_depth: int = 4,
         mixup_alpha: float = 1.0,
         mixup_prob: float = 0.2,
@@ -461,7 +415,7 @@ class JEPAWithProbe(JEPA, ABC):
         strict_checkpoint: bool = True,
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
-        weight_decay_exemptions: Set[str] = set(),
+        parameter_groups: List[Dict[str, Any]] = [],
         weight_decay_final: float | None = None,
     ):
         super().__init__(
@@ -472,6 +426,7 @@ class JEPAWithProbe(JEPA, ABC):
             target_scale,
             context_subsample_ratio,
             ema_alpha,
+            momentum_schedule,
             predictor_depth,
             mixup_alpha,
             mixup_prob,
@@ -484,7 +439,7 @@ class JEPAWithProbe(JEPA, ABC):
             strict_checkpoint,
             log_train_metrics_interval,
             log_train_metrics_on_epoch,
-            weight_decay_exemptions,
+            parameter_groups,
             weight_decay_final,
         )
         self.linear_probe = self.create_probe_head()

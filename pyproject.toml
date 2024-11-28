@@ -10,14 +10,12 @@ authors = [
     {name = "Scott Chase Waggener", email = "tidalpaladin@protonmail.com"},
 ]
 dependencies = [
-    "setuptools",
     "numpy",
     "pydicom",
     "torch",
     "torchvision",
     "torchmetrics",
     "pytorch-lightning",
-    "lightning-bolts",
     "timm>=0.5.4",
     "einops",
     "pandas",
@@ -26,21 +24,20 @@ dependencies = [
     "registry @ git+https://github.com/TidalPaladin/callable-registry.git",
     "dicom-utils @ git+https://github.com/medcognetics/dicom-utils.git",
     "torch-dicom[datamodule] @ git+https://github.com/medcognetics/torch-dicom.git",
-    "triton-helpers @ git+https://github.com/TidalPaladin/triton-helpers.git",
     "jsonargparse[signatures]",
-    "triton>=2.0",
-    "pip>=24.0",
-    "ipykernel>=6.29.4",
-    "plotly",
-    "nbformat>=4.2.0",
     "tqdm-multiprocessing",
-    "ssl-tasks @ git+https://github.com/TidalPaladin/ssl-tasks.git",
     "torchtune>=0.2.1",
+    "torchao>=0.5.0",
+    "bitsandbytes>=0.44.1",
 ]
 readme = "README.md"
 license = {text = "Apache"}
 dynamic = ["version"]
 
+[project.optional-dependencies]
+docs = [
+    "manim>=0.18.1",
+]
 [tool.autoflake]
 remove-all-unused-imports = true
 remove-unused-variables = true
@@ -113,6 +110,7 @@ filterwarnings = [
 [tool.pytest_env]
 TRITON_DEBUG = "1"
 TORCH_LOGS = "recompiles,dynamic"
+TORCH_COMPILE = "0"
 
 [tool.coverage.run]
 omit = [

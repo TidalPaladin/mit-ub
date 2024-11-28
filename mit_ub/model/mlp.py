@@ -1,16 +1,14 @@
-from copy import deepcopy
-from functools import partial
-from typing import Sequence, cast
+from typing import Callable, Final
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from .lora import LoRATarget, SupportsLoRA, apply_lora, freeze_non_lora
+from .helpers import compile_backend, compile_is_disabled
 
 
-@torch.compile(fullgraph=True)
+@torch.compile(fullgraph=True, backend=compile_backend(), disable=compile_is_disabled())
 def relu2(x: Tensor) -> Tensor:
     r"""Computes squared ReLU of an input."""
     # NOTE: This is roughly as fast as the custom triton kernel
@@ -18,13 +16,60 @@ def relu2(x: Tensor) -> Tensor:
     return y * y
 
 
-class ReLU2(nn.Module):
-
-    def forward(self, x: Tensor) -> Tensor:
-        return relu2(x)
+def identity(x: Tensor) -> Tensor:
+    return x
 
 
-class MLP(nn.Module, SupportsLoRA):
+DEFAULT_MLP_ACTIVATION: Final = relu2
+DEFAULT_MLP_GATE_ACTIVATION: Final = None
+
+
+@torch.compile(
+    fullgraph=True,
+    backend=compile_backend(),
+    options={
+        "max_autotune": True,
+        "epilogue_fusion": True,
+        "shape_padding": True,
+        "triton.cudagraph_trees": True,
+    },
+    disable=compile_is_disabled(),
+)
+def mlp_forward(
+    x: Tensor,
+    w1: Tensor,
+    w2: Tensor,
+    b1: Tensor | None = None,
+    b2: Tensor | None = None,
+    w_gate: Tensor | None = None,
+    b_gate: Tensor | None = None,
+    dropout: float = 0.0,
+    activation: Callable[[Tensor], Tensor] = DEFAULT_MLP_ACTIVATION,
+    gate_activation: Callable[[Tensor], Tensor] | None = DEFAULT_MLP_GATE_ACTIVATION,
+    w_norm: Tensor | None = None,
+    b_norm: Tensor | None = None,
+    eps: float = 1e-5,
+    training: bool = False,
+) -> Tensor:
+    if w_norm is not None:
+        x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
+
+    y = F.linear(x, w1, b1)
+    y = activation(y)
+
+    if w_gate is not None:
+        gate = F.linear(x, w_gate, b_gate)
+        if gate_activation is not None:
+            gate = gate_activation(gate)
+        y = y * gate
+
+    y = F.dropout(y, p=dropout, training=training, inplace=True)
+    y = F.linear(y, w2, b2)
+    y = F.dropout(y, p=dropout, training=training, inplace=True)
+    return y
+
+
+class MLP(nn.Module):
     """
     A multi-layer perceptron (MLP) module with optional gating mechanism and dropout.
 
@@ -36,13 +81,13 @@ class MLP(nn.Module, SupportsLoRA):
         activation: Activation function to apply after the first linear layer.
         gate_activation: Activation function for the gating mechanism, or ``None`` for no gating.
         bias: Whether to use bias in the linear layers.
-        output_dropout: Whether to apply dropout to the output layer.
+        norm: Whether to apply layer normalization to the input.
 
     Basic MLP:
-        >>> mlp = MLP(10, 20, 10, activation=nn.ReLU())
+        >>> mlp = MLP(10, 20, 10))
 
     Gated Linear Unit (GLU):
-        >>> mlp = MLP(10, 20, 10, activation=nn.Identity(), gate_activation=nn.Sigmoid())
+        >>> mlp = MLP(10, 20, 10, activation=lambda x: x, gate_activation=torch.sigmoid)
     """
 
     def __init__(
@@ -51,71 +96,78 @@ class MLP(nn.Module, SupportsLoRA):
         hidden_features: int,
         out_features: int,
         dropout: float = 0.0,
-        activation: nn.Module = ReLU2(),
-        gate_activation: nn.Module | None = None,
+        activation: Callable[[Tensor], Tensor] = DEFAULT_MLP_ACTIVATION,
+        gate_activation: Callable[[Tensor], Tensor] | None = DEFAULT_MLP_GATE_ACTIVATION,
         bias: bool = True,
-        output_dropout: bool = False,
+        norm: bool = False,
     ):
         super().__init__()
-        self.fc1 = nn.Linear(in_features, hidden_features, bias=bias)
-        self.fc2 = nn.Linear(hidden_features, out_features, bias=bias)
-        self.dropout = nn.Dropout(dropout)
-        self.output_dropout = nn.Dropout(dropout) if output_dropout else nn.Identity()
-        self.activation = deepcopy(activation)
+        self.dropout = dropout
+        self.activation = activation
+        self.gate_activation = gate_activation
+
+        # Register optional parameters
+        for prefix in ("w_", "b_"):
+            for suffix in ("norm", "in", "out", "gate"):
+                self.register_parameter(f"{prefix}{suffix}", None)
+
+        self.w_in = nn.Parameter(torch.empty(hidden_features, in_features))
+        self.w_out = nn.Parameter(torch.empty(out_features, hidden_features))
+
+        if norm:
+            self.w_norm = nn.Parameter(torch.empty(in_features))
+            self.b_norm = nn.Parameter(torch.empty(in_features))
+
+        if bias:
+            self.b_in = nn.Parameter(torch.empty(hidden_features))
+            self.b_out = nn.Parameter(torch.empty(out_features))
 
         if gate_activation is not None:
-            self.gate = nn.Sequential(
-                nn.Linear(in_features, hidden_features, bias=bias),
-                deepcopy(gate_activation),
-            )
-        else:
-            self.gate = None
+            self.w_gate = nn.Parameter(torch.empty(hidden_features, in_features))
+            self.b_gate = nn.Parameter(torch.empty(hidden_features)) if bias else None
+
+        self.reset_parameters()
 
     def reset_parameters(self):
-        self.fc1.reset_parameters()
-        self.fc2.reset_parameters()
-        if self.gate is not None:
-            self.gate[0].reset_parameters()
+        for name, param in self.named_parameters():
+            if name.startswith("b_"):
+                nn.init.zeros_(param)
+            elif "norm" in name:
+                nn.init.ones_(param)
+            elif name.startswith("w_"):
+                nn.init.xavier_uniform_(param)
+            else:
+                raise ValueError(f"Unsure how to initialize {name}")
 
     @property
     def in_features(self) -> int:
-        return self.fc1.in_features
+        return self.w_in.shape[-1]
 
     @property
     def out_features(self) -> int:
-        return self.fc2.out_features
+        return self.w_out.shape[-1]
 
     @property
     def hidden_features(self) -> int:
-        return self.fc1.out_features
+        return self.w_in.shape[-2]
+
+    @property
+    def norm(self) -> bool:
+        return self.w_norm is not None
 
     def forward(self, x: Tensor) -> Tensor:
-        y = self.activation(self.fc1(x))
-
-        if self.gate is not None:
-            y = y * self.gate(x)
-
-        y = self.dropout(y)
-        y = self.fc2(y)
-        y = self.output_dropout(y)
-        return y
-
-    def apply_lora(
-        self,
-        target: Sequence[LoRATarget],
-        rank: int,
-        alpha: float,
-        dropout: float = 0.0,
-        quantize_base: bool = False,
-    ) -> nn.Module:
-        _apply_lora = partial(apply_lora, rank=rank, alpha=alpha, dropout=dropout, quantize_base=quantize_base)
-
-        if LoRATarget.FEEDFORWARD in target:
-            self.fc1 = _apply_lora(cast(nn.Linear, self.fc1))
-            self.fc2 = _apply_lora(cast(nn.Linear, self.fc2))
-            if self.gate is not None:
-                self.gate[0] = _apply_lora(cast(nn.Linear, self.gate[0]))
-
-        # Freeze all non-LoRA matrices/weights
-        freeze_non_lora(self)
-        return self
+        return mlp_forward(
+            x,
+            self.w_in,
+            self.w_out,
+            self.b_in,
+            self.b_out,
+            self.w_gate,
+            self.b_gate,
+            self.dropout,
+            self.activation,
+            self.gate_activation,
+            self.w_norm,
+            self.b_norm,
+            training=self.training,
+        )

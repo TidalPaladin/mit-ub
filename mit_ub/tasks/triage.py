@@ -2,7 +2,7 @@ import hashlib
 import math
 import sys
 from pathlib import Path
-from typing import Any, Dict, Final, Iterable, List, Optional, Set, Tuple, cast
+from typing import Any, Dict, Final, Iterable, List, Optional, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -143,6 +143,7 @@ class TriageTask(Task):
 
     Args:
         backbone: Name of the backbone to use for the task.
+        focal_loss: Whether to use focal loss instead of BCE loss.
         optimizer_init: Initial configuration for the optimizer.
         lr_scheduler_init: Initial configuration for the learning rate scheduler.
         lr_interval: Frequency of learning rate update. Can be 'step' or 'epoch'.
@@ -152,7 +153,8 @@ class TriageTask(Task):
         strict_checkpoint: If True, the model must exactly match the checkpoint.
         log_train_metrics_interval: Interval (in steps) at which to log training metrics.
         log_train_metrics_on_epoch: If True, log training metrics at the end of each epoch.
-        weight_decay_exemptions: Set of parameter names to exempt from weight decay.
+        parameter_groups: Dictionary of parameter groups for the optimizer, where keys are
+            tuples of parameter names and values are dictionaries of optimizer settings.
     """
 
     def __init__(
@@ -168,7 +170,7 @@ class TriageTask(Task):
         strict_checkpoint: bool = True,
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
-        weight_decay_exemptions: Set[str] = set(),
+        parameter_groups: List[Dict[str, Any]] = [],
     ):
         super().__init__(
             optimizer_init,
@@ -180,7 +182,7 @@ class TriageTask(Task):
             strict_checkpoint,
             log_train_metrics_interval,
             log_train_metrics_on_epoch,
-            weight_decay_exemptions,
+            parameter_groups,
         )
 
         self.backbone = cast(ViT, self.prepare_backbone(backbone))
@@ -414,7 +416,7 @@ class BreastTriage(TriageTask):
         strict_checkpoint: bool = True,
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
-        weight_decay_exemptions: Set[str] = set(),
+        parameter_groups: List[Dict[str, Any]] = [],
     ):
         super().__init__(
             backbone,
@@ -428,7 +430,7 @@ class BreastTriage(TriageTask):
             strict_checkpoint,
             log_train_metrics_interval,
             log_train_metrics_on_epoch,
-            weight_decay_exemptions,
+            parameter_groups,
         )
         self.pos_weight = pos_weight
         self.standard_view_weight = standard_view_weight
