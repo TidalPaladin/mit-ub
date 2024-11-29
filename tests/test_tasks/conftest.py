@@ -1,6 +1,6 @@
 import pytest
 
-from mit_ub.model import BACKBONES, AdaptiveViT, ViT
+from mit_ub.model import BACKBONES, AdaptiveViT, ConvNext, ViT
 
 
 @pytest.fixture
@@ -46,6 +46,22 @@ def vit_adaptive_dummy():
         override=True,
     )
     return "vit-adaptive-dummy"
+
+
+@pytest.fixture(scope="session")
+def convnext_dummy():
+    BACKBONES(
+        ConvNext,
+        name="convnext-dummy",
+        in_channels=1,
+        depths=(2, 2, 2),
+        dims=(32, 64, 128),
+        patch_size=1,
+        kernel_size=3,
+        dropout=0.1,
+        override=True,
+    )
+    return "convnext-dummy"
 
 
 @pytest.fixture(scope="session", params=["vit-dummy", "vit-adaptive-dummy"])

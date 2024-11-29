@@ -4,7 +4,7 @@ fit:
   float32_matmul_precision: medium
   trainer:
     accelerator: gpu
-    devices: [1]
+    devices: [2]
     precision: "bf16-mixed"
     max_steps: 50000
     num_sanity_val_steps: 0
@@ -25,13 +25,15 @@ fit:
       init_args:
         save_dir: /mnt/flash/mitub
         project: mit-ub
-        name: cifar10-convnext
+        name: cifar10-convnext-distill
 
   model:
-    class_path: mit_ub.tasks.ClassificationTask
+    class_path: mit_ub.tasks.Distillation
     init_args:
       backbone: "convnext-cifar10"
-      num_classes: 10
+      teacher_backbone: "vit-cifar10"
+      teacher_checkpoint: /mnt/flash/mitub/mit-ub/rd3wqe2k/checkpoints/last.ckpt
+
       optimizer_init:
         class_path: bitsandbytes.optim.AdamW8bit
         init_args:
@@ -50,7 +52,10 @@ fit:
           initial_momentum: 0.95
       parameter_groups:
         - params:
-            - "classification_head"
+            - "backbone"
+          lr: 0.0001
+        - params:
+            - "distill_proj"
           weight_decay: 1.0
 
 

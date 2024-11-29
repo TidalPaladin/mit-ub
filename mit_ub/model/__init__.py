@@ -1,7 +1,6 @@
 from typing import Final
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from registry import Registry
 
@@ -183,23 +182,27 @@ BACKBONES(
     name="convnext-cifar10",
     in_channels=3,
     depths=(3, 5, 7),
-    dims=(128, 256, 512),
+    dims=(128, 256, 384),
     patch_size=2,
-    dropout=0.1,
     kernel_size=3,
+    dropout=0.1,
+    stochastic_depth=0.1,
+    bias=False,
+    # activation=identity,
+    # gate_activation=F.silu,
 )
 
-BACKBONES(
-    ConvNext,
-    name="convnext-mammo",
-    in_channels=1,
-    depths=(3, 5, 7, 15, 3),
-    dims=(128, 256, 512, 1024, 2048),
-    patch_size=8,
-    dropout=0.1,
-    kernel_size=7,
-    norm_layer=nn.BatchNorm2d,
-)
+# BACKBONES(
+#    ConvNext,
+#    name="convnext-mammo",
+#    in_channels=1,
+#    depths=(3, 5, 7, 15, 3),
+#    dims=(128, 256, 512, 1024, 2048),
+#    patch_size=8,
+#    dropout=0.1,
+#    kernel_size=7,
+#    norm_layer=nn.BatchNorm2d,
+# )
 
 __all__ = [
     "BACKBONES",

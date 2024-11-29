@@ -64,15 +64,15 @@ class ClassificationTask(Task):
 
         self.backbone = cast(ViT, self.prepare_backbone(backbone))
         dim = self.backbone.dim
-        self.classification_head = nn.Sequential(
+        self.classification_trunk = nn.Sequential(
             nn.AdaptiveAvgPool2d((1, 1)),
             Rearrange("b c () () -> b c"),
             nn.LayerNorm(dim),
             nn.Dropout(0.1),
-            nn.Linear(dim, num_classes),
         )
-        nn.init.zeros_(self.classification_head[-1].bias)
-        nn.init.trunc_normal_(self.classification_head[-1].weight, std=0.02)
+        self.classification_head = nn.Linear(dim, num_classes)
+        nn.init.xavier_uniform_(self.classification_head.weight)
+        nn.init.zeros_(self.classification_head.bias)
         self.criterion = nn.CrossEntropyLoss()
         self.save_hyperparameters()
 
@@ -88,7 +88,8 @@ class ClassificationTask(Task):
 
     def forward(self, x: Tensor) -> Dict[str, Tensor]:
         x = self.backbone(x)
-        cls = self.classification_head(x)
+        cls = self.classification_trunk(x)
+        cls = self.classification_head(cls)
         return {"pred": cls.view(-1, 1)}
 
     def step(
