@@ -7,8 +7,8 @@ fit:
     strategy: "ddp"
     precision: "bf16-mixed"
     max_steps: 250000
-    num_sanity_val_steps: 0
-    default_root_dir: /mnt/storage/users/chase/mitub
+    num_sanity_val_steps: 2
+    default_root_dir: /mnt/flash/chexpert
 
     callbacks:
       - class_path: pytorch_lightning.callbacks.ModelCheckpoint
@@ -22,47 +22,58 @@ fit:
     logger: 
       class_path: pytorch_lightning.loggers.wandb.WandbLogger
       init_args:
-        save_dir: /mnt/storage/users/chase/mitub
-        project: mit-ub
-        name: "mitub-rev6-chexpert-mjepa-p1"
+        save_dir: /mnt/flash/chexpert
+        project: chexpert
+        name: "mjepa-p1"
 
   model:
     class_path: mit_ub.tasks.JEPAChexpert
     init_args:
-      backbone: "vit-i1-p16-d512"
+      backbone: "chexpert-small"
 
       ema_alpha: 0.98
-      predictor_depth: 6
-      weight_decay_final: 0.5
+      weight_decay_final: null
+      momentum_schedule: false
 
       context_ratio: 0.5
       target_ratio: 0.25
       context_subsample_ratio: 0.5
       context_scale: 4
       target_scale: 2
+      predictor_depth: 4
 
       log_train_metrics_interval: 50
+
       optimizer_init:
-        class_path: torch.optim.AdamW
+        class_path: bitsandbytes.optim.AdamW8bit
         init_args:
-          lr: 0.0001
+          lr: 0.0005
           weight_decay: 0.05
+          betas: [0.85, 0.999]
       lr_interval: "step"
       lr_scheduler_init:
-        class_path: torch.optim.lr_scheduler.OneCycleLR
+        class_path: deep_helpers.optim.ReciprocalSquareRootLR
         init_args:
-          max_lr: 0.0001
-          div_factor: 2
-          final_div_factor: 50
-          pct_start: 0.10
-          three_phase: false
+          warmup_steps: 5000
+          cooldown_steps: 50000
           total_steps: 250000
+          timescale: 10000
+          initial_lr: 0.0001
+          initial_momentum: 0.95
+      parameter_groups:
+        - params:
+            - "jepa_predictor"
+            - "jepa_out_proj"
+          weight_decay: 0.25
+        - params:
+            - "linear_probe"
+          weight_decay: 1.0
 
   data:
     class_path: mit_ub.data.CheXpertDataModule
     init_args:
-      root: /mnt/active_1/chase/chexpert
-      batch_size: 32
+      root: /mnt/data/chexpert/lowres/
+      batch_size: 64
       num_workers: 12
       pin_memory: true
 
