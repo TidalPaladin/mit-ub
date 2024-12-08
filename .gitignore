@@ -148,3 +148,25 @@ coverage.xml
 
 # Animations
 docs/manim/media/
+
+# Latex
+*.aux
+*.bbl
+*.blg
+*.dvi
+*.fdb_latexmk
+*.fls
+*.gz
+*.lof
+*.log
+*.lot
+*.out
+*.pdf
+*.pdf_tex
+*.toc
+tmp*
+*.generated.png
+*.snm
+*.run.xml
+*.nav
+*.bcf
