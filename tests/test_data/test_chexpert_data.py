@@ -92,7 +92,7 @@ class TestCheXpertDataset:
         dataset = CheXpert(tmp_path, train=True)
         assert len(dataset) == 3
         e1 = dataset[0]
-        assert e1["img"].shape == (3, 128, 128)
+        assert e1["img"].shape == (1, 128, 128)
         assert e1["finding"] in [-1.0, 0.0, 1.0]
         assert e1["dense_label"].shape == (13,)
 
@@ -101,7 +101,7 @@ class TestCheXpertDataset:
         dataset = CheXpert(tmp_path, train=False)
         assert len(dataset) == 3
         e1 = dataset[0]
-        assert e1["img"].shape == (3, 128, 128)
+        assert e1["img"].shape == (1, 128, 128)
         assert e1["finding"] in [-1.0, 0.0, 1.0]
         assert e1["dense_label"].shape == (13,)
 

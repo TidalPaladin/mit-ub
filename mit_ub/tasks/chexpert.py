@@ -1,5 +1,5 @@
 from copy import copy
-from typing import Any, Dict, Optional, Set, cast, List
+from typing import Any, Dict, Optional, Set, cast
 
 import torch
 import torch.nn as nn
