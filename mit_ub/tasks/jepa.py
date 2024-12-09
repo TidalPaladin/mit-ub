@@ -326,6 +326,17 @@ class JEPA(Task):
         )
         return x, target
 
+    @torch.no_grad()
+    def apply_noise_batched(self, x: Tensor) -> Tensor:
+        r"""Applies noise to a batch of images such that each image in the batch is
+        independently transformed. This is an alternative to `self.random_noise` which
+        applies the same noise to all images in the batch.
+        """
+        x = x.clone()
+        for i in range(x.shape[0]):
+            x[i] = self.random_noise(x[i])
+        return x
+
     def step(
         self,
         batch: Any,
@@ -353,7 +364,7 @@ class JEPA(Task):
             full_target: Tensor = self.ema_backbone(x, reshape=False)
 
             # apply random noise
-            x = self.random_noise(x)
+            x = self.apply_noise_batched(x)
 
             # apply mixup, not overwriting full_target
             if self.training and self.mixup_prob > 0:
