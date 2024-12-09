@@ -3,7 +3,7 @@ fit:
   float32_matmul_precision: medium
   trainer:
     accelerator: gpu
-    devices: [2]
+    devices: [1]
     #strategy: "ddp_find_unused_parameters_true"
     precision: "bf16-mixed"
     max_steps: 50000
@@ -29,7 +29,7 @@ fit:
       init_args:
         save_dir: /mnt/flash/mitub
         project: mit-ub
-        name: "cifar10-vit-noise"
+        name: "cifar10-vit-noise-batch"
 
   model:
     class_path: mit_ub.tasks.JEPAWithClassification
@@ -37,16 +37,16 @@ fit:
       backbone: "vit-cifar10"
       num_classes: 10
 
-      ema_alpha: 0.98
-      weight_decay_final: null
-      momentum_schedule: false
-
-      predictor_depth: 4
-      context_ratio: 0.5
-      target_ratio: 0.25
-      context_subsample_ratio: 0.5
-      context_scale: 2
-      target_scale: 2
+      jepa_config:
+        ema_alpha: 0.98
+        weight_decay_final: null
+        momentum_schedule: false
+        predictor_depth: 4
+        context_ratio: 0.5
+        target_ratio: 0.25
+        context_subsample_ratio: 0.5
+        context_scale: 2
+        target_scale: 2
 
       optimizer_init:
         class_path: bitsandbytes.optim.AdamW8bit
