@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any, Dict, Final, List, Optional, Tuple, cast
 
 import torch
@@ -42,16 +43,12 @@ def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: 
     return y
 
 
-class JEPA(Task):
+@dataclass
+class JEPAConfig:
     """
-    Joint Embedding Predictive Architecture (JEPA) Task.
-
-    This class implements the JEPA task, which involves predicting target embeddings
-    from context embeddings using a backbone model. The task also includes an Exponential
-    Moving Average (EMA) of the backbone parameters for stable target generation.
+    Configuration for JEPA related hyperparameters.
 
     Args:
-        backbone: Name of the backbone to use for the task.
         context_ratio: Ratio of the input to sample as context.
         context_scale: Integer scale at which to sample contiguous blocks of context tokens.
             Increasing this ensures more adjacent tokens appear together in the context.
@@ -65,6 +62,58 @@ class JEPA(Task):
         predictor_depth: Depth of the predictor network.
         mixup_alpha: Alpha parameter for the Beta distribution used to sample the mixup weight.
         mixup_prob: Probability of applying mixup to the input and target.
+        noise_scale: Scale of the noise to apply to the input.
+        noise_clip: If True, clip the noise to the range [0, 1].
+        salt_pepper_prob: Proportion of salt and pepper noise to apply to the input.
+        weight_decay_final: Final weight decay value. If set, the weight decay will be linearly
+            annealed from the current value to this value over the course of training.
+    """
+
+    context_ratio: float = 0.5
+    context_scale: int = 4
+    target_ratio: float = 0.25
+    target_scale: int = 2
+    context_subsample_ratio: float = 0.5
+    ema_alpha: float = 0.95
+    momentum_schedule: bool = False
+    predictor_depth: int = 4
+    mixup_alpha: float = 1.0
+    mixup_prob: float = 0.2
+    noise_scale: float = 0.2
+    noise_clip: bool = True
+    salt_pepper_prob: Tuple[float, float] = (0.01, 0.05)
+    weight_decay_final: float | None = None
+
+    def __post_init__(self) -> None:
+        if not 0 < self.context_ratio <= 1:
+            raise ValueError("context_ratio must be in the range (0, 1]")
+        if not 0 < self.target_ratio <= 1:
+            raise ValueError("target_ratio must be in the range (0, 1]")
+        if not 0 < self.context_subsample_ratio <= 1:
+            raise ValueError("context_subsample_ratio must be in the range (0, 1]")
+        if not 0 < self.ema_alpha < 1:
+            raise ValueError("ema_alpha must be in the range (0, 1)")
+        if not 0 < self.mixup_alpha:
+            raise ValueError("mixup_alpha must be positive")
+        if not 0 <= self.mixup_prob <= 1:
+            raise ValueError("mixup_prob must be in the range [0, 1]")
+        if self.predictor_depth < 1:
+            raise ValueError("predictor_depth must be at least 1")
+        if self.weight_decay_final is not None and not 0 <= self.weight_decay_final:
+            raise ValueError("weight_decay_final must be non-negative")
+
+
+class JEPA(Task):
+    """
+    Joint Embedding Predictive Architecture (JEPA) Task.
+
+    This class implements the JEPA task, which involves predicting target embeddings
+    from context embeddings using a backbone model. The task also includes an Exponential
+    Moving Average (EMA) of the backbone parameters for stable target generation.
+
+    Args:
+        backbone: Name of the backbone to use for the task.
+        jepa_config: Configuration for JEPA related hyperparameters.
         optimizer_init: Initial configuration for the optimizer.
         lr_scheduler_init: Initial configuration for the learning rate scheduler.
         lr_interval: Frequency of learning rate update. Can be 'step' or 'epoch'.
@@ -75,8 +124,6 @@ class JEPA(Task):
         log_train_metrics_interval: Interval (in steps) at which to log training metrics.
         log_train_metrics_on_epoch: If True, log training metrics at the end of each epoch.
         parameter_groups: Dictionary of parameter groups and their corresponding weight decay values.
-        weight_decay_final: Final weight decay value. If set, the weight decay will be linearly
-            annealed from the current value to this value over the course of training.
     """
 
     backbone: ViT | AdaptiveViT
@@ -84,16 +131,7 @@ class JEPA(Task):
     def __init__(
         self,
         backbone: str,
-        context_ratio: float = 0.5,
-        context_scale: int = 4,
-        target_ratio: float = 0.25,
-        target_scale: int = 2,
-        context_subsample_ratio: float = 0.5,
-        ema_alpha: float = 0.95,
-        momentum_schedule: bool = False,
-        predictor_depth: int = 4,
-        mixup_alpha: float = 1.0,
-        mixup_prob: float = 0.2,
+        jepa_config: JEPAConfig = JEPAConfig(),
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -104,7 +142,6 @@ class JEPA(Task):
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
         parameter_groups: List[Dict[str, Any]] = [],
-        weight_decay_final: float | None = None,
     ):
         super().__init__(
             optimizer_init,
@@ -118,19 +155,7 @@ class JEPA(Task):
             log_train_metrics_on_epoch,
             parameter_groups,
         )
-        self.context_ratio = context_ratio
-        self.context_scale = context_scale
-        self.target_ratio = target_ratio
-        self.target_scale = target_scale
-        self.context_subsample_ratio = context_subsample_ratio
-        assert self.context_ratio > 0
-        assert self.target_ratio > 0
-        assert self.context_subsample_ratio > 0
-        self.ema_alpha = ema_alpha
-        self.momentum_schedule = momentum_schedule
-        self.weight_decay_final = weight_decay_final
-        self.mixup_alpha = mixup_alpha
-        self.mixup_prob = mixup_prob
+        self.jepa_config = jepa_config
 
         # Backbone and EMA weights
         self.backbone = cast(ViT | AdaptiveViT, self.prepare_backbone(backbone))
@@ -153,7 +178,10 @@ class JEPA(Task):
 
         # JEPA predictor
         self.jepa_predictor = nn.ModuleList(
-            [self.backbone.create_decoder_layer(i, stochastic_depth=0.0) for i in range(predictor_depth)]
+            [
+                self.backbone.create_decoder_layer(i, stochastic_depth=0.0)
+                for i in range(self.jepa_config.predictor_depth)
+            ]
         )
         self.save_hyperparameters()
 
@@ -191,8 +219,8 @@ class JEPA(Task):
         B, L, _ = context.shape
 
         # Sample a subset of the context as input to the predictor and project
-        if self.context_subsample_ratio < 1.0:
-            subsample_mask = create_mask((L,), mask_ratio=1 - self.context_subsample_ratio, batch_size=B)
+        if self.jepa_config.context_subsample_ratio < 1.0:
+            subsample_mask = create_mask((L,), mask_ratio=1 - self.jepa_config.context_subsample_ratio, batch_size=B)
             context = apply_mask(subsample_mask, context, fill_value=None)
 
         # Prepare positional encoding for target queries
@@ -224,11 +252,11 @@ class JEPA(Task):
 
     def get_ema_momentum(self) -> float:
         r"""Get the momentum for the EMA update based on the current step or epoch."""
-        if not self.momentum_schedule:
-            return self.ema_alpha
+        if not self.jepa_config.momentum_schedule:
+            return self.jepa_config.ema_alpha
         fraction_complete = self.fraction_complete
         fraction_complete = fraction_complete if fraction_complete is not None else 0.0
-        return self.ema_alpha + (1 - self.ema_alpha) * fraction_complete
+        return self.jepa_config.ema_alpha + (1 - self.jepa_config.ema_alpha) * fraction_complete
 
     @torch.no_grad()
     def update_ema(self) -> None:
@@ -257,7 +285,7 @@ class JEPA(Task):
 
     def update_weight_decay(self) -> List[float | None]:
         """Update the weight decay for each parameter group based on the current training progress."""
-        assert self.weight_decay_final is not None
+        assert self.jepa_config.weight_decay_final is not None
 
         # Get optimizer and wrap as a list if necessary
         optimizers = self.optimizers()
@@ -276,7 +304,7 @@ class JEPA(Task):
                 return
 
             initial_wd = pg.setdefault("initial_weight_decay", current_wd)
-            final_wd = self.weight_decay_final
+            final_wd = self.jepa_config.weight_decay_final
             new_wd = max(current_wd, initial_wd + (final_wd - initial_wd) * fraction_complete)
             pg["weight_decay"] = new_wd
             return new_wd
@@ -304,11 +332,11 @@ class JEPA(Task):
         """
         # Generate mixup weight
         N = x.shape[0]
-        dist = torch.distributions.Beta(self.mixup_alpha, self.mixup_alpha)
+        dist = torch.distributions.Beta(self.jepa_config.mixup_alpha, self.jepa_config.mixup_alpha)
         lam = dist.sample(torch.Size((N,))).to(x.device)
 
         # Generate mask of mixup samples
-        mixup_mask = torch.rand_like(lam) < self.mixup_prob
+        mixup_mask = torch.rand_like(lam) < self.jepa_config.mixup_prob
 
         def right_broadcast(inp: Tensor, proto: Tensor) -> Tensor:
             return inp.view(-1, *(1,) * len(proto.shape[1:]))
@@ -351,12 +379,12 @@ class JEPA(Task):
         if state.mode == Mode.TRAIN:
             self.update_ema()
         # update weight decay
-        if self.weight_decay_final is not None:
+        if self.jepa_config.weight_decay_final is not None:
             self.update_weight_decay()
 
         # generate context and target masks
-        target_mask = self.create_mask(x, self.target_ratio, self.target_scale)
-        context_mask = self.create_mask(x, self.context_ratio, self.context_scale)
+        target_mask = self.create_mask(x, self.jepa_config.target_ratio, self.jepa_config.target_scale)
+        context_mask = self.create_mask(x, self.jepa_config.context_ratio, self.jepa_config.context_scale)
 
         # generate ground truth with forward pass of ema backbone on unmasked image
         with torch.no_grad():
@@ -367,7 +395,7 @@ class JEPA(Task):
             x = self.apply_noise_batched(x)
 
             # apply mixup, not overwriting full_target
-            if self.training and self.mixup_prob > 0:
+            if self.training and self.jepa_config.mixup_prob > 0:
                 x, full_target_mixed = self.mixup(x, full_target)
                 target = apply_mask(target_mask, full_target_mixed, fill_value=None)
             else:
@@ -414,16 +442,7 @@ class JEPAWithProbe(JEPA, ABC):
     def __init__(
         self,
         backbone: str,
-        context_ratio: float = 0.5,
-        context_scale: int = 4,
-        target_ratio: float = 0.25,
-        target_scale: int = 2,
-        context_subsample_ratio: float = 0.5,
-        ema_alpha: float = 0.95,
-        momentum_schedule: bool = False,
-        predictor_depth: int = 4,
-        mixup_alpha: float = 1.0,
-        mixup_prob: float = 0.2,
+        jepa_config: JEPAConfig = JEPAConfig(),
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -434,20 +453,10 @@ class JEPAWithProbe(JEPA, ABC):
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
         parameter_groups: List[Dict[str, Any]] = [],
-        weight_decay_final: float | None = None,
     ):
         super().__init__(
             backbone,
-            context_ratio,
-            context_scale,
-            target_ratio,
-            target_scale,
-            context_subsample_ratio,
-            ema_alpha,
-            momentum_schedule,
-            predictor_depth,
-            mixup_alpha,
-            mixup_prob,
+            jepa_config,
             optimizer_init,
             lr_scheduler_init,
             lr_interval,
@@ -458,7 +467,6 @@ class JEPAWithProbe(JEPA, ABC):
             log_train_metrics_interval,
             log_train_metrics_on_epoch,
             parameter_groups,
-            weight_decay_final,
         )
         self.linear_probe = self.create_probe_head()
 

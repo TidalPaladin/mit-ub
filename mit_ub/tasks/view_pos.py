@@ -8,23 +8,14 @@ import torchmetrics as tm
 from deep_helpers.structs import State
 from torch import Tensor
 
-from .jepa import JEPAWithProbe
+from .jepa import JEPAConfig, JEPAWithProbe
 
 
 class JEPAWithViewPosition(JEPAWithProbe):
     def __init__(
         self,
         backbone: str,
-        context_ratio: float = 0.5,
-        context_scale: int = 4,
-        target_ratio: float = 0.25,
-        target_scale: int = 2,
-        context_subsample_ratio: float = 0.5,
-        ema_alpha: float = 0.95,
-        momentum_schedule: bool = False,
-        predictor_depth: int = 4,
-        mixup_alpha: float = 1.0,
-        mixup_prob: float = 0.2,
+        jepa_config: JEPAConfig = JEPAConfig(),
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -35,20 +26,10 @@ class JEPAWithViewPosition(JEPAWithProbe):
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
         parameter_groups: List[Dict[str, Any]] = [],
-        weight_decay_final: float | None = None,
     ):
         super().__init__(
             backbone,
-            context_ratio,
-            context_scale,
-            target_ratio,
-            target_scale,
-            context_subsample_ratio,
-            ema_alpha,
-            momentum_schedule,
-            predictor_depth,
-            mixup_alpha,
-            mixup_prob,
+            jepa_config,
             optimizer_init,
             lr_scheduler_init,
             lr_interval,
@@ -59,7 +40,6 @@ class JEPAWithViewPosition(JEPAWithProbe):
             log_train_metrics_interval,
             log_train_metrics_on_epoch,
             parameter_groups,
-            weight_decay_final,
         )
 
     def create_probe_head(self) -> nn.Module:
