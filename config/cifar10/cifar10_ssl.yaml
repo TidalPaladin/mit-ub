@@ -29,7 +29,7 @@ fit:
       init_args:
         save_dir: /mnt/flash/mitub
         project: mit-ub
-        name: "cifar10-vit"
+        name: "cifar10-vit-noise"
 
   model:
     class_path: mit_ub.tasks.JEPAWithClassification

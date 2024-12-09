@@ -14,6 +14,7 @@ from torch.distributed import ReduceOp, all_reduce
 from torch.distributed import barrier as dist_barrier
 from torch.optim.optimizer import Optimizer
 
+from ..data.augment import RandomNoise
 from ..model import BACKBONES, AdaptiveViT, ViT, compile_is_disabled
 from ..model.pos_enc import RelativeFactorizedPosition
 from ..model.transformer import TransformerDecoderLayer
@@ -155,6 +156,9 @@ class JEPA(Task):
             [self.backbone.create_decoder_layer(i, stochastic_depth=0.0) for i in range(predictor_depth)]
         )
         self.save_hyperparameters()
+
+        # Random noise
+        self.random_noise = RandomNoise(scale=0.2, clip=True)
 
     def prepare_backbone(self, name: str) -> nn.Module:
         return BACKBONES.get(name).instantiate_with_metadata().fn
@@ -322,6 +326,17 @@ class JEPA(Task):
         )
         return x, target
 
+    @torch.no_grad()
+    def apply_noise_batched(self, x: Tensor) -> Tensor:
+        r"""Applies noise to a batch of images such that each image in the batch is
+        independently transformed. This is an alternative to `self.random_noise` which
+        applies the same noise to all images in the batch.
+        """
+        x = x.clone()
+        for i in range(x.shape[0]):
+            x[i] = self.random_noise(x[i])
+        return x
+
     def step(
         self,
         batch: Any,
@@ -347,6 +362,9 @@ class JEPA(Task):
         with torch.no_grad():
             self.ema_backbone.eval()
             full_target: Tensor = self.ema_backbone(x, reshape=False)
+
+            # apply random noise
+            x = self.apply_noise_batched(x)
 
             # apply mixup, not overwriting full_target
             if self.training and self.mixup_prob > 0:
