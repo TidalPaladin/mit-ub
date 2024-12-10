@@ -81,7 +81,7 @@ class JEPAConfig:
     mixup_prob: float = 0.2
     noise_scale: float = 0.2
     noise_clip: bool = True
-    salt_pepper_prob: Tuple[float, float] = (0.01, 0.05)
+    salt_pepper_prob: float | Tuple[float, float] = (0.01, 0.05)
     weight_decay_final: float | None = None
 
     def __post_init__(self) -> None:
@@ -186,7 +186,11 @@ class JEPA(Task):
         self.save_hyperparameters()
 
         # Random noise
-        self.random_noise = RandomNoise(scale=0.2, clip=True)
+        self.random_noise = RandomNoise(
+            self.jepa_config.noise_scale,
+            self.jepa_config.salt_pepper_prob,
+            self.jepa_config.noise_clip,
+        )
 
     def prepare_backbone(self, name: str) -> nn.Module:
         return BACKBONES.get(name).instantiate_with_metadata().fn
