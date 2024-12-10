@@ -24,23 +24,23 @@ fit:
       init_args:
         save_dir: /mnt/flash/chexpert
         project: chexpert
-        name: "mjepa-p1"
+        name: "mjepa-p1-noise"
 
   model:
     class_path: mit_ub.tasks.JEPAChexpert
     init_args:
       backbone: "chexpert-small"
 
-      ema_alpha: 0.98
-      weight_decay_final: null
-      momentum_schedule: false
-
-      context_ratio: 0.5
-      target_ratio: 0.25
-      context_subsample_ratio: 0.5
-      context_scale: 4
-      target_scale: 2
-      predictor_depth: 4
+      jepa_config:
+        ema_alpha: 0.98
+        weight_decay_final: null
+        momentum_schedule: false
+        context_ratio: 0.5
+        target_ratio: 0.25
+        context_subsample_ratio: 0.5
+        context_scale: 4
+        target_scale: 2
+        predictor_depth: 4
 
       log_train_metrics_interval: 50
 
