@@ -67,6 +67,7 @@ class JEPAConfig:
         salt_pepper_prob: Proportion of salt and pepper noise to apply to the input.
         weight_decay_final: Final weight decay value. If set, the weight decay will be linearly
             annealed from the current value to this value over the course of training.
+        invert_prob: Probability of inverting the input.
     """
 
     context_ratio: float = 0.5
@@ -83,6 +84,7 @@ class JEPAConfig:
     noise_clip: bool = True
     salt_pepper_prob: float | Tuple[float, float] = (0.01, 0.05)
     weight_decay_final: float | None = None
+    invert_prob: float = 0.25
 
     def __post_init__(self) -> None:
         if not 0 < self.context_ratio <= 1:
@@ -101,6 +103,8 @@ class JEPAConfig:
             raise ValueError("predictor_depth must be at least 1")
         if self.weight_decay_final is not None and not 0 <= self.weight_decay_final:
             raise ValueError("weight_decay_final must be non-negative")
+        if not 0 <= self.invert_prob < 1:
+            raise ValueError("invert_prob must be in the range [0, 1)")
 
 
 class JEPA(Task):
@@ -369,6 +373,14 @@ class JEPA(Task):
             x[i] = self.random_noise(x[i])
         return x
 
+    @torch.no_grad()
+    def invert_batched(self, x: Tensor) -> Tensor:
+        """Invert a batch of images normalized to [0, 1]."""
+        x_inv = x.neg().add_(1)
+        mask = torch.rand_like(x_inv) < self.jepa_config.invert_prob
+        result = torch.where(mask, x_inv, x)
+        return result
+
     def step(
         self,
         batch: Any,
@@ -395,8 +407,9 @@ class JEPA(Task):
             self.ema_backbone.eval()
             full_target: Tensor = self.ema_backbone(x, reshape=False)
 
-            # apply random noise
+            # apply augmentations
             x = self.apply_noise_batched(x)
+            x = self.invert_batched(x)
 
             # apply mixup, not overwriting full_target
             if self.training and self.jepa_config.mixup_prob > 0:
