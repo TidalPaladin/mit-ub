@@ -11,52 +11,88 @@
 
   % Innput mammogram
   \node[name=rcc] at (0, 0){\drawRCC};
+  \node[above=0.5cm of rcc.north, anchor=center] {Mammogram};
 
   % Teacher network 
   \node[name=teacher] at (4, 0){\drawMLP};
-  \node[below=0.5cm of teacher.south, anchor=center] {Teacher Network};
+  \node[above=0.5cm of teacher.north, anchor=center] {Teacher Network};
   \draw[->, thick, black, >=stealth, line width=1.5pt] (rcc) -- (teacher);
 
   % Masked mammogram
-  \node[name=masked_rcc] at (0, -6){\drawMaskedRCC{3}{0.5}{blue}{0.0}};
+  \node[name=masked_rcc] at (0, -6){\drawMaskedRCC{3}{0.5}{blue}{0.0}{3}{4}};
   \node[below=0.5cm of masked_rcc.south, anchor=center] {Masked Mammogram};
-  \draw[->, thick, black, >=stealth, line width=1.5pt] (rcc) -- (masked_rcc);
+  \draw[->, thick, black, >=stealth, line width=1.5pt, align=center] 
+    (rcc) 
+    to
+    node[midway, right] 
+    {Augment (noise, mixup)\\ Mask ($p=0.5$)} 
+    (masked_rcc);
 
   % Student network
   \node[name=student] at (4, -6){\drawMLP};
   \node[below=0.5cm of student.south, anchor=center] {Student Network};
   \draw[->, thick, black, >=stealth, line width=1.5pt] (masked_rcc) -- (student);
 
+  % EMA update
+  \draw[->, thick, red, dashed, >=stealth, line width=1.5pt] 
+    (student) 
+    to[out=75, in=-75]
+    node[midway, right] 
+    {EMA Update}
+    (teacher);
+
   % Student features
-  \node[name=student_features] at (8, -6){\drawMaskedRCC{3}{0.5}{blue}{0.25}};
+  \node[name=student_features] at (8, -6){\drawMaskedRCC{3}{0.5}{blue}{0.25}{3}{4}};
   \node[below=0.5cm of student_features.south, anchor=center] {Student Features};
   \draw[->, thick, black, >=stealth, line width=1.5pt] (student) -- (student_features);
 
   % Teacher features
-  \node[name=teacher_features] at (8, 0){\drawMaskedRCC{5}{1.0}{red}{0.25}};
-  \node[below=0.5cm of teacher_features.south, anchor=center] {Teacher Features};
+  \node[name=teacher_features] at (8, 0){\drawMaskedRCC{5}{1.0}{red}{0.25}{3}{4}};
+  \node[above=0.5cm of teacher_features.north, anchor=center] {Teacher Features};
   \draw[->, thick, black, >=stealth, line width=1.5pt] (teacher) -- (teacher_features);
 
   % Masked teacher features
-  \node[name=masked_teacher_features] at (13, 0){\drawMaskedRCC{8}{0.25}{red}{0.25}};
-  \node[below=0.5cm of masked_teacher_features.south, anchor=center] {Selected Teacher Features};
-  \draw[->, thick, black, >=stealth, line width=1.5pt] (teacher_features) -- (masked_teacher_features);
+  \node[name=masked_teacher_features] at (14, 0){\drawMaskedRCC{8}{0.25}{red}{0.25}{3}{4}};
+  \node[above=0.5cm of masked_teacher_features.north, anchor=center] {Selected Teacher Features};
+  \draw[->, thick, black, >=stealth, line width=1.5pt] 
+    (teacher_features) 
+    to
+    node[midway, above] 
+    {Subsample}
+    node[midway, below] 
+    {$p=0.25$}
+    (masked_teacher_features);
 
   % Predictor
-  \node[name=predictor] at (13, -6){\drawMLP};
+  \node[name=predictor] at (14, -6){\drawMLP};
   \node[below=0.5cm of predictor.south, anchor=center] {Predictor Network};
-  \draw[->, thick, black, >=stealth, line width=1.5pt] (student_features) -- (predictor);
+  \draw[->, thick, black, >=stealth, line width=1.5pt] 
+    (student_features) 
+    to
+    node[midway, above] 
+    {Subsample}
+    node[midway, below] 
+    {$p=0.5$}
+    node[pos=0.9, below] {\scriptsize KV}
+    (predictor);
 
   % Positions
-  %\draw[->, thick, black, >=stealth, line width=1.5pt] (teacher_features.east) to[out=0, in=180] node[midway, right] {Selected Positions} (predictor.west);
+  \draw[->, thick, black, >=stealth, line width=1.5pt] 
+    (masked_teacher_features.south) 
+    to[out=270, in=90] 
+    node[midway, left] 
+    {Position Encodings} 
+    node[pos=0.9, right] {\scriptsize Q}
+    (predictor.north);
 
   % Predictions
-  \node[name=predictions] at (18, -6){\drawMaskedRCC{8}{0.25}{green}{0.25}};
+  \node[name=predictions] at (19, -6){\drawMaskedRCC{8}{0.25}{green}{0.25}{3}{4}};
   \node[below=0.5cm of predictions.south, anchor=center] {Predictions};
   \draw[->, thick, black, >=stealth, line width=1.5pt] (predictor) -- (predictions);
 
   % Loss
-  \node[name=loss] at (18, 0){\Large $\mathcal{L}(x, \hat{x})$};
+  \node[name=loss] at (19, 0){\Large $\mathcal{L}(x, \hat{x})$};
+  \node[above=0.5cm of loss.north, anchor=center] {Smooth L1 Loss};
 
   % Arrows to loss
   \draw[->, thick, black, >=stealth, line width=1.5pt] (masked_teacher_features) to[out=0, in=180] (loss);

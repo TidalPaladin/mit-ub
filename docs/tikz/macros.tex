@@ -1,3 +1,4 @@
+
 \newcommand{\drawRCC}{
   \begin{tikzpicture}
     \fill[black] (0,0) rectangle (3, 4);
@@ -5,11 +6,10 @@
     \fill[gray] (0, 0.2) arc[start angle=-90, end angle=90, radius=1.8] -- cycle;
     \draw[white, ultra thick] (0, 0.2) arc[start angle=-90, end angle=90, radius=1.8];
     \node[white, anchor=north east, inner sep=2, outer sep=2] at (current bounding box.north east) {RCC};
-    \draw[white, ultra thick] (0,0) rectangle (3, 4);
   \end{tikzpicture}
 }
 
-\newcommand{\drawMaskedRCC}[4]{
+\newcommand{\drawMaskedRCC}[6]{
   \pgfmathsetseed{#1}
   \begin{tikzpicture}
     \fill[black] (0,0) rectangle (3, 4);
@@ -17,15 +17,16 @@
     \fill[gray] (0, 0.2) arc[start angle=-90, end angle=90, radius=1.8] -- cycle;
     \draw[white, ultra thick] (0, 0.2) arc[start angle=-90, end angle=90, radius=1.8];
     \node[white, anchor=north east] at (3, 4) {RCC};
-    \draw[white, ultra thick] (0,0) rectangle (3, 4);
-    \foreach \x in {0, 1, 2} {
-      \foreach \y in {0, 1, 2, 3} {
-        \draw[white, very thin] (\x, \y) rectangle (\x+1, \y+1);
+    \foreach \x in {0, ..., \numexpr#5-1\relax} {
+      \foreach \y in {0, ..., \numexpr#6-1\relax} {
+        \pgfmathsetmacro{\width}{3/#5}
+        \pgfmathsetmacro{\height}{4/#6}
+        \draw[white, very thin] (\x*\width, \y*\height) rectangle (\x*\width+\width, \y*\height+\height);
         \pgfmathsetmacro{\rand}{random}
         \ifdim \rand pt < \dimexpr#2 pt\relax
-          \fill[#3, opacity=#4] (\x, \y) rectangle (\x+1, \y+1);
+          \fill[#3, opacity=#4] (\x*\width, \y*\height) rectangle (\x*\width+\width, \y*\height+\height);
         \else
-          \fill[black] (\x, \y) rectangle (\x+1, \y+1);
+          \fill[black] (\x*\width, \y*\height) rectangle (\x*\width+\width, \y*\height+\height);
         \fi
       }
     }
@@ -91,5 +92,24 @@
   \begin{tikzpicture}
   \node[circle, draw=black, minimum size=6cm] (circle) at (0, 0) {};
   \draw[black] (-3, 0) sin (-1.5, -1) cos (0, 0) sin (1.5, 1) cos (3, 0);
+  \end{tikzpicture}
+}
+
+
+\newcommand{\drawVector}[4]{
+  % #1: number of squares
+  % #2: orientation (h for horizontal, v for vertical)
+  % #3: fill color
+  % #4: stroke color
+  \begin{tikzpicture}
+    \foreach \i in {0,...,\numexpr#1-1\relax} {
+      \ifthenelse{\equal{#2}{h}}{
+        \fill[#3] (\i,0) rectangle (\i+1,1);
+        \draw[#4] (\i,0) rectangle (\i+1,1);
+      }{
+        \fill[#3] (0,-\i*1) rectangle (1,-\i*1-1);
+        \draw[#4] (0,-\i*1) rectangle (1,-\i*1-1);
+      }
+    }
   \end{tikzpicture}
 }

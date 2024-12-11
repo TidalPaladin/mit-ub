@@ -2,28 +2,60 @@
 \usepackage{pgf} 
 \usepackage{amsmath}
 \usepackage{ifthen}
-\usetikzlibrary{decorations.pathreplacing}
 \usetikzlibrary{positioning}
-\usetikzlibrary{calc}
 
 \begin{document}
 \include{macros}
 \tikzset{every picture/.style={/utils/exec={\sffamily}}}
 
 \begin{tikzpicture}
-    % Input image
-    \node[name=rcc, outer sep=0, inner sep=0] at (0, 0){\drawRCC};
-    % Brace indicating height
-    \draw[decorate,decoration={brace,amplitude=10pt,raise=4pt},yshift=0pt]
-    (rcc.south west) -- (rcc.north west) node [black,midway,xshift=-1.1cm] 
-    {\footnotesize 3072px};
-    % Brace indicating width
-    \draw[decorate,decoration={brace,amplitude=10pt,raise=4pt},yshift=0pt]
-    (rcc.north west) -- (rcc.north east) node [black,midway,yshift=0.8cm] 
-    {\footnotesize 2304px};
+    % Input image with separate nodes for braces and arrows
+    \node[name=rcc] at (0, 0){\drawRCC};
+    \node[above=0.5cm of rcc.north, anchor=center] {Input Image};
 
-    % Resized image
-    \node[name=resized, outer sep=0, inner sep=0] at (6, 0){\drawRCC};
+    % Resized image (same approach)
+    \node[name=resized, scale=0.5] at (0, -6){\drawRCC};
+    \node[below=0.5cm of resized.south, anchor=center] {Resized Image};
+
+    % Arrow with default spacing
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (rcc) -- (resized);
+
+    % Coarse encoder
+    \node[name=coarse_encoder] at (4, -6){\drawMLP};
+    \node[below=0.5cm of coarse_encoder.south, anchor=center] {Coarse Encoder};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (resized) -- (coarse_encoder);
+
+    % Coarse features
+    \node[name=coarse_features, scale=0.5] at (8, -6){\drawMaskedRCC{5}{1.0}{red}{0.25}{3}{4}};
+    \node[below=0.5cm of coarse_features.south, anchor=center] {Features};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (coarse_encoder) -- (coarse_features);
+
+    % Visual tokenizer
+    \node[name=visual_tokenizer] at (4, 0){\drawMLP};
+    \node[above=0.5cm of visual_tokenizer.north, anchor=center] {Visual Tokenizer};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (rcc) -- (visual_tokenizer);
+
+    % Fine features
+    \node[name=fine_features] at (8, 0){\drawMaskedRCC{5}{1.0}{blue}{0.25}{6}{8}};
+    \node[above=0.5cm of fine_features.north, anchor=center] {Features};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (visual_tokenizer) -- (fine_features);
+
+    % Addition node
+    \node[name=addition, circle, draw=black, minimum size=20pt] at (12, 0) {$+$};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (fine_features) -- (addition);
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (coarse_features) 
+        to[out=0, in=-90] 
+        node[pos=0.9, left] {Upsample}
+        (addition);
+
+    % Cross attention
+    \node[name=cross_attention] at (15, -3){\drawMLP};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] 
+        (addition) -- ++(3, 0) -- (cross_attention);
+    \draw[->, thick, black, >=stealth, line width=1.5pt] 
+        (coarse_features) -- ++(7,0) -- (cross_attention);
+
+
 
 
 \end{tikzpicture}
