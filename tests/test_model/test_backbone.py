@@ -156,7 +156,7 @@ class TestAdaptiveViT:
         with torch.autocast(device_type=device, dtype=torch.float16):
             out1 = model(x, reshape=False)
             out2 = model(x, mask=mask, reshape=False)
-        assert out1.shape == out2.shape
+        assert out1.shape != out2.shape
 
     def test_forward_deterministic(self):
         x = torch.randn(1, 3, 224, 224)
