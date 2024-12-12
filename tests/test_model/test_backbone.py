@@ -3,6 +3,7 @@ from typing import Any, cast
 import pytest
 import torch
 from deep_helpers.tokens import create_mask
+from torch.testing import assert_close
 
 from mit_ub.model import BACKBONES
 from mit_ub.model.backbone import AdaptiveViT, ViT
@@ -81,6 +82,23 @@ class TestViT:
             out1 = model(x)
             out2 = model(x)
         assert torch.allclose(out1, out2)
+
+    def test_trivial_token_mask(self):
+        torch.random.manual_seed(0)
+        B, C, H, W = 1, 3, 224, 224
+        D, patch_size, depth = 128, (16, 16), 3
+
+        nhead = 128 // 16
+        model = ViT(C, D, patch_size, depth, nhead)
+        model.eval()
+
+        mask_size = model.stem.tokenized_size(cast(Any, (H, W)))
+        mask = create_mask(mask_size, batch_size=B, mask_ratio=0.25, scale=1)
+        mask = torch.ones_like(mask).bool()
+        x = torch.randn(B, C, H, W)
+        out1 = model(x, reshape=False)
+        out2 = model(x, mask=mask, reshape=False)
+        assert_close(out1, out2)
 
 
 class TestAdaptiveViT:
@@ -166,6 +184,22 @@ class TestAdaptiveViT:
         model2 = ViT(C, D, (16, 16), depth, nhead)
         for p1, p2 in zip(model.blocks.parameters(), model2.blocks.parameters()):
             assert p1.shape == p2.shape
+
+    def test_trivial_token_mask(self):
+        torch.random.manual_seed(0)
+        B, C, H, W = 1, 3, 256, 256
+        D, patch_size, target_size, depth = 128, (16, 16), (4, 4), 3
+        nhead = 128 // 16
+        model = AdaptiveViT(C, D, patch_size, target_size, depth, depth, nhead)
+        model.eval()
+
+        mask_size = model.stem.tokenized_size(cast(Any, (H, W)))
+        mask = create_mask(mask_size, batch_size=B, mask_ratio=0.25, scale=1)
+        mask = torch.ones_like(mask).bool()
+        x = torch.randn(B, C, H, W)
+        out1 = model(x, reshape=False)
+        out2 = model(x, mask=mask, reshape=False)
+        assert_close(out1, out2)
 
 
 @pytest.mark.ci_skip

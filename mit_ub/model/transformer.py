@@ -110,21 +110,26 @@ class TransformerDecoderLayer(nn.Module):
         num_slots: int | None = None,
         stochastic_depth: float = 0.0,
         bias: bool = True,
+        self_attn: bool = True,
     ):
         super().__init__()
         d_kv = d_kv or d_model
         self.nhead = nhead
         self.num_kv_heads = num_kv_heads or nhead
 
-        self.self_attn = MultiHeadAttention(
-            embed_dim=d_model,
-            num_heads=nhead,
-            num_kv_heads=self.num_kv_heads,
-            dropout=dropout,
-            qk_norm=qk_norm,
-            bias=bias,
-            norm=True,
-        )
+        if self_attn:
+            self.self_attn = MultiHeadAttention(
+                embed_dim=d_model,
+                num_heads=nhead,
+                num_kv_heads=self.num_kv_heads,
+                dropout=dropout,
+                qk_norm=qk_norm,
+                bias=bias,
+                norm=True,
+            )
+        else:
+            self.register_module("self_attn", None)
+
         self.cross_attn = MultiHeadAttention(
             embed_dim=d_model,
             num_heads=nhead,
@@ -167,7 +172,9 @@ class TransformerDecoderLayer(nn.Module):
 
         self.stochastic_depth = StochasticDepth(stochastic_depth, mode="row")
 
-        self.layer_scale_attn = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
+        self.layer_scale_attn = (
+            LayerScale(d_model, layer_scale) if layer_scale is not None and self_attn else nn.Identity()
+        )
         self.layer_scale_cross = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
         self.layer_scale_mlp = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
 
@@ -179,8 +186,9 @@ class TransformerDecoderLayer(nn.Module):
     def forward(self, q: Tensor, kv: Tensor) -> Tensor:
         # Self attention
         x = q
-        y = self.self_attn(x, x, x)
-        x = x + self.stochastic_depth(self.layer_scale_attn(y))
+        if self.self_attn is not None:
+            y = self.self_attn(x, x, x)
+            x = x + self.stochastic_depth(self.layer_scale_attn(y))
 
         # Cross attention
         y = self.cross_attn(x, kv, kv)
