@@ -105,7 +105,7 @@ BACKBONES(
 
 CIFAR10_DIM: Final = 384
 CIFAR10_HEAD_DIM: Final = 32
-CIFAR10_ADAPTIVE_DIM: Final = 64
+CIFAR10_ADAPTIVE_DIM: Final = 384
 
 BACKBONES(
     ViT,
@@ -162,20 +162,24 @@ BACKBONES(
     moe_layers=[10, 11],
 )
 
-
 BACKBONES(
     AdaptiveViT,
     name="vit-cifar10-adaptive",
     in_channels=3,
-    dim=CIFAR10_DIM,
-    kv_dim=CIFAR10_ADAPTIVE_DIM,
+    dim=CIFAR10_ADAPTIVE_DIM,
     patch_size=4,
-    target_shape=(4, 4),
-    depth=12,
-    high_res_depth=4,
-    nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
-    num_kv_heads=CIFAR10_DIM // CIFAR10_HEAD_DIM,
+    target_shape=(8, 8),
+    depth=6,
+    high_res_depth=6,
+    nhead=CIFAR10_ADAPTIVE_DIM // CIFAR10_HEAD_DIM,
+    num_kv_heads=CIFAR10_ADAPTIVE_DIM // CIFAR10_HEAD_DIM,
     dropout=0.1,
+    stochastic_depth=0.1,
+    bias=False,
+    qk_norm=True,
+    activation=identity,
+    gate_activation=F.silu,
+    layer_scale=0.01,
 )
 
 BACKBONES(

@@ -1,9 +1,11 @@
+
 fit:
   compile: true
   float32_matmul_precision: medium
   trainer:
     accelerator: gpu
-    devices: [2]
+    devices: [1]
+    #strategy: "ddp_find_unused_parameters_true"
     precision: "bf16-mixed"
     max_steps: 50000
     num_sanity_val_steps: 0
@@ -23,16 +25,12 @@ fit:
         init_args:
           log_momentum: true
 
-      - class_path: mit_ub.callbacks.HistogramCallback
-        init_args:
-          name: histogram
-
-    logger:
+    logger: 
       class_path: pytorch_lightning.loggers.wandb.WandbLogger
       init_args:
         save_dir: /mnt/flash/mitub
         project: mit-ub
-        name: "cifar10-vit-adaptive-avg-bias"
+        name: "cifar10-vit-adaptive-noupsample-qknorm"
 
   model:
     class_path: mit_ub.tasks.JEPAWithClassification
@@ -40,25 +38,41 @@ fit:
       backbone: "vit-cifar10-adaptive"
       num_classes: 10
 
-      loss_fn: "cosine"
-      margin: 0.5
+      jepa_config:
+        ema_alpha: 0.98
+        weight_decay_final: null
+        momentum_schedule: false
+        predictor_depth: 4
+        context_ratio: 0.5
+        target_ratio: 0.25
+        context_subsample_ratio: 0.5
+        context_scale: 2
+        target_scale: 2
 
-      context_scale: 1
       optimizer_init:
-        class_path: torch.optim.AdamW
+        class_path: bitsandbytes.optim.AdamW8bit
         init_args:
           lr: 0.0005
           weight_decay: 0.05
+          betas: [0.85, 0.999]
       lr_interval: "step"
       lr_scheduler_init:
-        class_path: torch.optim.lr_scheduler.OneCycleLR
+        class_path: deep_helpers.optim.ReciprocalSquareRootLR
         init_args:
-          max_lr: 0.0005
-          div_factor: 5
-          final_div_factor: 50
-          pct_start: 0.10
-          three_phase: false
+          warmup_steps: 5000
+          cooldown_steps: 25000
           total_steps: 50000
+          timescale: 10000
+          initial_lr: 0.0001
+          initial_momentum: 0.95
+      parameter_groups:
+        - params:
+            - "jepa_predictor"
+            - "jepa_out_proj"
+          weight_decay: 0.25
+        - params:
+            - "linear_probe"
+          weight_decay: 1.0
 
   data:
     class_path: mit_ub.data.CIFAR10DataModule
