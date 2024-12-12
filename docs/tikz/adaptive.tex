@@ -40,18 +40,10 @@
     \node[above=0.5cm of fine_features.north, anchor=center] {Features};
     \draw[->, thick, black, >=stealth, line width=1.5pt] (visual_tokenizer) -- (fine_features);
 
-    % Addition node
-    \node[name=addition, circle, draw=black, minimum size=20pt] at (12, 0) {$+$};
-    \draw[->, thick, black, >=stealth, line width=1.5pt] (fine_features) -- (addition);
-    \draw[->, thick, black, >=stealth, line width=1.5pt] (coarse_features) 
-        to[out=0, in=-90] 
-        node[pos=0.9, left] {Upsample}
-        (addition);
-
     % Cross attention
     \node[name=cross_attention] at (15, -3){\drawMLP};
     \draw[->, thick, black, >=stealth, line width=1.5pt] 
-        (addition) -- ++(3, 0) -- (cross_attention);
+        (fine_features) -- ++(3, 0) -- (cross_attention);
     \draw[->, thick, black, >=stealth, line width=1.5pt] 
         (coarse_features) -- ++(7,0) -- (cross_attention);
 
