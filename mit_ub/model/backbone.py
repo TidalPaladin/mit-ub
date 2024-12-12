@@ -1,14 +1,63 @@
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
+import torch
 import torch.nn as nn
 from deep_helpers.tokens import apply_mask
 from einops import rearrange
 from torch import Tensor
 from torch.nn import functional as F
 
+from .helpers import compile_is_disabled
 from .mlp import relu2
-from .stem import AdaptiveTokenizer2d, AdaptiveTokenizer3d, PatchEmbed2d, PatchEmbed3d
+from .stem import PatchEmbed2d, PatchEmbed3d
 from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
+
+
+@torch.compile(disable=compile_is_disabled())
+def resize_mask(
+    size: Tuple[int, int] | Tuple[int, int, int],
+    target_size: Tuple[int, int] | Tuple[int, int, int],
+    mask: Tensor,
+) -> Tensor:
+    r"""Resizes a mask to a target size.
+
+    Args:
+        size: Size of the input mask.
+        target_size: Target size to resize the mask to.
+        mask: Mask to resize.
+
+    Returns:
+        Resized mask.
+    """
+    B = mask.shape[0]
+    mask = mask.view(B, 1, *size)
+    mask = F.interpolate(mask.float(), size=target_size, mode="nearest").to(mask.dtype)
+    mask = mask.view(B, -1)
+    return mask
+
+
+def reshape_tokens(
+    x: Tensor,
+    tokenized_size: Tuple[int, int] | Tuple[int, int, int],
+) -> Tensor:
+    r"""Reshapes a sequence of tokens to a channel-first grid.
+
+    Args:
+        x: Tokens to reshape.
+        tokenized_size: Size of the tokenized input.
+
+    Returns:
+        Reshaped tokens.
+    """
+    if len(tokenized_size) == 3:
+        D, H, W = tokenized_size
+        x = rearrange(x, "b (d h w) c -> b c d h w", d=D, h=H, w=W)
+    elif len(tokenized_size) == 2:
+        H, W = tokenized_size
+        x = rearrange(x, "b (h w) c -> b c h w", h=H, w=W)
+    else:
+        raise ValueError(f"Invalid tokenized size: {tokenized_size}")
+    return x
 
 
 class ViT(nn.Module):
@@ -142,7 +191,8 @@ class ViT(nn.Module):
             bias=self._bias,
         )
         _kwargs.update(kwargs)
-        return TransformerDecoderLayer(**_kwargs)
+        layer = TransformerDecoderLayer(**_kwargs)
+        return layer
 
     def forward(
         self,
@@ -169,19 +219,13 @@ class ViT(nn.Module):
             raise ValueError(
                 "Cannot reshape with mask and no fill value. Either specify `reshape=False` or provide a `mask_fill_value`"
             )
-        elif reshape and len(tokenized_size) == 3:
-            D, H, W = tokenized_size
-            x = rearrange(x, "b (d h w) c -> b c d h w", d=D, h=H, w=W)
         elif reshape:
-            assert len(tokenized_size) == 2
-            H, W = tokenized_size
-            x = rearrange(x, "b (h w) c -> b c h w", h=H, w=W)
+            x = reshape_tokens(x, tokenized_size)
 
         return x
 
 
 class AdaptiveViT(ViT):
-    stem: AdaptiveTokenizer2d | AdaptiveTokenizer3d
 
     def __init__(
         self,
@@ -200,7 +244,6 @@ class AdaptiveViT(ViT):
         qk_norm: bool = False,
         stochastic_depth: float = 0.0,
         bias: bool = False,
-        high_res_layer_scale: float | None = 1e-5,
         num_experts: int | None = None,
         num_slots: int | None = None,
         moe_layers: List[int] = [],
@@ -225,37 +268,21 @@ class AdaptiveViT(ViT):
             stochastic_depth,
             bias,
         )
-
-        # Adaptive stem tokenizer
-        stem_type = AdaptiveTokenizer2d if isinstance(patch_size, int) or len(patch_size) == 2 else AdaptiveTokenizer3d
-        self.stem = stem_type(
-            in_channels,
-            dim,
-            cast(Any, patch_size),
-            cast(Any, target_shape),
-            dropout=dropout,
+        self.resize_to_fixed = nn.Upsample(
+            size=self.stem.original_size(cast(Any, target_shape)),
+            mode="bilinear",
+            align_corners=False,
         )
+        self.target_shape = cast(Any, target_shape)
 
-        # Cross attention to high res tokens
-        self.high_res_blocks = nn.ModuleList(
-            [
-                self.create_decoder_layer(i + len(self.blocks), layer_scale=high_res_layer_scale)
-                for i in range(high_res_depth)
-            ]
+        # Blocks updating fixed (coarse) tokens with cross attention to high res (dynamic) tokens
+        self.fixed_blocks = nn.ModuleList(
+            [self.create_decoder_layer(i + len(self.blocks)) for i in range(high_res_depth)]
         )
-
-    def convert_mask_to_kv_mask(
-        self,
-        input_size: Tuple[int, int] | Tuple[int, int, int],
-        mask: Tensor,
-    ) -> Tensor:
-        size = self.stem.tokenized_size(cast(Any, input_size))
-        kv_size = self.stem.kv_size(cast(Any, input_size))
-        B = mask.shape[0]
-        mask = mask.view(B, 1, *size)
-        mask = F.interpolate(mask.float(), size=kv_size, mode="nearest").to(mask.dtype)
-        mask = mask.view(B, -1)
-        return mask
+        # Blocks updating high res (dynamic) tokens with cross attention to fixed (coarse) tokens
+        self.dynamic_blocks = nn.ModuleList(
+            [self.create_decoder_layer(i + len(self.blocks), self_attn=False) for i in range(high_res_depth)]
+        )
 
     def forward(
         self,
@@ -267,38 +294,37 @@ class AdaptiveViT(ViT):
         B, C, *original_size = x.shape
         tokenized_size = self.stem.tokenized_size(cast(Any, tuple(original_size)))
 
-        # Tokenize to q (pooled tokens) and kv (high-res tokens)
-        q, kv = self.stem(x)
+        # Tokenize to fixed and dynamic tokens
+        dynamic_tokens = self.stem(x)
+        fixed_tokens = self.stem(self.resize_to_fixed(x))
 
-        # Apply token mask if given
+        # Mask tokens if given, storing the resized mask
         if mask is not None:
-            kv_mask = self.convert_mask_to_kv_mask(cast(Any, tuple(original_size)), mask)
-            q = apply_mask(mask, q, fill_value=mask_fill_value)
-            kv = apply_mask(kv_mask, kv, fill_value=mask_fill_value)
+            size = self.stem.tokenized_size(cast(Any, original_size))
+            fixed_mask = resize_mask(size, self.target_shape, mask)
+            fixed_tokens = apply_mask(fixed_mask, fixed_tokens, fill_value=mask_fill_value)
+            dynamic_tokens = apply_mask(mask, dynamic_tokens, fill_value=mask_fill_value)
         else:
-            kv_mask = None
+            fixed_mask = size = None
 
-        # Self attention encoder blocks to coarse tokens
-        if self.blocks is not None:
-            for block in cast(Any, self.blocks):
-                q = block(q)
+        # Self attention encoder blocks to fixed tokens
+        for block in cast(Any, self.blocks):
+            fixed_tokens = block(fixed_tokens)
 
-        # Cross attention blocks between fixed backbone tokens and high res input tokens
-        for block in self.high_res_blocks:
-            q = block(q, kv)
-        x = self.embedding_norm(q)
+        # Alternating cross attention blocks between fixed and dynamic tokens
+        for fixed_block, dynamic_block in zip(self.fixed_blocks, self.dynamic_blocks):
+            dynamic_tokens = dynamic_block(dynamic_tokens, fixed_tokens)
+            fixed_tokens = fixed_block(fixed_tokens, dynamic_tokens)
+
+        # Output norm
+        dynamic_tokens = self.embedding_norm(dynamic_tokens)
 
         # Reshape to original grid if requested
         if reshape and mask is not None and mask_fill_value is None:
             raise ValueError(
                 "Cannot reshape with mask and no fill value. Either specify `reshape=False` or provide a `mask_fill_value`"
             )
-        elif reshape and len(tokenized_size) == 3:
-            D, H, W = tokenized_size
-            x = rearrange(x, "b (d h w) c -> b c d h w", d=D, h=H, w=W)
         elif reshape:
-            assert len(tokenized_size) == 2
-            H, W = tokenized_size
-            x = rearrange(x, "b (h w) c -> b c h w", h=H, w=W)
+            dynamic_tokens = reshape_tokens(dynamic_tokens, tokenized_size)
 
-        return x
+        return dynamic_tokens

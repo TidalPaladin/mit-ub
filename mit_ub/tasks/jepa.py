@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
-from deep_helpers.tokens import apply_mask, create_mask
+from deep_helpers.tokens import apply_mask, create_mask, mask_is_ragged
 from torch import Tensor
 from torch.distributed import ReduceOp, all_reduce
 from torch.distributed import barrier as dist_barrier
@@ -17,6 +17,7 @@ from torch.optim.optimizer import Optimizer
 
 from ..data.augment import RandomNoise
 from ..model import BACKBONES, AdaptiveViT, ViT, compile_is_disabled
+from ..model.backbone import resize_mask
 from ..model.pos_enc import RelativeFactorizedPosition
 from ..model.transformer import TransformerDecoderLayer
 
@@ -198,7 +199,8 @@ class JEPA(Task):
     def create_mask(self, x: Tensor, unmasked_ratio: float, scale: int) -> Tensor:
         batch_size = x.shape[0]
         device = x.device
-        size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
+        dynamic_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
+        size = self.backbone.target_shape if isinstance(self.backbone, AdaptiveViT) else dynamic_size
         mask = create_mask(
             size,
             mask_ratio=1 - unmasked_ratio,
@@ -206,6 +208,13 @@ class JEPA(Task):
             scale=scale,
             device=device,
         )
+
+        # For AdaptiveViT we choose the base mask on the fixed tokenized size, then
+        # upsample it to the input shape.
+        if isinstance(self.backbone, AdaptiveViT):
+            mask = resize_mask(size, dynamic_size, mask)
+            assert not mask_is_ragged(mask), "Mask is ragged"
+
         return mask
 
     def create_metrics(self, state: State) -> tm.MetricCollection:
