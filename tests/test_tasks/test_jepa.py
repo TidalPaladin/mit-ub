@@ -12,8 +12,17 @@ from torch.testing import assert_close
 from mit_ub.tasks.jepa import JEPA, JEPAConfig, average_pairwise_cosine_similarity
 
 
-def test_average_pairwise_cosine_similarity():
-    B, L, D = 10, 128, 32
+@pytest.mark.parametrize(
+    "batch, tokens",
+    [
+        (10, 128),
+        (1, 128),
+        (10, 1),
+        (1, 1),
+    ],
+)
+def test_average_pairwise_cosine_similarity(batch, tokens):
+    B, L, D = batch, tokens, 32
     torch.manual_seed(0)
     x = torch.randn(B, L, D)
 
