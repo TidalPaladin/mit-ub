@@ -40,7 +40,7 @@ def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: 
     N = x.shape[pairwise_dim]
     x = F.normalize(x, dim=embed_dim, eps=eps)
     y = x.mean(pairwise_dim, keepdim=True).norm(dim=embed_dim, keepdim=True).pow(2).squeeze(embed_dim, pairwise_dim)
-    y.sub(1 / N).mul(N / (N - 1))
+    y.sub(1 / N).mul(N / max(N - 1, 1))
     return y
 
 
