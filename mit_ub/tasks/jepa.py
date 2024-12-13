@@ -23,6 +23,8 @@ from ..model.transformer import TransformerDecoderLayer
 
 
 EPS: Final = 1e-8
+torch._dynamo.config.cache_size_limit = 1024
+
 
 
 @torch.compile(fullgraph=True, disable=compile_is_disabled())
@@ -192,6 +194,9 @@ class JEPA(Task):
             self.jepa_config.salt_pepper_prob,
             self.jepa_config.noise_clip,
         )
+
+        #if isinstance(self.backbone, AdaptiveViT):
+        #    self.backbone.freeze_vit_weights(no_grad=True)
 
     def prepare_backbone(self, name: str) -> nn.Module:
         return BACKBONES.get(name).instantiate_with_metadata().fn
