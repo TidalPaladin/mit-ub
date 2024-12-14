@@ -70,8 +70,7 @@ def patch_embed_forward(
     pos = relative_factorized_position_forward(
         dims, w1_pos, b1_pos, w2_pos, b2_pos, w_pos_norm, b_pos_norm, activation, dropout=dropout, training=training
     )
-    x += pos
-    return x
+    return x + pos
 
 
 def _init_patch_embed(layer: nn.Module) -> None:

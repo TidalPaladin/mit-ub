@@ -1,0 +1,116 @@
+fit:
+  compile: true
+  float32_matmul_precision: medium
+  trainer:
+    accelerator: gpu
+    devices: 2
+    strategy: "ddp"
+    precision: "bf16-mixed"
+    max_steps: 250000
+    num_sanity_val_steps: 2
+    default_root_dir: /mnt/flash/chexpert
+    val_check_interval: 5000
+
+    callbacks:
+      - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+        init_args:
+          filename: "epoch={epoch}-step={step}-loss={val/loss:.4f}"
+          monitor: "val/loss"
+          auto_insert_metric_name: false
+          mode: min
+          save_last: true
+
+    logger: 
+      class_path: pytorch_lightning.loggers.wandb.WandbLogger
+      init_args:
+        save_dir: /mnt/flash/chexpert
+        project: chexpert
+        name: "mjepa-p1-noise"
+
+  model:
+    class_path: mit_ub.tasks.JEPAChexpert
+    init_args:
+      backbone: "chexpert-small-adaptive"
+      checkpoint: "/mnt/flash/chexpert/chexpert/0xwgk3th/checkpoints/last.ckpt"
+      strict_checkpoint: false
+
+      jepa_config:
+        ema_alpha: 0.98
+        weight_decay_final: null
+        momentum_schedule: false
+        context_ratio: 0.5
+        target_ratio: 0.25
+        context_subsample_ratio: 0.5
+        context_scale: 4
+        target_scale: 2
+        predictor_depth: 4
+
+      log_train_metrics_interval: 50
+
+      optimizer_init:
+        class_path: bitsandbytes.optim.AdamW8bit
+        init_args:
+          lr: 0.0001
+          weight_decay: 0.05
+          betas: [0.85, 0.999]
+      lr_interval: "step"
+      lr_scheduler_init:
+        class_path: deep_helpers.optim.ReciprocalSquareRootLR
+        init_args:
+          warmup_steps: 5000
+          cooldown_steps: 50000
+          total_steps: 250000
+          timescale: 10000
+          initial_lr: 0.00001
+          initial_momentum: 0.95
+      parameter_groups:
+        - params:
+            - "jepa_predictor"
+            - "jepa_out_proj"
+          weight_decay: 0.25
+        - params:
+            - "linear_probe"
+          weight_decay: 1.0
+
+  data:
+    class_path: mit_ub.data.CheXpertDataModule
+    init_args:
+      root: /mnt/data/chexpert/highres/
+      batch_size: 4
+      num_workers: 12
+      pin_memory: true
+
+      train_transforms:
+        class_path: torchvision.transforms.v2.Compose
+        init_args:
+          transforms:
+
+            - class_path: torchvision.transforms.v2.RandomResizedCrop
+              init_args:
+                size: [2048, 2048]
+                scale: [0.8, 1.0]
+                ratio: [0.8, 1.2]
+                antialias: true
+
+            - class_path: torchvision.transforms.v2.RandomHorizontalFlip
+              init_args:
+                p: 0.5
+
+            - class_path: torchvision.transforms.v2.RandomVerticalFlip
+              init_args:
+                p: 0.5
+
+            - class_path: torchvision.transforms.v2.ColorJitter
+              init_args:
+                brightness: 0.2
+                contrast: 0.2
+
+            - class_path: torchvision.transforms.v2.RandomInvert
+              init_args:
+                p: 0.5
+
+      val_transforms:
+        class_path: torchvision.transforms.v2.Resize
+        init_args:
+          size: [2048, 2048]
+          antialias: true

@@ -8,7 +8,7 @@ from registry import Registry
 from .backbone import AdaptiveViT, ViT
 from .convnext import ConvNext
 from .helpers import compile_is_disabled
-from .mlp import identity
+from .mlp import identity, relu2
 from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
 
@@ -203,6 +203,41 @@ BACKBONES(
     dropout=0.1,
     kernel_size=7,
     norm_layer=nn.BatchNorm2d,
+)
+
+BACKBONES(
+    ViT,
+    name="chexpert-small",
+    in_channels=1,
+    dim=512,
+    patch_size=16,
+    depth=15,
+    nhead=512 // HEAD_DIM,
+    num_kv_heads=512 // HEAD_DIM,
+    dropout=0.1,
+    stochastic_depth=0.1,
+    bias=False,
+    qk_norm=True,
+    activation=relu2,
+    gate_activation=None,
+)
+BACKBONES(
+    AdaptiveViT,
+    name="chexpert-small-adaptive",
+    in_channels=1,
+    dim=512,
+    patch_size=16,
+    target_shape=(32, 32),
+    depth=15,
+    high_res_depth=6,
+    nhead=512 // HEAD_DIM,
+    num_kv_heads=512 // HEAD_DIM,
+    dropout=0.1,
+    stochastic_depth=0.1,
+    bias=False,
+    qk_norm=True,
+    activation=relu2,
+    dynamic_layer_scale=0.01,
 )
 
 __all__ = [
