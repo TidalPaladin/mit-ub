@@ -1,4 +1,11 @@
 import os
+from typing import Tuple, TypeVar
+
+
+SpatialDims = TypeVar("SpatialDims", bound=Tuple[int, ...])
+Dims1D = Tuple[int]
+Dims2D = Tuple[int, int]
+Dims3D = Tuple[int, int, int]
 
 
 def compile_is_disabled() -> bool:

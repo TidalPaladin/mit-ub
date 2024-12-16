@@ -120,8 +120,20 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
     def patch_size(self) -> Tuple[int, int]:
         return self._patch_size
 
+    @property
+    def in_channels(self) -> int:
+        return self.w_in.shape[1] // math.prod(self.patch_size)
+
+    @property
+    def embed_dim(self) -> int:
+        return self.w_in.shape[0]
+
     def tokenized_size(self, _: Tuple[int, int]) -> Tuple[int, int]:
         return self._target_shape
+
+    def original_size(self, size: Tuple[int, int]) -> Tuple[int, int]:
+        h, w = tuple(s * p for s, p in zip(size, self.patch_size))
+        return h, w
 
     def kv_size(self, input_size: Tuple[int, int]) -> Tuple[int, int]:
         result = tuple(s // p for s, p in zip(input_size, self.patch_size))
@@ -188,8 +200,20 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
     def patch_size(self) -> Tuple[int, int, int]:
         return self._patch_size
 
+    @property
+    def in_channels(self) -> int:
+        return self.w_in.shape[1] // math.prod(self.patch_size)
+
+    @property
+    def embed_dim(self) -> int:
+        return self.w_in.shape[0]
+
     def tokenized_size(self, _: Tuple[int, int, int]) -> Tuple[int, int, int]:
         return self._target_shape
+
+    def original_size(self, size: Tuple[int, int, int]) -> Tuple[int, int, int]:
+        d, h, w = tuple(s * p for s, p in zip(size, self.patch_size))
+        return d, h, w
 
     def kv_size(self, input_size: Tuple[int, int, int]) -> Tuple[int, int, int]:
         result = tuple(s // p for s, p in zip(input_size, self.patch_size))
