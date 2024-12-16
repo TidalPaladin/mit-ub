@@ -4,11 +4,10 @@ from typing import Callable, Sequence, Tuple, cast
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from deep_helpers.helpers import to_tuple
 from einops import rearrange
 from torch import Tensor
 
-from ..helpers import Dims2D, compile_backend, compile_is_disabled
+from ..helpers import Dims2D, compile_backend, compile_is_disabled, to_tuple
 from ..layer_scale import LayerScale
 from ..mlp import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, MLP, mlp_forward, relu2
 

@@ -5,11 +5,10 @@ from typing import Callable, Sequence, Tuple, cast
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from deep_helpers.helpers import to_tuple
 from einops import rearrange
 from torch import Tensor
 
-from ..helpers import compile_backend, compile_is_disabled
+from ..helpers import compile_backend, compile_is_disabled, to_tuple
 from ..pos_enc import DEFAULT_POS_ENC_ACTIVATION, RelativeFactorizedPosition, relative_factorized_position_forward
 from .patch_embed import PatchEmbed, _init_patch_embed
 

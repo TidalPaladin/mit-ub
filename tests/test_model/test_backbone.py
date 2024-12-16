@@ -2,11 +2,11 @@ from typing import Any, cast
 
 import pytest
 import torch
-from deep_helpers.tokens import create_mask
 from torch.testing import assert_close
 
 from mit_ub.model import BACKBONES
 from mit_ub.model.backbone import AdaptiveViT, ViT
+from mit_ub.tokens import create_mask
 
 
 class TestViT:
