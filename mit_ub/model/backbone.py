@@ -2,11 +2,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import torch
 import torch.nn as nn
-from deep_helpers.tokens import apply_mask
 from einops import rearrange
 from torch import Tensor
 from torch.nn import functional as F
 
+from ..tokens import apply_mask
 from .helpers import compile_is_disabled
 from .mlp import relu2
 from .stem import PatchEmbed2d, PatchEmbed3d

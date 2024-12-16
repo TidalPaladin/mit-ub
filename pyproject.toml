@@ -10,25 +10,9 @@ authors = [
     {name = "Scott Chase Waggener", email = "tidalpaladin@protonmail.com"},
 ]
 dependencies = [
-    "numpy",
-    "pydicom",
     "torch",
-    "torchvision",
-    "torchmetrics",
-    "pytorch-lightning",
-    "timm>=0.5.4",
     "einops",
-    "pandas",
-    "Pillow",
-    "deep-helpers @ git+https://github.com/TidalPaladin/deep-helpers.git",
     "registry @ git+https://github.com/TidalPaladin/callable-registry.git",
-    "dicom-utils @ git+https://github.com/medcognetics/dicom-utils.git",
-    "torch-dicom[datamodule] @ git+https://github.com/medcognetics/torch-dicom.git",
-    "jsonargparse[signatures]",
-    "tqdm-multiprocessing",
-    "torchtune>=0.2.1",
-    "torchao>=0.5.0",
-    "bitsandbytes>=0.44.1",
 ]
 readme = "README.md"
 license = {text = "Apache"}
@@ -37,6 +21,16 @@ dynamic = ["version"]
 [project.optional-dependencies]
 docs = [
     "manim>=0.18.1",
+]
+train = [
+  "Pillow",
+  "pandas",
+  "pytorch-lightning>=2.4",
+  "torchvision",
+  "torchmetrics",
+  "bitsandbytes>=0.44.1",
+  "jsonargparse[signatures]",
+  "deep-helpers @ git+https://github.com/TidalPaladin/deep-helpers.git",
 ]
 [tool.autoflake]
 remove-all-unused-imports = true

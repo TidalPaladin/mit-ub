@@ -9,7 +9,6 @@ import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
-from deep_helpers.tokens import apply_mask, create_mask, mask_is_ragged
 from torch import Tensor
 from torch.distributed import ReduceOp, all_reduce
 from torch.distributed import barrier as dist_barrier
@@ -20,6 +19,7 @@ from ..model import BACKBONES, AdaptiveViT, ViT, compile_is_disabled
 from ..model.backbone import resize_mask
 from ..model.pos_enc import RelativeFactorizedPosition
 from ..model.transformer import TransformerDecoderLayer
+from ..tokens import apply_mask, create_mask, mask_is_ragged
 
 
 EPS: Final = 1e-8
@@ -194,7 +194,9 @@ class JEPA(Task):
         )
 
     def prepare_backbone(self, name: str) -> nn.Module:
-        return BACKBONES.get(name).instantiate_with_metadata().fn
+        backbone = BACKBONES.get(name).instantiate_with_metadata().fn
+        assert isinstance(backbone, nn.Module)
+        return backbone
 
     def create_mask(self, x: Tensor, unmasked_ratio: float, scale: int) -> Tensor:
         batch_size = x.shape[0]

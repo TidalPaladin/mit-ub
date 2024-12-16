@@ -193,11 +193,11 @@ class TestJEPA:
         assert opt.param_groups[0]["weight_decay"] == 1.0
         assert opt.param_groups[1]["weight_decay"] == 0.5
 
-    def test_fit(self, task, datamodule, logger):
+    def test_fit(self, task, cifar10_datamodule, logger):
         task.weight_decay_final = 4.0
         trainer = pl.Trainer(
             accelerator="cpu",
             fast_dev_run=True,
             logger=logger,
         )
-        trainer.fit(task, datamodule=datamodule)
+        trainer.fit(task, datamodule=cifar10_datamodule)
