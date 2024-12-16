@@ -77,7 +77,9 @@ class ClassificationTask(Task):
         self.save_hyperparameters()
 
     def prepare_backbone(self, name: str) -> nn.Module:
-        return BACKBONES.get(name).instantiate_with_metadata().fn
+        backbone = BACKBONES.get(name).instantiate_with_metadata().fn
+        assert isinstance(backbone, nn.Module)
+        return backbone
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
         return tm.MetricCollection(

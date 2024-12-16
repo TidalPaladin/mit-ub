@@ -1,10 +1,7 @@
-from argparse import ArgumentParser, Namespace
-from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
 import torch
 from torch import Tensor
-from torch_dicom.datasets.image import ImagePathInput, save_image
 from torchvision.transforms.v2 import Compose, RandomApply, RandomChoice, Transform
 
 from mit_ub.model.helpers import compile_is_disabled
@@ -145,28 +142,3 @@ class RandomNoise(Compose):
         )
         salt_pepper_noise = RandomApply([SaltPepperNoise(prob=salt_pepper_prob)], p=0.5)
         super().__init__([primary_noise, salt_pepper_noise])
-
-
-def parse_args() -> Namespace:
-    parser = ArgumentParser(description="Preview random noise applied to an image")
-    parser.add_argument("path", type=Path, help="Image to apply noise to")
-    parser.add_argument("-s", "--seed", type=int, default=0, help="Random seed")
-    parser.add_argument("--scale", type=float, default=0.2)
-    parser.add_argument("--salt-pepper-prob", type=float, nargs=2, default=(0.01, 0.05))
-    return parser.parse_args()
-
-
-def main(args: Namespace):
-    torch.random.manual_seed(args.seed)
-    image = next(iter(ImagePathInput(iter([args.path]))))["img"]
-    noise = RandomNoise(scale=args.scale, salt_pepper_prob=args.salt_pepper_prob)
-    image = noise(image)
-    save_image(image, Path("noised.png"))
-
-
-def entrypoint():
-    main(parse_args())
-
-
-if __name__ == "__main__":
-    entrypoint()
