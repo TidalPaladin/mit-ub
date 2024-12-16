@@ -138,13 +138,15 @@ class RelativeFactorizedPosition(nn.Module):
         d_out: int,
         dropout: float = 0.0,
         activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
+        dim_feedforward: int | None = None,
     ):
         super().__init__()
+        self._dim_feedforward = dim_feedforward or 2 * d_out
         self.dropout = dropout
         self.activation = activation
-        self.w_in = nn.Parameter(torch.empty(2 * d_out, d_in))
-        self.w_out = nn.Parameter(torch.empty(d_out, 2 * d_out))
-        self.b_in = nn.Parameter(torch.empty(2 * d_out))
+        self.w_in = nn.Parameter(torch.empty(self.dim_feedforward, d_in))
+        self.w_out = nn.Parameter(torch.empty(d_out, self.dim_feedforward))
+        self.b_in = nn.Parameter(torch.empty(self.dim_feedforward))
         self.b_out = nn.Parameter(torch.empty(d_out))
         self.w_norm = nn.Parameter(torch.empty(d_out))
         self.b_norm = nn.Parameter(torch.empty(d_out))
@@ -160,6 +162,27 @@ class RelativeFactorizedPosition(nn.Module):
                 nn.init.zeros_(bias)
 
         nn.init.ones_(self.w_norm)
+
+    @property
+    def d_in(self) -> int:
+        return self.w_in.shape[1]
+
+    @property
+    def d_out(self) -> int:
+        return self.w_out.shape[0]
+
+    @property
+    def dim_feedforward(self) -> int:
+        return self._dim_feedforward
+
+    def extra_repr(self) -> str:
+        return (
+            f"in={self.d_in}, "
+            f"hidden={self.dim_feedforward}, "
+            f"out={self.d_out}, "
+            f"dropout={self.dropout}, "
+            f"act={self.activation.__name__}"
+        )
 
     def forward(self, dims: Sequence[int]) -> Tensor:
         return relative_factorized_position_forward(

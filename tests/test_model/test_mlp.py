@@ -135,3 +135,8 @@ class TestMLP:
         layer.b_norm = norm.bias
         actual = layer(x)
         assert_close(baseline, actual)
+
+    def test_extra_repr(self):
+        layer = MLP(32, 64, 32)
+        result = str(layer)
+        assert result == "MLP(in=32, hidden=64, out=64, dropout=0.0, act=relu2, gate_act=None, bias=True, norm=False)"

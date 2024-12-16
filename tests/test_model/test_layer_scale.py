@@ -44,3 +44,8 @@ class TestLayerScale:
         x = torch.randn(B, L, D)
         layer = LayerScale(D, gamma=0.0)
         assert_close(layer(x), torch.zeros_like(x))
+
+    def test_extra_repr(self):
+        layer = LayerScale(32, gamma=1e-5, inplace=True)
+        result = str(layer)
+        assert result == "LayerScale(gamma=1e-05, inplace=True)"
