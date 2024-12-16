@@ -109,6 +109,14 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
     def patch_size(self) -> Tuple[int, int]:
         return self._patch_size
 
+    @property
+    def in_channels(self) -> int:
+        return self.w_in.shape[1] // math.prod(self.patch_size)
+
+    @property
+    def embed_dim(self) -> int:
+        return self.w_in.shape[0]
+
     def tokenized_size(self, size: Tuple[int, int]) -> Tuple[int, int]:
         r"""Computes the tokenized size of an input image.
         This is the size of the of the visual token grid accounting for the patch size.
@@ -122,6 +130,9 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         """
         ht, wt = tuple(s * p for s, p in zip(size, self.patch_size))
         return ht, wt
+
+    def extra_repr(self) -> str:
+        return f"in={self.in_channels}, " f"embed={self.embed_dim}, " f"patch_size={self.patch_size}"
 
     def forward(self, x: Tensor) -> Tensor:
         return patch_embed_forward(
@@ -170,6 +181,14 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
     def patch_size(self) -> Tuple[int, int, int]:
         return self._patch_size
 
+    @property
+    def in_channels(self) -> int:
+        return self.w_in.shape[1] // math.prod(self.patch_size)
+
+    @property
+    def embed_dim(self) -> int:
+        return self.w_in.shape[0]
+
     def tokenized_size(self, size: Tuple[int, int, int]) -> Tuple[int, int, int]:
         r"""Computes the tokenized size of an input image.
         This is the size of the of the visual token grid accounting for the patch size.
@@ -202,3 +221,6 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
             activation=self.pos_enc.activation,
             training=self.training,
         )
+
+    def extra_repr(self) -> str:
+        return f"in={self.in_channels}, " f"embed={self.embed_dim}, " f"patch_size={self.patch_size}"

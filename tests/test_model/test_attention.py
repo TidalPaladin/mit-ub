@@ -237,3 +237,11 @@ class TestMultiHeadAttention:
         baseline = model(q, k, v)
 
         assert_close(baseline, actual)
+
+    def test_extra_repr(self):
+        layer = MultiHeadAttention(32, 8, 8)
+        result = str(layer)
+        assert (
+            result
+            == "MultiHeadAttention(dim=32, heads=8, kv_heads=8, head_dim=4, kv_dim=32, dropout=0.0, norm=False, qk_norm=False, bias=True)"
+        )

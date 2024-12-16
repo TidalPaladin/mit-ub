@@ -145,3 +145,11 @@ class TestSoftMoE:
         layer.b_pre_norm = None  # type: ignore
         y_no_norm = layer(x)
         assert not torch.allclose(y_norm, y_no_norm)
+
+    def test_extra_repr(self):
+        layer = SoftMoE(32, 64, 4, 16, nhead=8)
+        result = str(layer)
+        assert (
+            result
+            == "SoftMoE(in=32, hidden=64, out=32, experts=4, slots=16, nhead=8, dropout=0.0, act=relu2, gate_act=None, bias=True, norm=False, qk_norm=False)"
+        )

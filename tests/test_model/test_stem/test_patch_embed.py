@@ -84,6 +84,12 @@ class TestPatchEmbed2d:
                 continue
             assert not torch.allclose(param, weights_reset[name], equal_nan=True)
 
+    def test_extra_repr(self):
+        layer = PatchEmbed2d(3, 64, (4, 4))
+        result = str(layer)
+        exp = "PatchEmbed2d(\n  in=3, embed=64, patch_size=(4, 4)\n  (pos_enc): RelativeFactorizedPosition(in=2, hidden=128, out=64, dropout=0.0, act=silu)\n)"
+        assert result == exp
+
 
 class TestPatchEmbed3d:
 
@@ -132,3 +138,9 @@ class TestPatchEmbed3d:
             if (param == 0).all() or (param == 1).all():
                 continue
             assert not torch.allclose(param, weights_reset[name], equal_nan=True)
+
+    def test_extra_repr(self):
+        layer = PatchEmbed3d(3, 64, (4, 4, 4))
+        result = str(layer)
+        exp = "PatchEmbed3d(\n  in=3, embed=64, patch_size=(4, 4, 4)\n  (pos_enc): RelativeFactorizedPosition(in=3, hidden=128, out=64, dropout=0.0, act=silu)\n)"
+        assert result == exp

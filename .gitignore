@@ -148,6 +148,7 @@ coverage.xml
 
 # Animations
 docs/manim/media/
+*.mp4
 
 # Latex
 *.aux

@@ -21,5 +21,8 @@ class LayerScale(nn.Module):
     def reset_parameters(self):
         self.gamma.data.fill_(self._gamma)
 
+    def extra_repr(self) -> str:
+        return f"gamma={self._gamma}, inplace={self.inplace}"
+
     def forward(self, x: Tensor) -> Tensor:
         return layer_scale(x, self.gamma, self.inplace)

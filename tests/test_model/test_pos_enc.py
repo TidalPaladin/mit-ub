@@ -112,3 +112,8 @@ class TestRelativeFactorizedPosition:
             if (param == 0).all() or (param == 1).all():
                 continue
             assert not torch.allclose(param, weights_reset[name], equal_nan=True)
+
+    def test_extra_repr(self):
+        layer = RelativeFactorizedPosition(2, 16)
+        result = str(layer)
+        assert result == "RelativeFactorizedPosition(in=2, hidden=32, out=16, dropout=0.0, act=silu)"

@@ -213,6 +213,23 @@ class MultiHeadAttention(nn.Module):
     def norm(self) -> bool:
         return self.w_pre_norm is not None
 
+    @property
+    def bias(self) -> bool:
+        return self.b_in is not None
+
+    def extra_repr(self) -> str:
+        return (
+            f"dim={self.embed_dim}, "
+            f"heads={self.num_heads}, "
+            f"kv_heads={self.num_kv_heads}, "
+            f"head_dim={self.head_dim}, "
+            f"kv_dim={self.kv_dim}, "
+            f"dropout={self.dropout}, "
+            f"norm={self.norm}, "
+            f"qk_norm={self.qk_norm}, "
+            f"bias={self.bias}"
+        )
+
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
         # Self attention
         if q is k and k is v:
