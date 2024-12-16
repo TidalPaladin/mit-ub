@@ -57,7 +57,6 @@ class TestTransformerEncoderLayer:
             out = layer(x)
         assert out.shape == x.shape
 
-    @pytest.mark.skip
     def test_forward_multi_query(self):
         B, L, D = 1, 128, 128
         x = torch.randn(B, L, D)
@@ -189,7 +188,6 @@ class TestTransformerDecoderLayer:
             out = layer(q, k)
         assert out.shape == q.shape
 
-    @pytest.mark.skip
     def test_forward_multi_query(self):
         B, Lq, Dq = 1, 64, 128
         B, Lk, Dk = 1, 128, 32
