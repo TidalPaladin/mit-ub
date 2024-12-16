@@ -145,7 +145,7 @@ class MLP(nn.Module):
 
     @property
     def out_features(self) -> int:
-        return self.w_out.shape[-1]
+        return self.w_out.shape[-2]
 
     @property
     def hidden_features(self) -> int:
