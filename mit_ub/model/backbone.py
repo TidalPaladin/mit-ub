@@ -389,7 +389,7 @@ class AdaptiveViT(ViT):
         return dynamic_tokens
 
 
-class ConvViT(ViT):
+class ConvViT(AdaptiveViT):
 
     def __init__(
         self,
@@ -398,7 +398,6 @@ class ConvViT(ViT):
         patch_size: int | Tuple[int, int] | Tuple[int, int, int],
         target_shape: Tuple[int, int] | Tuple[int, int, int],
         depth: int,
-        high_res_depth: int,
         nhead: int,
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
@@ -412,12 +411,14 @@ class ConvViT(ViT):
         num_slots: int | None = None,
         moe_layers: List[int] = [],
         layer_scale: float | None = None,
+        layer_scale_adaptive: float | None = 1e-4,
         kernel_size: int | Dims2D = 7,
     ):
         super().__init__(
             in_channels,
             dim,
             patch_size,
+            target_shape,
             depth,
             nhead,
             dim_feedforward,
@@ -426,27 +427,25 @@ class ConvViT(ViT):
             gate_activation,
             num_kv_heads,
             qk_norm,
+            stochastic_depth,
+            bias,
             num_experts,
             num_slots,
             moe_layers,
             layer_scale,
-            stochastic_depth,
-            bias,
+            layer_scale_adaptive,
         )
         self._kernel_size = kernel_size
-        self.resize_to_fixed = nn.Upsample(
-            size=target_shape,
-            mode="bilinear",
-            align_corners=False,
-        )
-        self.target_shape = cast(Any, target_shape)
-        self.dynamic_stem = deepcopy(self.stem)
-        self.combine_proj = nn.Linear(self._dim, self._dim)
 
-        # Blocks updating fixed (coarse) tokens with cross attention to high res (dynamic) tokens
+        # Update dynamic blocks to include the ConvNext mixer
         self.dynamic_blocks = nn.ModuleList(
-            [self.create_conv_decoder_layer(i + len(self.blocks)) for i in range(high_res_depth)]
+            [self.create_conv_decoder_layer(i + len(self.blocks), self_attn=False) for i in range(depth)]
         )
+        # Override the layer scale of the ConvNext mixer
+        for block in self.dynamic_blocks:
+            block.conv.layer_scale = (
+                LayerScale(self._dim, layer_scale_adaptive) if layer_scale_adaptive is not None else nn.Identity()
+            )
 
     def create_mask(
         self,
@@ -496,30 +495,25 @@ class ConvViT(ViT):
         return layer
 
     def forward(self, x: Tensor, reshape: bool = True) -> Tensor:
-        # Compute sizes for fixed and dynamic paths
-        _, _, *original_size = x.shape
-        dynamic_tokenized_size = self.stem.tokenized_size(cast(Any, tuple(original_size)))
+        B, C, *original_size = x.shape
+        dynamic_tokenized_size = self.dynamic_stem.tokenized_size(cast(Any, tuple(original_size)))
         fixed_tokenized_size = self.stem.tokenized_size(cast(Any, tuple(self.target_shape)))
 
-        # Process fixed tokens as standard ViT
-        fixed_tokens = super().forward(
-            self.resize_to_fixed(x),
-            reshape=False,
-        )
+        # Tokenize to fixed and dynamic tokens
+        dynamic_tokens = self.dynamic_stem(x)
+        fixed_tokens = self.stem(self.resize_to_fixed(x))
 
-        # Initialize the dynamic tokens, adding upsampled fixed tokens
-        upsampled_fixed = self.combine_proj(fixed_tokens)
-        upsampled_fixed = F.interpolate(
-            tokens_to_grid(upsampled_fixed, fixed_tokenized_size),
-            size=dynamic_tokenized_size,
-            mode="bilinear",
-        )
-        dynamic_tokens = tokens_to_grid(self.dynamic_stem(x), dynamic_tokenized_size) + upsampled_fixed
-        dynamic_tokens = grid_to_tokens(dynamic_tokens)
+        # Run the backbone
+        for block, dynamic_block in zip(self.blocks, self.dynamic_blocks):
+            fixed_tokens = block(fixed_tokens, dynamic_tokens)
+            dynamic_tokens = dynamic_block(dynamic_tokens, fixed_tokens, size=dynamic_tokenized_size)
 
-        # Dynamic blocks
-        for block in self.dynamic_blocks:
-            dynamic_tokens = block(dynamic_tokens, fixed_tokens, dynamic_tokenized_size)
+        # Upsample fixed tokens and add to dynamic tokens
+        fixed_tokens = tokens_to_grid(fixed_tokens, fixed_tokenized_size)
+        fixed_tokens = F.interpolate(fixed_tokens, size=dynamic_tokenized_size, mode="nearest")
+        fixed_tokens = grid_to_tokens(fixed_tokens)
+        assert fixed_tokens.shape == dynamic_tokens.shape
+        dynamic_tokens = self.dynamic_output_scale(dynamic_tokens) + fixed_tokens
 
         # Output norm
         dynamic_tokens = self.embedding_norm(dynamic_tokens)

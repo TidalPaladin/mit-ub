@@ -251,7 +251,7 @@ class TestConvViT:
     def test_forward(self, device, dtype):
         x = torch.randn(1, 3, 224, 224, device=device)
         nhead = 128 // 16
-        model = ConvViT(3, 128, (16, 16), (64, 64), 3, 3, nhead).to(device)
+        model = ConvViT(3, 128, (16, 16), (64, 64), 3, nhead).to(device)
         with torch.autocast(device_type=device, dtype=dtype, enabled=True):
             out = model(x)
         assert out.shape[:2] == (1, 128)
@@ -267,7 +267,7 @@ class TestConvViT:
     def test_backward(self, device, dtype):
         x = torch.randn(1, 3, 224, 224, device=device, requires_grad=True)
         nhead = 128 // 16
-        model = ConvViT(3, 128, (16, 16), (64, 64), 3, 3, nhead).to(device)
+        model = ConvViT(3, 128, (16, 16), (64, 64), 3, nhead).to(device)
 
         with torch.autocast(device_type=device, dtype=dtype):
             out = model(x)
@@ -280,7 +280,7 @@ class TestConvViT:
     def test_forward_deterministic(self):
         x = torch.randn(1, 3, 224, 224)
         nhead = 128 // 16
-        model = ConvViT(3, 128, (16, 16), (64, 64), 3, 3, nhead)
+        model = ConvViT(3, 128, (16, 16), (64, 64), 3, nhead)
 
         model.train()
         with torch.autocast(device_type="cpu", dtype=torch.float16):
@@ -294,15 +294,42 @@ class TestConvViT:
             out2 = model(x)
         assert torch.allclose(out1, out2)
 
-    def test_load_from_vit(self):
+    def test_load_from_adaptive_vit(self):
         C, D, D_kv = 3, 128, 32
         depth = 3
-        depth_adaptive = 2
         nhead = 128 // 16
-        model = ConvViT(C, D, (16, 16), (64, 64), depth, depth_adaptive, nhead)
-        model2 = ViT(C, D, (16, 16), depth, nhead)
-        for p1, p2 in zip(model.blocks.parameters(), model2.blocks.parameters()):
-            assert p1.shape == p2.shape
+        baseline = AdaptiveViT(C, D, (16, 16), (64, 64), depth, nhead)
+        model = ConvViT(C, D, (16, 16), (64, 64), depth, nhead)
+        for name, param in baseline.blocks.named_parameters():
+            assert param.shape == model.blocks.get_parameter(name).shape
+
+    def test_initialize_like_adaptive_vit(self):
+        C, D, D_kv = 3, 128, 32
+        H, W = 256, 256
+        depth = 3
+        nhead = 128 // 16
+
+        # Set the adaptive model to process fixed tokens at native resolution.
+        # Layer scale at 1e-9 should shut off the contribution of the dynamic tokens.
+        model = ConvViT(C, D, (16, 16), (256, 256), depth, nhead, layer_scale_adaptive=1e-9)
+        baseline = AdaptiveViT(C, D, (16, 16), (256, 256), depth, nhead)
+
+        # Put the baseline weights into the model
+        set_weights = []
+        for name, base_param in baseline.named_parameters():
+            try:
+                model_param = model.get_parameter(name)
+                model_param.data = base_param.data
+                set_weights.append(name)
+            except Exception:
+                pass
+
+        model.eval()
+        baseline.eval()
+        x = torch.randn(1, C, H, W)
+        y = model(x)
+        y_baseline = baseline(x)
+        assert_close(y, y_baseline)
 
 
 @pytest.mark.ci_skip

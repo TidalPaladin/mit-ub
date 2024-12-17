@@ -128,7 +128,8 @@ BACKBONES(
     name="convvit-cifar10",
     in_channels=3,
     dim=CIFAR10_DIM,
-    patch_size=2,
+    patch_size=4,
+    target_shape=(16, 16),
     depth=12,
     nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
     num_kv_heads=CIFAR10_DIM // CIFAR10_HEAD_DIM,
@@ -138,8 +139,6 @@ BACKBONES(
     qk_norm=True,
     activation=identity,
     gate_activation=F.silu,
-    target_shape=(8, 8),
-    high_res_depth=6,
 )
 
 
