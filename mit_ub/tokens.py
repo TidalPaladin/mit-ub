@@ -93,6 +93,15 @@ def apply_mask(
         return _apply_ragged(mask, x, padding_value)
 
 
+def unapply_mask(mask: Tensor, x: Tensor) -> Tensor:
+    assert not mask_is_ragged(mask), "Cannot unapply ragged mask"
+    B, L = mask.shape
+    D = x.shape[-1]
+    result = x.new_zeros((B, L, D))
+    result.masked_scatter_(mask.view(B, L, 1), x)
+    return result
+
+
 def create_mask(
     size: Sequence[int],
     mask_ratio: float,

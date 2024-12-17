@@ -6,9 +6,10 @@ import torch.nn as nn
 from torch import Tensor
 from torch.nn import functional as F
 
-from ..tokens import apply_mask, create_mask, mask_is_ragged
+from ..tokens import apply_mask, create_mask, mask_is_ragged, unapply_mask
 from .convnext.convnext import grid_to_tokens, tokens_to_grid
 from .helpers import Dims2D, compile_is_disabled
+from .layer_scale import LayerScale
 from .mlp import relu2
 from .stem import PatchEmbed2d, PatchEmbed3d
 from .transformer import TransformerConvDecoderLayer, TransformerDecoderLayer, TransformerEncoderLayer
@@ -246,7 +247,6 @@ class AdaptiveViT(ViT):
         patch_size: int | Tuple[int, int] | Tuple[int, int, int],
         target_shape: Tuple[int, int] | Tuple[int, int, int],
         depth: int,
-        high_res_depth: int,
         nhead: int,
         dim_feedforward: Optional[int] = None,
         dropout: float = 0.1,
@@ -260,6 +260,7 @@ class AdaptiveViT(ViT):
         num_slots: int | None = None,
         moe_layers: List[int] = [],
         layer_scale: float | None = None,
+        layer_scale_adaptive: float | None = 1e-4,
     ):
         super().__init__(
             in_channels,
@@ -280,20 +281,35 @@ class AdaptiveViT(ViT):
             stochastic_depth,
             bias,
         )
+        self.target_shape = cast(Any, target_shape)
+
+        # Resize input for the fixed tokens
         self.resize_to_fixed = nn.Upsample(
             size=target_shape,
             mode="bilinear",
             align_corners=False,
         )
-        self.target_shape = cast(Any, target_shape)
 
-        # Blocks updating fixed (coarse) tokens with cross attention to high res (dynamic) tokens
-        self.fixed_blocks = nn.ModuleList(
-            [self.create_decoder_layer(i + len(self.blocks)) for i in range(high_res_depth)]
-        )
+        # Separate stem for dynamic tokens
+        self.dynamic_stem = deepcopy(self.stem)
+
+        # Convert ViT blocks into decoder layers that cross-attend to the dynamic tokens.
+        # We also override the layer scale of the cross attention so that the initialization condition
+        # is close to identity.
+        self.blocks = nn.ModuleList([self.create_decoder_layer(i) for i in range(depth)])
+        for block in self.blocks:
+            block.layer_scale_cross = (
+                LayerScale(self._dim, layer_scale_adaptive) if layer_scale_adaptive is not None else nn.Identity()
+            )
+
         # Blocks updating high res (dynamic) tokens with cross attention to fixed (coarse) tokens
         self.dynamic_blocks = nn.ModuleList(
-            [self.create_decoder_layer(i + len(self.blocks), self_attn=False) for i in range(high_res_depth)]
+            [self.create_decoder_layer(i + len(self.blocks), self_attn=False) for i in range(depth)]
+        )
+
+        # Initialize the dynamic pathway to have low contribution
+        self.dynamic_output_scale = (
+            LayerScale(self._dim, layer_scale_adaptive) if layer_scale_adaptive is not None else nn.Identity()
         )
 
     def create_mask(
@@ -330,29 +346,34 @@ class AdaptiveViT(ViT):
         mask_fill_value: float | Tensor | None = None,
     ) -> Tensor:
         B, C, *original_size = x.shape
-        dynamic_tokenized_size = self.stem.tokenized_size(cast(Any, tuple(original_size)))
+        dynamic_tokenized_size = self.dynamic_stem.tokenized_size(cast(Any, tuple(original_size)))
         fixed_tokenized_size = self.stem.tokenized_size(cast(Any, tuple(self.target_shape)))
+        fixed_mask = resize_mask(dynamic_tokenized_size, fixed_tokenized_size, mask) if mask is not None else None
 
         # Tokenize to fixed and dynamic tokens
-        dynamic_tokens = self.stem(x)
+        dynamic_tokens = self.dynamic_stem(x)
         fixed_tokens = self.stem(self.resize_to_fixed(x))
 
         # Mask tokens if given, storing the resized mask
-        if mask is not None:
-            fixed_mask = resize_mask(dynamic_tokenized_size, fixed_tokenized_size, mask)
+        if mask is not None and fixed_mask is not None:
             fixed_tokens = apply_mask(fixed_mask, fixed_tokens, fill_value=mask_fill_value)
             dynamic_tokens = apply_mask(mask, dynamic_tokens, fill_value=mask_fill_value)
-        else:
-            fixed_mask = None
 
-        # Self attention encoder blocks to fixed tokens
-        for block in cast(Any, self.blocks):
-            fixed_tokens = block(fixed_tokens)
-
-        # Alternating cross attention blocks between fixed and dynamic tokens
-        for fixed_block, dynamic_block in zip(self.fixed_blocks, self.dynamic_blocks):
-            fixed_tokens = fixed_block(fixed_tokens, dynamic_tokens)
+        # Run the backbone
+        for block, dynamic_block in zip(self.blocks, self.dynamic_blocks):
+            fixed_tokens = block(fixed_tokens, dynamic_tokens)
             dynamic_tokens = dynamic_block(dynamic_tokens, fixed_tokens)
+
+        # Upsample fixed tokens and add to dynamic tokens
+        if mask is not None and fixed_mask is not None:
+            fixed_tokens = unapply_mask(fixed_mask, fixed_tokens)
+        fixed_tokens = tokens_to_grid(fixed_tokens, fixed_tokenized_size)
+        fixed_tokens = F.interpolate(fixed_tokens, size=dynamic_tokenized_size, mode="nearest")
+        fixed_tokens = grid_to_tokens(fixed_tokens)
+        if mask is not None and fixed_mask is not None:
+            fixed_tokens = apply_mask(mask, fixed_tokens, fill_value=mask_fill_value)
+        assert fixed_tokens.shape == dynamic_tokens.shape
+        dynamic_tokens = self.dynamic_output_scale(dynamic_tokens) + fixed_tokens
 
         # Output norm
         dynamic_tokens = self.embedding_norm(dynamic_tokens)
