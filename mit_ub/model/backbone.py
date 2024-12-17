@@ -6,7 +6,7 @@ import torch.nn as nn
 from torch import Tensor
 from torch.nn import functional as F
 
-from ..tokens import apply_mask
+from ..tokens import apply_mask, create_mask, mask_is_ragged
 from .convnext.convnext import grid_to_tokens, tokens_to_grid
 from .helpers import Dims2D, compile_is_disabled
 from .mlp import relu2
@@ -171,6 +171,41 @@ class ViT(nn.Module):
         layer = TransformerDecoderLayer(**_kwargs)
         return layer
 
+    def create_mask(
+        self,
+        input: Tensor,
+        unmasked_ratio: float,
+        scale: int,
+    ) -> Tensor:
+        r"""Creates a token mask for the input.
+
+        Args:
+            input: Input tensor from which to infer mask properties.
+                Should be a raw input prior to tokenization.
+            unmasked_ratio: Proportion of tokens to leave unmasked.
+            scale: Scale of the mask.
+
+        Shapes:
+            - input: :math:`(B, C, H, W)` or :math:`(B, C, D, H, W)`
+            - output: :math:`(B, L)`
+
+        Returns:
+            Token mask.
+        """
+        batch_size = input.shape[0]
+        device = input.device
+        original_size = input.shape[2:]
+        tokenized_size = self.stem.tokenized_size(cast(Any, original_size))
+        mask = create_mask(
+            tokenized_size,
+            mask_ratio=1 - unmasked_ratio,
+            batch_size=batch_size,
+            scale=scale,
+            device=device,
+        )
+
+        return mask
+
     def forward(
         self,
         x: Tensor,
@@ -246,7 +281,7 @@ class AdaptiveViT(ViT):
             bias,
         )
         self.resize_to_fixed = nn.Upsample(
-            size=self.stem.original_size(cast(Any, target_shape)),
+            size=target_shape,
             mode="bilinear",
             align_corners=False,
         )
@@ -261,6 +296,32 @@ class AdaptiveViT(ViT):
             [self.create_decoder_layer(i + len(self.blocks), self_attn=False) for i in range(high_res_depth)]
         )
 
+    def create_mask(
+        self,
+        input: Tensor,
+        unmasked_ratio: float,
+        scale: int,
+    ) -> Tensor:
+        batch_size = input.shape[0]
+        device = input.device
+
+        # Create the mask based on the fixed tokenized size
+        fixed_size = self.stem.tokenized_size(cast(Any, self.target_shape))
+        mask = create_mask(
+            fixed_size,
+            mask_ratio=1 - unmasked_ratio,
+            batch_size=batch_size,
+            scale=scale,
+            device=device,
+        )
+
+        # Resize the mask to the dynamic tokenized size to ensure non-ragged mask
+        dynamic_size = self.stem.tokenized_size(cast(Any, input.shape[2:]))
+        mask = resize_mask(fixed_size, dynamic_size, mask)
+        assert not mask_is_ragged(mask), "Mask is ragged"
+
+        return mask
+
     def forward(
         self,
         x: Tensor,
@@ -269,7 +330,8 @@ class AdaptiveViT(ViT):
         mask_fill_value: float | Tensor | None = None,
     ) -> Tensor:
         B, C, *original_size = x.shape
-        tokenized_size = self.stem.tokenized_size(cast(Any, tuple(original_size)))
+        dynamic_tokenized_size = self.stem.tokenized_size(cast(Any, tuple(original_size)))
+        fixed_tokenized_size = self.stem.tokenized_size(cast(Any, tuple(self.target_shape)))
 
         # Tokenize to fixed and dynamic tokens
         dynamic_tokens = self.stem(x)
@@ -277,12 +339,11 @@ class AdaptiveViT(ViT):
 
         # Mask tokens if given, storing the resized mask
         if mask is not None:
-            size = self.stem.tokenized_size(cast(Any, original_size))
-            fixed_mask = resize_mask(size, self.target_shape, mask)
+            fixed_mask = resize_mask(dynamic_tokenized_size, fixed_tokenized_size, mask)
             fixed_tokens = apply_mask(fixed_mask, fixed_tokens, fill_value=mask_fill_value)
             dynamic_tokens = apply_mask(mask, dynamic_tokens, fill_value=mask_fill_value)
         else:
-            fixed_mask = size = None
+            fixed_mask = None
 
         # Self attention encoder blocks to fixed tokens
         for block in cast(Any, self.blocks):
@@ -290,8 +351,8 @@ class AdaptiveViT(ViT):
 
         # Alternating cross attention blocks between fixed and dynamic tokens
         for fixed_block, dynamic_block in zip(self.fixed_blocks, self.dynamic_blocks):
-            dynamic_tokens = dynamic_block(dynamic_tokens, fixed_tokens)
             fixed_tokens = fixed_block(fixed_tokens, dynamic_tokens)
+            dynamic_tokens = dynamic_block(dynamic_tokens, fixed_tokens)
 
         # Output norm
         dynamic_tokens = self.embedding_norm(dynamic_tokens)
@@ -302,7 +363,7 @@ class AdaptiveViT(ViT):
                 "Cannot reshape with mask and no fill value. Either specify `reshape=False` or provide a `mask_fill_value`"
             )
         elif reshape:
-            dynamic_tokens = tokens_to_grid(dynamic_tokens, tokenized_size)
+            dynamic_tokens = tokens_to_grid(dynamic_tokens, dynamic_tokenized_size)
 
         return dynamic_tokens
 
@@ -365,6 +426,14 @@ class ConvViT(ViT):
         self.dynamic_blocks = nn.ModuleList(
             [self.create_conv_decoder_layer(i + len(self.blocks)) for i in range(high_res_depth)]
         )
+
+    def create_mask(
+        self,
+        input: Tensor,
+        unmasked_ratio: float,
+        scale: int,
+    ) -> Tensor:
+        raise NotImplementedError("ConvViT does not support masks")
 
     def create_conv_decoder_layer(self, i: int = 0, d_kv: int | None = None, **kwargs) -> TransformerDecoderLayer:
         """

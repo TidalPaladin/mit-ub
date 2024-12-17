@@ -70,7 +70,10 @@ def run_ema_sync(rank, world_size, backbone, optimizer_init):
 class TestJEPA:
     @pytest.fixture
     def task(self, optimizer_init, backbone):
-        return JEPA(backbone, optimizer_init=optimizer_init)
+        config = JEPAConfig()
+        config.context_scale = 1
+        config.target_scale = 1
+        return JEPA(backbone, optimizer_init=optimizer_init, jepa_config=config)
 
     @pytest.mark.parametrize(
         "momentum_schedule,max_steps,current_step,ema_alpha,expected",
