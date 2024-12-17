@@ -18,11 +18,12 @@ class TestViT:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
-    def test_forward(self, device):
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_forward(self, device, dtype):
         x = torch.randn(1, 3, 224, 224, device=device)
         nhead = 128 // 16
         model = ViT(3, 128, (16, 16), 3, nhead).to(device)
-        with torch.autocast(device_type=device, dtype=torch.float16):
+        with torch.autocast(device_type=device, dtype=dtype, enabled=True):
             out = model(x)
         assert out.shape[:2] == (1, 128)
 
@@ -33,15 +34,19 @@ class TestViT:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
-    def test_backward(self, device):
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_backward(self, device, dtype):
         x = torch.randn(1, 3, 224, 224, device=device, requires_grad=True)
         nhead = 128 // 16
         model = ViT(3, 128, (16, 16), 3, nhead).to(device)
 
-        with torch.autocast(device_type=device, dtype=torch.float16):
+        with torch.autocast(device_type=device, dtype=dtype):
             out = model(x)
             out = out.sum()
         out.sum().backward()
+        for name, param in model.named_parameters():
+            assert param.grad is not None, f"{name} has no gradient"
+            assert not param.grad.isnan().any(), f"{name} has nan gradient"
 
     @pytest.mark.parametrize(
         "device",
@@ -58,9 +63,8 @@ class TestViT:
         nhead = 128 // 16
         model = ViT(C, D, patch_size, depth, nhead).to(device)
 
-        mask_size = model.stem.tokenized_size(cast(Any, (H, W)))
-        mask = create_mask(mask_size, batch_size=B, mask_ratio=0.25, scale=1)
         x = torch.randn(B, C, H, W, device=device)
+        mask = model.create_mask(x, unmasked_ratio=0.25, scale=1)
         with torch.autocast(device_type=device, dtype=torch.float16):
             out1 = model(x, reshape=False)
             out2 = model(x, mask=mask, reshape=False)
@@ -110,11 +114,12 @@ class TestAdaptiveViT:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
-    def test_forward(self, device):
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_forward(self, device, dtype):
         x = torch.randn(1, 3, 224, 224, device=device)
         nhead = 128 // 16
-        model = AdaptiveViT(3, 128, (16, 16), (4, 4), 3, 3, nhead).to(device)
-        with torch.autocast(device_type=device, dtype=torch.float16, enabled=True):
+        model = AdaptiveViT(3, 128, (16, 16), (64, 64), 3, 3, nhead).to(device)
+        with torch.autocast(device_type=device, dtype=dtype, enabled=True):
             out = model(x)
         assert out.shape[:2] == (1, 128)
 
@@ -125,15 +130,19 @@ class TestAdaptiveViT:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
-    def test_backward(self, device):
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_backward(self, device, dtype):
         x = torch.randn(1, 3, 224, 224, device=device, requires_grad=True)
         nhead = 128 // 16
-        model = AdaptiveViT(3, 128, (16, 16), (4, 4), 3, 3, nhead).to(device)
+        model = AdaptiveViT(3, 128, (16, 16), (64, 64), 3, 3, nhead).to(device)
 
-        with torch.autocast(device_type=device, dtype=torch.float16):
+        with torch.autocast(device_type=device, dtype=dtype):
             out = model(x)
             out = out.sum()
         out.sum().backward()
+        for name, param in model.named_parameters():
+            assert param.grad is not None, f"{name} has no gradient"
+            assert not param.grad.isnan().any(), f"{name} has nan gradient"
 
     @pytest.mark.parametrize(
         "device",
@@ -145,7 +154,7 @@ class TestAdaptiveViT:
     def test_token_mask(self, device):
         torch.random.manual_seed(0)
         B, C, H, W = 1, 3, 256, 256
-        D, patch_size, target_size, depth = 128, (16, 16), (4, 4), 3
+        D, patch_size, target_size, depth = 128, (16, 16), (64, 64), 3
         nhead = 128 // 16
         model = AdaptiveViT(C, D, patch_size, target_size, depth, depth, nhead).to(device)
 
@@ -161,7 +170,7 @@ class TestAdaptiveViT:
     def test_forward_deterministic(self):
         x = torch.randn(1, 3, 224, 224)
         nhead = 128 // 16
-        model = AdaptiveViT(3, 128, (16, 16), (4, 4), 3, 3, nhead)
+        model = AdaptiveViT(3, 128, (16, 16), (64, 64), 3, 3, nhead)
 
         model.train()
         with torch.autocast(device_type="cpu", dtype=torch.float16):
@@ -180,7 +189,7 @@ class TestAdaptiveViT:
         depth = 3
         depth_adaptive = 2
         nhead = 128 // 16
-        model = AdaptiveViT(C, D, (16, 16), (4, 4), depth, depth_adaptive, nhead)
+        model = AdaptiveViT(C, D, (16, 16), (64, 64), depth, depth_adaptive, nhead)
         model2 = ViT(C, D, (16, 16), depth, nhead)
         for p1, p2 in zip(model.blocks.parameters(), model2.blocks.parameters()):
             assert p1.shape == p2.shape
@@ -188,7 +197,7 @@ class TestAdaptiveViT:
     def test_trivial_token_mask(self):
         torch.random.manual_seed(0)
         B, C, H, W = 1, 3, 256, 256
-        D, patch_size, target_size, depth = 128, (16, 16), (4, 4), 3
+        D, patch_size, target_size, depth = 128, (16, 16), (64, 64), 3
         nhead = 128 // 16
         model = AdaptiveViT(C, D, patch_size, target_size, depth, depth, nhead)
         model.eval()
@@ -211,11 +220,12 @@ class TestConvViT:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
-    def test_forward(self, device):
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_forward(self, device, dtype):
         x = torch.randn(1, 3, 224, 224, device=device)
         nhead = 128 // 16
         model = ConvViT(3, 128, (16, 16), (64, 64), 3, 3, nhead).to(device)
-        with torch.autocast(device_type=device, dtype=torch.float16, enabled=True):
+        with torch.autocast(device_type=device, dtype=dtype, enabled=True):
             out = model(x)
         assert out.shape[:2] == (1, 128)
 
@@ -226,15 +236,19 @@ class TestConvViT:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
-    def test_backward(self, device):
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_backward(self, device, dtype):
         x = torch.randn(1, 3, 224, 224, device=device, requires_grad=True)
         nhead = 128 // 16
         model = ConvViT(3, 128, (16, 16), (64, 64), 3, 3, nhead).to(device)
 
-        with torch.autocast(device_type=device, dtype=torch.float16):
+        with torch.autocast(device_type=device, dtype=dtype):
             out = model(x)
             out = out.sum()
         out.sum().backward()
+        for name, param in model.named_parameters():
+            assert param.grad is not None, f"{name} has no gradient"
+            assert not param.grad.isnan().any(), f"{name} has nan gradient"
 
     def test_forward_deterministic(self):
         x = torch.randn(1, 3, 224, 224)

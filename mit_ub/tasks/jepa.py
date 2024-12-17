@@ -16,10 +16,9 @@ from torch.optim.optimizer import Optimizer
 
 from ..data.augment import RandomNoise
 from ..model import BACKBONES, AdaptiveViT, ViT, compile_is_disabled
-from ..model.backbone import resize_mask
 from ..model.pos_enc import RelativeFactorizedPosition
 from ..model.transformer import TransformerDecoderLayer
-from ..tokens import apply_mask, create_mask, mask_is_ragged
+from ..tokens import apply_mask, create_mask
 
 
 EPS: Final = 1e-8
@@ -197,27 +196,6 @@ class JEPA(Task):
         backbone = BACKBONES.get(name).instantiate_with_metadata().fn
         assert isinstance(backbone, nn.Module)
         return backbone
-
-    def create_mask(self, x: Tensor, unmasked_ratio: float, scale: int) -> Tensor:
-        batch_size = x.shape[0]
-        device = x.device
-        dynamic_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
-        size = self.backbone.target_shape if isinstance(self.backbone, AdaptiveViT) else dynamic_size
-        mask = create_mask(
-            size,
-            mask_ratio=1 - unmasked_ratio,
-            batch_size=batch_size,
-            scale=scale,
-            device=device,
-        )
-
-        # For AdaptiveViT we choose the base mask on the fixed tokenized size, then
-        # upsample it to the input shape.
-        if isinstance(self.backbone, AdaptiveViT):
-            mask = resize_mask(size, dynamic_size, mask)
-            assert not mask_is_ragged(mask), "Mask is ragged"
-
-        return mask
 
     def create_metrics(self, state: State) -> tm.MetricCollection:
         r"""Gets a MetricCollection for a given state"""
@@ -398,8 +376,8 @@ class JEPA(Task):
             self.update_weight_decay()
 
         # generate context and target masks
-        target_mask = self.create_mask(x, self.jepa_config.target_ratio, self.jepa_config.target_scale)
-        context_mask = self.create_mask(x, self.jepa_config.context_ratio, self.jepa_config.context_scale)
+        target_mask = self.backbone.create_mask(x, self.jepa_config.target_ratio, self.jepa_config.target_scale)
+        context_mask = self.backbone.create_mask(x, self.jepa_config.context_ratio, self.jepa_config.context_scale)
 
         # generate ground truth with forward pass of ema backbone on unmasked image
         with torch.no_grad():

@@ -121,9 +121,13 @@ def create_mask(
         Token mask tensor, with ``True`` indicating an unmasked token and ``False`` indicating a masked token
     """
     if not 0 < mask_ratio < 1.0:
-        raise ValueError(f"Invalid `mask_ratio` {mask_ratio}")
+        raise ValueError(f"Invalid `mask_ratio` {mask_ratio}")  # pragma: no cover
     if scale < 1:
-        raise ValueError(f"Invalid `scale` {scale}")
+        raise ValueError(f"Invalid `scale` {scale}")  # pragma: no cover
+    if any(dim <= scale for dim in size):
+        raise ValueError(
+            f"Invalid `size` {size} for `scale` {scale}. Size must be greater than scale"
+        )  # pragma: no cover
 
     # When scale > 1, reformulate the problem as a recursive call over smaller mask and upsample
     if scale > 1:

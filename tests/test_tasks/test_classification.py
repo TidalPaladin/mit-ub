@@ -2,6 +2,7 @@ import pytest
 import pytorch_lightning as pl
 
 from mit_ub.tasks.classification import ClassificationTask, JEPAWithClassification
+from mit_ub.tasks.jepa import JEPAConfig
 
 
 class TestClassificationTask:
@@ -21,7 +22,10 @@ class TestClassificationTask:
 class TestJEPAWithClassification:
     @pytest.fixture
     def task(self, optimizer_init, backbone):
-        return JEPAWithClassification(backbone, num_classes=10, optimizer_init=optimizer_init)
+        config = JEPAConfig()
+        config.context_scale = 1
+        config.target_scale = 1
+        return JEPAWithClassification(backbone, num_classes=10, optimizer_init=optimizer_init, jepa_config=config)
 
     def test_fit(self, task, cifar10_datamodule, logger):
         trainer = pl.Trainer(
