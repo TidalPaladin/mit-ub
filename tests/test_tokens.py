@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from torch.testing import assert_close
 
-from mit_ub.tokens import apply_mask, create_mask, mask_is_ragged
+from mit_ub.tokens import apply_mask, create_mask, mask_is_ragged, unapply_mask
 
 
 @pytest.mark.parametrize(
@@ -51,6 +51,23 @@ def test_apply(device, mask, fill_value, padding_value, exp):
     x = torch.arange(L, device=device).view(1, L, 1).expand(N, L, 1)
     o = apply_mask(mask, x, fill_value, padding_value)
     assert_close(o, exp.view_as(o).type_as(o))
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param("cuda", marks=pytest.mark.cuda),
+    ],
+)
+def test_unapply(device):
+    B, L, D = 2, 10, 32
+    x = torch.randn((B, L, D), device=device)
+    mask = create_mask((L,), 0.5, batch_size=B, device=device)
+    y = apply_mask(mask, x)
+    x2 = unapply_mask(mask, y)
+    assert_close(x2[mask], x[mask])
+    assert_close(x2[~mask], x2.new_zeros(x2.shape)[~mask])
 
 
 class TestCreateMask:

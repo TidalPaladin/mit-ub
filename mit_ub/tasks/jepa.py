@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Dict, Final, List, Optional, Tuple, cast
+from typing import Any, Dict, Final, Iterator, List, Optional, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -16,6 +16,7 @@ from torch.optim.optimizer import Optimizer
 
 from ..data.augment import RandomNoise
 from ..model import BACKBONES, AdaptiveViT, ViT, compile_is_disabled
+from ..model.layer_scale import LayerScale
 from ..model.pos_enc import RelativeFactorizedPosition
 from ..model.transformer import TransformerDecoderLayer
 from ..tokens import apply_mask, create_mask
@@ -41,6 +42,30 @@ def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: 
     y = x.mean(pairwise_dim, keepdim=True).norm(dim=embed_dim, keepdim=True).pow(2).squeeze(embed_dim, pairwise_dim)
     y.sub(1 / N).mul(N / max(N - 1, 1))
     return y
+
+
+def iterate_layer_scales(module: nn.Module) -> Iterator[Tensor]:
+    r"""Iterate over all layer scales in a module."""
+    assert isinstance(module, nn.Module)
+    for m in module.modules():
+        if isinstance(m, LayerScale):
+            yield m.gamma.detach()
+
+
+class MaxLayerScale(tm.MaxMetric):
+    r"""Track the maximum absolute value of layer scale across all layers."""
+
+    def update(self, module: nn.Module) -> None:
+        max_scales = torch.tensor([t.abs().max() for t in iterate_layer_scales(module)])
+        super().update(max_scales.max())
+
+
+class MeanLayerScale(tm.MeanMetric):
+    r"""Track the mean absolute value of layer scale across all layers."""
+
+    def update(self, module: nn.Module) -> None:
+        for t in iterate_layer_scales(module):
+            super().update(t.abs().mean())
 
 
 @dataclass
@@ -199,12 +224,18 @@ class JEPA(Task):
 
     def create_metrics(self, state: State) -> tm.MetricCollection:
         r"""Gets a MetricCollection for a given state"""
-        return tm.MetricCollection(
+        metrics = tm.MetricCollection(
             {
                 "example_sim": tm.MeanMetric(),
                 "token_sim": tm.MeanMetric(),
             }
         )
+        has_layer_scale = any(isinstance(layer, LayerScale) for layer in self.backbone.modules())
+        if has_layer_scale and state.mode == Mode.TRAIN:
+            metrics["layer_scale_max"] = MaxLayerScale()
+            metrics["layer_scale_mean"] = MeanLayerScale()
+
+        return metrics
 
     def forward(self, x: Tensor, context_mask: Tensor, target_mask: Tensor) -> Dict[str, Tensor]:
         # Run encoder on context
@@ -411,6 +442,10 @@ class JEPA(Task):
                 metrics["example_sim"].update(example_sim)
                 token_sim = average_pairwise_cosine_similarity(full_target, 1, 2)
                 metrics["token_sim"].update(token_sim)
+
+                if "layer_scale_mean" in metrics:
+                    metrics["layer_scale_mean"].update(self.backbone)
+                    metrics["layer_scale_max"].update(self.backbone)
 
         output = {
             "log": {
