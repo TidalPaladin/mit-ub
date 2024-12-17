@@ -3,11 +3,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import torch
 import torch.nn as nn
-from einops import rearrange
 from torch import Tensor
 from torch.nn import functional as F
 
 from ..tokens import apply_mask
+from .convnext.convnext import grid_to_tokens, tokens_to_grid
 from .helpers import Dims2D, compile_is_disabled
 from .mlp import relu2
 from .stem import PatchEmbed2d, PatchEmbed3d
@@ -35,30 +35,6 @@ def resize_mask(
     mask = F.interpolate(mask.float(), size=target_size, mode="nearest").to(mask.dtype)
     mask = mask.view(B, -1)
     return mask
-
-
-def reshape_tokens(
-    x: Tensor,
-    tokenized_size: Tuple[int, int] | Tuple[int, int, int],
-) -> Tensor:
-    r"""Reshapes a sequence of tokens to a channel-first grid.
-
-    Args:
-        x: Tokens to reshape.
-        tokenized_size: Size of the tokenized input.
-
-    Returns:
-        Reshaped tokens.
-    """
-    if len(tokenized_size) == 3:
-        D, H, W = tokenized_size
-        x = rearrange(x, "b (d h w) c -> b c d h w", d=D, h=H, w=W)
-    elif len(tokenized_size) == 2:
-        H, W = tokenized_size
-        x = rearrange(x, "b (h w) c -> b c h w", h=H, w=W)
-    else:
-        raise ValueError(f"Invalid tokenized size: {tokenized_size}")
-    return x
 
 
 class ViT(nn.Module):
@@ -221,7 +197,7 @@ class ViT(nn.Module):
                 "Cannot reshape with mask and no fill value. Either specify `reshape=False` or provide a `mask_fill_value`"
             )
         elif reshape:
-            x = reshape_tokens(x, tokenized_size)
+            x = tokens_to_grid(x, tokenized_size)
 
         return x
 
@@ -326,7 +302,7 @@ class AdaptiveViT(ViT):
                 "Cannot reshape with mask and no fill value. Either specify `reshape=False` or provide a `mask_fill_value`"
             )
         elif reshape:
-            dynamic_tokens = reshape_tokens(dynamic_tokens, tokenized_size)
+            dynamic_tokens = tokens_to_grid(dynamic_tokens, tokenized_size)
 
         return dynamic_tokens
 
@@ -383,6 +359,7 @@ class ConvViT(ViT):
         )
         self.target_shape = cast(Any, target_shape)
         self.dynamic_stem = deepcopy(self.stem)
+        self.combine_proj = nn.Linear(self._dim, self._dim)
 
         # Blocks updating fixed (coarse) tokens with cross attention to high res (dynamic) tokens
         self.dynamic_blocks = nn.ModuleList(
@@ -422,6 +399,7 @@ class ConvViT(ViT):
             stochastic_depth=self._stochastic_depth,
             bias=self._bias,
             kernel_size=self._kernel_size,
+            self_attn=False,
         )
         _kwargs.update(kwargs)
         layer = TransformerConvDecoderLayer(**_kwargs)
@@ -431,6 +409,7 @@ class ConvViT(ViT):
         # Compute sizes for fixed and dynamic paths
         _, _, *original_size = x.shape
         dynamic_tokenized_size = self.stem.tokenized_size(cast(Any, tuple(original_size)))
+        fixed_tokenized_size = self.stem.tokenized_size(cast(Any, tuple(self.target_shape)))
 
         # Process fixed tokens as standard ViT
         fixed_tokens = super().forward(
@@ -438,10 +417,17 @@ class ConvViT(ViT):
             reshape=False,
         )
 
-        # Initialize the dynamic tokens
-        dynamic_tokens = self.dynamic_stem(x)
+        # Initialize the dynamic tokens, adding upsampled fixed tokens
+        upsampled_fixed = self.combine_proj(fixed_tokens)
+        upsampled_fixed = F.interpolate(
+            tokens_to_grid(upsampled_fixed, fixed_tokenized_size),
+            size=dynamic_tokenized_size,
+            mode="bilinear",
+        )
+        dynamic_tokens = tokens_to_grid(self.dynamic_stem(x), dynamic_tokenized_size) + upsampled_fixed
+        dynamic_tokens = grid_to_tokens(dynamic_tokens)
 
-        # Alternating cross attention blocks between fixed and dynamic tokens
+        # Dynamic blocks
         for block in self.dynamic_blocks:
             dynamic_tokens = block(dynamic_tokens, fixed_tokens, dynamic_tokenized_size)
 
@@ -450,6 +436,6 @@ class ConvViT(ViT):
 
         # Reshape to original grid if requested
         if reshape:
-            dynamic_tokens = reshape_tokens(dynamic_tokens, dynamic_tokenized_size)
+            dynamic_tokens = tokens_to_grid(dynamic_tokens, dynamic_tokenized_size)
 
         return dynamic_tokens

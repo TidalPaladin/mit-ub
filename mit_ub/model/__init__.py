@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from registry import Registry
 
-from .backbone import AdaptiveViT, ViT
+from .backbone import AdaptiveViT, ConvViT, ViT
 from .convnext import ConvNext
 from .helpers import compile_is_disabled
 from .mlp import identity
@@ -122,6 +122,24 @@ BACKBONES(
     qk_norm=True,
     activation=identity,
     gate_activation=F.silu,
+)
+BACKBONES(
+    ConvViT,
+    name="convvit-cifar10",
+    in_channels=3,
+    dim=CIFAR10_DIM,
+    patch_size=2,
+    depth=12,
+    nhead=CIFAR10_DIM // CIFAR10_HEAD_DIM,
+    num_kv_heads=CIFAR10_DIM // CIFAR10_HEAD_DIM,
+    dropout=0.1,
+    stochastic_depth=0.1,
+    bias=False,
+    qk_norm=True,
+    activation=identity,
+    gate_activation=F.silu,
+    target_shape=(8, 8),
+    high_res_depth=6,
 )
 
 
