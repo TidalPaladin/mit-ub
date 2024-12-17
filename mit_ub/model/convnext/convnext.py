@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
+from torchvision.ops import StochasticDepth
 
 from ..helpers import Dims2D, compile_backend, compile_is_disabled, to_tuple
 from ..layer_scale import LayerScale
@@ -107,6 +108,7 @@ class ConvNextBlock(nn.Module):
         dropout: float = 0,
         bias: bool = True,
         layer_scale: float | None = None,
+        stochastic_depth: float = 0.0,
     ):
         super().__init__()
         _kernel_size = to_tuple(kernel_size, 2)
@@ -125,6 +127,7 @@ class ConvNextBlock(nn.Module):
             norm=True,
         )
         self.layer_scale = LayerScale(dim, layer_scale) if layer_scale else nn.Identity()
+        self.stochastic_depth = StochasticDepth(stochastic_depth, mode="row")
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -159,7 +162,7 @@ class ConvNextBlock(nn.Module):
             self.mlp.b_norm,
             training=self.training,
         )
-        return x + self.layer_scale(y)
+        return x + self.stochastic_depth(self.layer_scale(y))
 
 
 class ConvNextDownStage(nn.Module):
@@ -176,6 +179,7 @@ class ConvNextDownStage(nn.Module):
         dropout: float = 0,
         bias: bool = True,
         layer_scale: float | None = None,
+        stochastic_depth: float = 0.0,
     ):
         super().__init__()
 
@@ -190,6 +194,7 @@ class ConvNextDownStage(nn.Module):
                     dropout=dropout,
                     bias=bias,
                     layer_scale=layer_scale,
+                    stochastic_depth=stochastic_depth,
                 )
                 for _ in range(depth)
             ]
@@ -229,6 +234,7 @@ class ConvNext(nn.Module):
         dropout: float = 0,
         bias: bool = True,
         layer_scale: float | None = None,
+        stochastic_depth: float = 0.0,
     ):
         super().__init__()
         self.dims = dims
@@ -250,6 +256,7 @@ class ConvNext(nn.Module):
                     dropout=dropout,
                     bias=bias,
                     layer_scale=layer_scale,
+                    stochastic_depth=stochastic_depth,
                 )
                 for i in range(len(depths) - 1)
             ]
