@@ -1,16 +1,17 @@
+from copy import deepcopy
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import torch
 import torch.nn as nn
-from einops import rearrange
 from torch import Tensor
 from torch.nn import functional as F
 
 from ..tokens import apply_mask
-from .helpers import compile_is_disabled
+from .convnext.convnext import grid_to_tokens, tokens_to_grid
+from .helpers import Dims2D, compile_is_disabled
 from .mlp import relu2
 from .stem import PatchEmbed2d, PatchEmbed3d
-from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
+from .transformer import TransformerConvDecoderLayer, TransformerDecoderLayer, TransformerEncoderLayer
 
 
 @torch.compile(disable=compile_is_disabled())
@@ -34,30 +35,6 @@ def resize_mask(
     mask = F.interpolate(mask.float(), size=target_size, mode="nearest").to(mask.dtype)
     mask = mask.view(B, -1)
     return mask
-
-
-def reshape_tokens(
-    x: Tensor,
-    tokenized_size: Tuple[int, int] | Tuple[int, int, int],
-) -> Tensor:
-    r"""Reshapes a sequence of tokens to a channel-first grid.
-
-    Args:
-        x: Tokens to reshape.
-        tokenized_size: Size of the tokenized input.
-
-    Returns:
-        Reshaped tokens.
-    """
-    if len(tokenized_size) == 3:
-        D, H, W = tokenized_size
-        x = rearrange(x, "b (d h w) c -> b c d h w", d=D, h=H, w=W)
-    elif len(tokenized_size) == 2:
-        H, W = tokenized_size
-        x = rearrange(x, "b (h w) c -> b c h w", h=H, w=W)
-    else:
-        raise ValueError(f"Invalid tokenized size: {tokenized_size}")
-    return x
 
 
 class ViT(nn.Module):
@@ -220,7 +197,7 @@ class ViT(nn.Module):
                 "Cannot reshape with mask and no fill value. Either specify `reshape=False` or provide a `mask_fill_value`"
             )
         elif reshape:
-            x = reshape_tokens(x, tokenized_size)
+            x = tokens_to_grid(x, tokenized_size)
 
         return x
 
@@ -325,6 +302,140 @@ class AdaptiveViT(ViT):
                 "Cannot reshape with mask and no fill value. Either specify `reshape=False` or provide a `mask_fill_value`"
             )
         elif reshape:
-            dynamic_tokens = reshape_tokens(dynamic_tokens, tokenized_size)
+            dynamic_tokens = tokens_to_grid(dynamic_tokens, tokenized_size)
+
+        return dynamic_tokens
+
+
+class ConvViT(ViT):
+
+    def __init__(
+        self,
+        in_channels: int,
+        dim: int,
+        patch_size: int | Tuple[int, int] | Tuple[int, int, int],
+        target_shape: Tuple[int, int] | Tuple[int, int, int],
+        depth: int,
+        high_res_depth: int,
+        nhead: int,
+        dim_feedforward: Optional[int] = None,
+        dropout: float = 0.1,
+        activation: Callable[[Tensor], Tensor] = relu2,
+        gate_activation: Callable[[Tensor], Tensor] | None = None,
+        num_kv_heads: int | None = None,
+        qk_norm: bool = False,
+        stochastic_depth: float = 0.0,
+        bias: bool = False,
+        num_experts: int | None = None,
+        num_slots: int | None = None,
+        moe_layers: List[int] = [],
+        layer_scale: float | None = None,
+        kernel_size: int | Dims2D = 7,
+    ):
+        super().__init__(
+            in_channels,
+            dim,
+            patch_size,
+            depth,
+            nhead,
+            dim_feedforward,
+            dropout,
+            activation,
+            gate_activation,
+            num_kv_heads,
+            qk_norm,
+            num_experts,
+            num_slots,
+            moe_layers,
+            layer_scale,
+            stochastic_depth,
+            bias,
+        )
+        self._kernel_size = kernel_size
+        self.resize_to_fixed = nn.Upsample(
+            size=target_shape,
+            mode="bilinear",
+            align_corners=False,
+        )
+        self.target_shape = cast(Any, target_shape)
+        self.dynamic_stem = deepcopy(self.stem)
+        self.combine_proj = nn.Linear(self._dim, self._dim)
+
+        # Blocks updating fixed (coarse) tokens with cross attention to high res (dynamic) tokens
+        self.dynamic_blocks = nn.ModuleList(
+            [self.create_conv_decoder_layer(i + len(self.blocks)) for i in range(high_res_depth)]
+        )
+
+    def create_conv_decoder_layer(self, i: int = 0, d_kv: int | None = None, **kwargs) -> TransformerDecoderLayer:
+        """
+        Creates a Transformer decoder layer with ConvNext mixing on the queries.
+
+        This method initializes a Transformer decoder layer with the specified
+        parameters. It supports various configurations such as the number of
+        attention heads, feedforward dimension, dropout rate, activation functions,
+        and more.
+
+        Args:
+            i: Index of the encoder layer. Default is 0.
+            d_kv: Dimension of the key and value vectors. By default this will be the same as the model dimension.
+
+        Keyword Args:
+            Additional keyword arguments to override default layer parameters.
+        """
+        d_kv = d_kv or self._dim
+        _kwargs: Dict[str, Any] = dict(
+            d_model=self._dim,
+            nhead=self._nhead,
+            d_kv=d_kv,
+            dim_feedforward=self._dim_feedforward,
+            dropout=self._dropout,
+            activation=self._activation,
+            gate_activation=self._gate_activation,
+            num_kv_heads=self._num_kv_heads,
+            qk_norm=self._qk_norm,
+            num_experts=self._num_experts if i in self._moe_layers else None,
+            num_slots=self._num_slots if i in self._moe_layers else None,
+            layer_scale=self._layer_scale,
+            stochastic_depth=self._stochastic_depth,
+            bias=self._bias,
+            kernel_size=self._kernel_size,
+            self_attn=False,
+        )
+        _kwargs.update(kwargs)
+        layer = TransformerConvDecoderLayer(**_kwargs)
+        return layer
+
+    def forward(self, x: Tensor, reshape: bool = True) -> Tensor:
+        # Compute sizes for fixed and dynamic paths
+        _, _, *original_size = x.shape
+        dynamic_tokenized_size = self.stem.tokenized_size(cast(Any, tuple(original_size)))
+        fixed_tokenized_size = self.stem.tokenized_size(cast(Any, tuple(self.target_shape)))
+
+        # Process fixed tokens as standard ViT
+        fixed_tokens = super().forward(
+            self.resize_to_fixed(x),
+            reshape=False,
+        )
+
+        # Initialize the dynamic tokens, adding upsampled fixed tokens
+        upsampled_fixed = self.combine_proj(fixed_tokens)
+        upsampled_fixed = F.interpolate(
+            tokens_to_grid(upsampled_fixed, fixed_tokenized_size),
+            size=dynamic_tokenized_size,
+            mode="bilinear",
+        )
+        dynamic_tokens = tokens_to_grid(self.dynamic_stem(x), dynamic_tokenized_size) + upsampled_fixed
+        dynamic_tokens = grid_to_tokens(dynamic_tokens)
+
+        # Dynamic blocks
+        for block in self.dynamic_blocks:
+            dynamic_tokens = block(dynamic_tokens, fixed_tokens, dynamic_tokenized_size)
+
+        # Output norm
+        dynamic_tokens = self.embedding_norm(dynamic_tokens)
+
+        # Reshape to original grid if requested
+        if reshape:
+            dynamic_tokens = tokens_to_grid(dynamic_tokens, dynamic_tokenized_size)
 
         return dynamic_tokens

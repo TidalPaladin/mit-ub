@@ -1,10 +1,12 @@
-from typing import Callable
+from typing import Callable, Tuple
 
 import torch.nn as nn
 from torch import Tensor
 from torchvision.ops import StochasticDepth
 
 from .attention import MultiHeadAttention
+from .convnext.convnext import ConvNextBlock
+from .helpers import Dims2D
 from .layer_scale import LayerScale
 from .mlp import MLP, relu2
 from .soft_moe import SoftMoE
@@ -199,3 +201,107 @@ class TransformerDecoderLayer(nn.Module):
         x = x + self.stochastic_depth(self.layer_scale_mlp(y))
 
         return x
+
+
+class TransformerConvEncoderLayer(TransformerEncoderLayer):
+
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        dim_feedforward: int = 2048,
+        dropout: float = 0.1,
+        activation: Callable[[Tensor], Tensor] = relu2,
+        gate_activation: Callable[[Tensor], Tensor] | None = None,
+        num_kv_heads: int | None = None,
+        qk_norm: bool = False,
+        layer_scale: float | None = None,
+        num_experts: int | None = None,
+        num_slots: int | None = None,
+        stochastic_depth: float = 0.0,
+        bias: bool = True,
+        kernel_size: int | Dims2D = 7,
+    ):
+        super().__init__(
+            d_model,
+            nhead,
+            dim_feedforward,
+            dropout,
+            activation,
+            gate_activation,
+            num_kv_heads,
+            qk_norm,
+            layer_scale,
+            num_experts,
+            num_slots,
+            stochastic_depth,
+            bias,
+        )
+        self.conv = ConvNextBlock(
+            d_model,
+            dim_feedforward,
+            kernel_size=kernel_size,
+            activation=activation,
+            gate_activation=gate_activation,
+            dropout=dropout,
+            bias=bias,
+            layer_scale=layer_scale,
+        )
+
+    def forward(self, x: Tensor, size: Tuple[int, ...]) -> Tensor:
+        x = self.conv(x, size)
+        return super().forward(x)
+
+
+class TransformerConvDecoderLayer(TransformerDecoderLayer):
+
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        d_kv: int | None = None,
+        dim_feedforward: int = 2048,
+        dropout: float = 0.1,
+        activation: Callable[[Tensor], Tensor] = relu2,
+        gate_activation: Callable[[Tensor], Tensor] | None = None,
+        num_kv_heads: int | None = None,
+        qk_norm: bool = False,
+        layer_scale: float | None = None,
+        num_experts: int | None = None,
+        num_slots: int | None = None,
+        stochastic_depth: float = 0.0,
+        bias: bool = True,
+        self_attn: bool = True,
+        kernel_size: int | Dims2D = 7,
+    ):
+        super().__init__(
+            d_model,
+            nhead,
+            d_kv,
+            dim_feedforward,
+            dropout,
+            activation,
+            gate_activation,
+            num_kv_heads,
+            qk_norm,
+            layer_scale,
+            num_experts,
+            num_slots,
+            stochastic_depth,
+            bias,
+            self_attn,
+        )
+        self.conv = ConvNextBlock(
+            d_model,
+            dim_feedforward,
+            kernel_size=kernel_size,
+            activation=activation,
+            gate_activation=gate_activation,
+            dropout=dropout,
+            bias=bias,
+            layer_scale=layer_scale,
+        )
+
+    def forward(self, q: Tensor, kv: Tensor, size: Tuple[int, ...]) -> Tensor:
+        q = self.conv(q, size)
+        return super().forward(q, kv)

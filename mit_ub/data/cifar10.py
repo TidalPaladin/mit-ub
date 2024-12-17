@@ -103,7 +103,7 @@ class CIFAR10DataModule(LightningDataModule):
         """The train dataloader."""
         if not hasattr(self, "dataset_train"):
             raise RuntimeError("setup() must be called before train_dataloader()")  # pragma: no cover
-        return self._data_loader(self.dataset_train, shuffle=True)
+        return self._data_loader(self.dataset_train, shuffle=True, drop_last=True)
 
     def val_dataloader(self, *args: Any, **kwargs: Any) -> Union[DataLoader, List[DataLoader]]:
         """The val dataloader."""

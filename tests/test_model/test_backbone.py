@@ -5,7 +5,7 @@ import torch
 from torch.testing import assert_close
 
 from mit_ub.model import BACKBONES
-from mit_ub.model.backbone import AdaptiveViT, ViT
+from mit_ub.model.backbone import AdaptiveViT, ConvViT, ViT
 from mit_ub.tokens import create_mask
 
 
@@ -200,6 +200,68 @@ class TestAdaptiveViT:
         out1 = model(x, reshape=False)
         out2 = model(x, mask=mask, reshape=False)
         assert_close(out1, out2)
+
+
+class TestConvViT:
+
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    def test_forward(self, device):
+        x = torch.randn(1, 3, 224, 224, device=device)
+        nhead = 128 // 16
+        model = ConvViT(3, 128, (16, 16), (64, 64), 3, 3, nhead).to(device)
+        with torch.autocast(device_type=device, dtype=torch.float16, enabled=True):
+            out = model(x)
+        assert out.shape[:2] == (1, 128)
+
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    def test_backward(self, device):
+        x = torch.randn(1, 3, 224, 224, device=device, requires_grad=True)
+        nhead = 128 // 16
+        model = ConvViT(3, 128, (16, 16), (64, 64), 3, 3, nhead).to(device)
+
+        with torch.autocast(device_type=device, dtype=torch.float16):
+            out = model(x)
+            out = out.sum()
+        out.sum().backward()
+
+    def test_forward_deterministic(self):
+        x = torch.randn(1, 3, 224, 224)
+        nhead = 128 // 16
+        model = ConvViT(3, 128, (16, 16), (64, 64), 3, 3, nhead)
+
+        model.train()
+        with torch.autocast(device_type="cpu", dtype=torch.float16):
+            out1 = model(x)
+            out2 = model(x)
+        assert not torch.allclose(out1, out2)
+
+        model.eval()
+        with torch.autocast(device_type="cpu", dtype=torch.float16):
+            out1 = model(x)
+            out2 = model(x)
+        assert torch.allclose(out1, out2)
+
+    def test_load_from_vit(self):
+        C, D, D_kv = 3, 128, 32
+        depth = 3
+        depth_adaptive = 2
+        nhead = 128 // 16
+        model = ConvViT(C, D, (16, 16), (64, 64), depth, depth_adaptive, nhead)
+        model2 = ViT(C, D, (16, 16), depth, nhead)
+        for p1, p2 in zip(model.blocks.parameters(), model2.blocks.parameters()):
+            assert p1.shape == p2.shape
 
 
 @pytest.mark.ci_skip
