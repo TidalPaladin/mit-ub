@@ -139,6 +139,7 @@ BACKBONES(
     qk_norm=True,
     activation=identity,
     gate_activation=F.silu,
+    layer_scale_adaptive=1.0,
 )
 
 
@@ -195,6 +196,8 @@ BACKBONES(
     qk_norm=True,
     activation=identity,
     gate_activation=F.silu,
+    layer_scale=0.01,
+    layer_scale_adaptive=0.001,
 )
 
 BACKBONES(
