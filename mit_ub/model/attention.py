@@ -31,6 +31,7 @@ def attention_forward(
     eps: float = 1e-5,
     pre_norm_w: Tensor | None = None,
     pre_norm_b: Tensor | None = None,
+    kv_norm: bool = False,
     training: bool = False,
     # fmt: on
 ) -> Tensor:
@@ -57,6 +58,8 @@ def attention_forward(
         eps: Epsilon value for normalization
         pre_norm_w: Weight for pre-normalization, or ``None`` for no pre-normalization
         pre_norm_b: Bias for pre-normalization
+        kv_norm: Whether to normalize the key and value tensors in non-packed QKV mode. This should
+            probably be ``True`` when using encoder-decoder attention on an unnormalized KV.
         training: Training or inference mode
 
     Shapes:
@@ -68,12 +71,18 @@ def attention_forward(
     Returns:
         Output tensor of shape :math:`(B, L, D)`
     """
+    is_packed = k is None and v is None and w_k is None and w_v is None and b_k is None and b_v is None
     head_dim = q.shape[-1] // num_heads
+
+    # Pre-normalization
     if pre_norm_w is not None:
         q = F.layer_norm(q, q.shape[-1:], weight=pre_norm_w, bias=pre_norm_b, eps=eps)
+        if not is_packed and kv_norm:
+            k = F.layer_norm(k, k.shape[-1:], weight=pre_norm_w, bias=pre_norm_b, eps=eps)  # type: ignore[arg-type]
+            v = F.layer_norm(v, v.shape[-1:], weight=pre_norm_w, bias=pre_norm_b, eps=eps)  # type: ignore[arg-type]
 
     # Packed QKV projection
-    if k is None and v is None and w_k is None and w_v is None and b_k is None and b_v is None:
+    if is_packed:
         x = F.linear(q, w_q, b_q)
         q, k, v = x.split([num_heads * head_dim, num_kv_heads * head_dim, num_kv_heads * head_dim], dim=-1)
     # Non-packed QKV projection
@@ -128,12 +137,14 @@ class MultiHeadAttention(nn.Module):
         vdim: int | None = None,
         bias: bool = True,
         norm: bool = False,
+        kv_norm: bool = False,
     ):
         super().__init__()
         self._embed_dim = embed_dim
         self._num_heads = num_heads
         self._num_kv_heads = num_kv_heads
         self.dropout = dropout
+        self.kv_norm = kv_norm
 
         # Register optional parameters
         for prefix in ("w", "b"):
@@ -181,6 +192,70 @@ class MultiHeadAttention(nn.Module):
             else:
                 raise ValueError(f"Unsure how to initialize {name}")
 
+    def copy_parameters(self, src: "MultiHeadAttention") -> None:
+        r"""Copies parameters from a source attention module.
+
+        This method accounts for the difference in parameters between packed and unpacked QKV projections.
+        Any layer of `src` that is incompatible with `self` is ignored. The copy includes noramlization
+        layers and the output projection layer.
+        """
+        # Booleans for packed/unpacked and compatibility
+        self_is_packed = self.w_in is not None
+        src_is_packed = src.w_in is not None
+        attn_compatible = (
+            self.embed_dim == src.embed_dim
+            and self.head_dim == src.head_dim
+            and self.kv_dim == src.kv_dim
+            and self.num_heads == src.num_heads
+            and self.num_kv_heads == src.num_kv_heads
+        )
+        embed_compatible = self.embed_dim == src.embed_dim
+
+        # Both are packed
+        if self_is_packed and src_is_packed and attn_compatible:
+            self.w_in.data = src.w_in.data
+            if self.b_in is not None and src.b_in is not None:
+                self.b_in.data = src.b_in.data
+
+        # Both are unpacked
+        elif not self_is_packed and not src_is_packed and attn_compatible:
+            self.w_q.data = src.w_q.data
+            self.w_k.data = src.w_k.data
+            self.w_v.data = src.w_v.data
+            if self.b_q is not None and src.b_q is not None:
+                self.b_q.data = src.b_q.data
+            if self.b_k is not None and src.b_k is not None:
+                self.b_k.data = src.b_k.data
+            if self.b_v is not None and src.b_v is not None:
+                self.b_v.data = src.b_v.data
+
+        # src is packed, self is unpacked
+        elif self_is_packed and not src_is_packed and attn_compatible:
+            self.w_in.data = torch.cat([src.w_q, src.w_k, src.w_v], dim=0)
+            if self.b_in is not None and src.b_q is not None:
+                assert src.b_k is not None and src.b_v is not None
+                self.b_in.data = torch.cat([src.b_q, src.b_k, src.b_v], dim=0)
+
+        # self is packed, src is unpacked
+        elif not self_is_packed and src_is_packed and attn_compatible:
+            self.w_q.data = src.w_in.data[: self.num_heads * self.head_dim]
+            self.w_k.data = src.w_in.data[
+                self.num_heads * self.head_dim : self.num_heads * self.head_dim + self.num_kv_heads * self.head_dim
+            ]
+            self.w_v.data = src.w_in.data[self.num_heads * self.head_dim + self.num_kv_heads * self.head_dim :]
+
+        # Norm and projection
+        if embed_compatible and self.w_pre_norm is not None and src.w_pre_norm is not None:
+            self.w_pre_norm.data = src.w_pre_norm.data
+            self.b_pre_norm.data = src.b_pre_norm.data
+        if attn_compatible and self.w_norm is not None and src.w_norm is not None:
+            self.w_norm.data = src.w_norm.data
+            self.b_norm.data = src.b_norm.data
+        if embed_compatible and self.w_out is not None and src.w_out is not None:
+            self.w_out.data = src.w_out.data
+            if self.b_out is not None and src.b_out is not None:
+                self.b_out.data = src.b_out.data
+
     @property
     def embed_dim(self) -> int:
         return self._embed_dim
@@ -227,7 +302,8 @@ class MultiHeadAttention(nn.Module):
             f"dropout={self.dropout}, "
             f"norm={self.norm}, "
             f"qk_norm={self.qk_norm}, "
-            f"bias={self.bias}"
+            f"bias={self.bias}, "
+            f"kv_norm={self.kv_norm}"
         )
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
@@ -259,6 +335,7 @@ class MultiHeadAttention(nn.Module):
             dropout=self.dropout,
             pre_norm_w=self.w_pre_norm,
             pre_norm_b=self.b_pre_norm,
+            kv_norm=self.kv_norm,
             training=self.training,
             # fmt: on
         )

@@ -113,6 +113,7 @@ class TransformerDecoderLayer(nn.Module):
         stochastic_depth: float = 0.0,
         bias: bool = True,
         self_attn: bool = True,
+        kv_norm: bool = False,
     ):
         super().__init__()
         d_kv = d_kv or d_model
@@ -142,6 +143,7 @@ class TransformerDecoderLayer(nn.Module):
             vdim=d_kv,
             bias=bias,
             norm=True,
+            kv_norm=kv_norm,
         )
 
         if num_experts is not None and num_slots is not None:
@@ -272,6 +274,7 @@ class TransformerConvDecoderLayer(TransformerDecoderLayer):
         stochastic_depth: float = 0.0,
         bias: bool = True,
         self_attn: bool = True,
+        kv_norm: bool = False,
         kernel_size: int | Dims2D = 7,
     ):
         super().__init__(
@@ -290,6 +293,7 @@ class TransformerConvDecoderLayer(TransformerDecoderLayer):
             stochastic_depth,
             bias,
             self_attn,
+            kv_norm,
         )
         self.conv = ConvNextBlock(
             d_model,

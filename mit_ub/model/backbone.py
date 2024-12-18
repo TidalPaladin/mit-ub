@@ -171,6 +171,9 @@ class ViT(nn.Module):
         layer = TransformerDecoderLayer(**_kwargs)
         return layer
 
+    def on_load_checkpoint(self, state_dict: Dict[str, Any], *args, **kwargs) -> None:
+        r"""Called after loading a checkpoint to perform any necessary post-processing."""
+
     def create_mask(
         self,
         input: Tensor,
@@ -261,6 +264,7 @@ class AdaptiveViT(ViT):
         moe_layers: List[int] = [],
         layer_scale: float | None = None,
         layer_scale_adaptive: float | None = 1e-4,
+        share_layers: bool = False,
     ):
         super().__init__(
             in_channels,
@@ -290,7 +294,7 @@ class AdaptiveViT(ViT):
         # Convert ViT blocks into decoder layers that cross-attend to the dynamic tokens.
         # We also override the layer scale of the cross attention so that the initialization condition
         # is close to identity.
-        self.blocks = nn.ModuleList([self.create_decoder_layer(i) for i in range(depth)])
+        self.blocks = nn.ModuleList([self.create_decoder_layer(i, kv_norm=True) for i in range(depth)])
         for block in self.blocks:
             block.layer_scale_cross = (
                 LayerScale(self._dim, layer_scale_adaptive) if layer_scale_adaptive is not None else nn.Identity()
@@ -298,13 +302,70 @@ class AdaptiveViT(ViT):
 
         # Blocks updating high res (dynamic) tokens with cross attention to fixed (coarse) tokens
         self.dynamic_blocks = nn.ModuleList(
-            [self.create_decoder_layer(i + len(self.blocks), self_attn=False) for i in range(depth)]
+            [self.create_decoder_layer(i + len(self.blocks), self_attn=False, kv_norm=True) for i in range(depth)]
         )
+        # Since we are updating the KV tokens iteratively we must ensure that they are always normalized.
+        # Failure do to do will result in numerical instability that is hard to debug.
+        assert all(
+            block.cross_attn.kv_norm for block in self.dynamic_blocks
+        ), "Dynamic blocks must use KV normalization"
+        assert all(block.cross_attn.kv_norm for block in self.blocks), "Fixed blocks must use KV normalization"
+
+        if share_layers:
+            self.set_shared_layers()
 
         # Initialize the dynamic pathway to have low contribution
         self.dynamic_output_scale = (
             LayerScale(self._dim, layer_scale_adaptive) if layer_scale_adaptive is not None else nn.Identity()
         )
+
+    @property
+    def is_sharing_layers(self) -> bool:
+        return self.blocks[0].mlp is self.dynamic_blocks[0].mlp
+
+    def on_load_checkpoint(self, state_dict: Dict[str, Any], *args, **kwargs) -> None:
+        # Only initialize the dynamic blocks with fixed block weights if we aren't weight sharing
+        # and the checkpoint doesn't already contain dynamic blocks
+        if not self.is_sharing_layers and not any(k.startswith("dynamic_blocks") for k in state_dict.keys()):
+            self.init_dynamic_from_fixed()
+
+    @torch.no_grad()
+    def set_shared_layers(self) -> None:
+        r"""Sets the layers of dynamic blocks that participate in sharing.
+
+        The following layers are shared:
+            - ``block.cross_attn`` -> ``dynamic_block.cross_attn``
+            - ``block.mlp`` -> ``dynamic_block.mlp``
+
+        Since dynamic blocks do not contain a self-attention layer, this layer is not shared.
+        """
+        shared = ("cross_attn", "mlp")
+        for block, dynamic_block in zip(self.blocks, self.dynamic_blocks):
+            for name in shared:
+                child = getattr(block, name)
+                setattr(dynamic_block, name, child)
+
+    @torch.no_grad()
+    def init_dynamic_from_fixed(self) -> None:
+        r"""Initializes weights of the dynamic blocks by copying the weights of the fixed blocks.
+
+        Note that this is distinct from layer sharing, which is done by the ``set_shared_layers`` method.
+        This initializer retains distinct parameters for the dynamic blocks, which may diverge after training.
+        :meth:`set_shared_layers` links the respective layers, ensuring that the weights remain the same across
+        a linkage.
+
+        The following initialization is used:
+            - ``block.mlp`` -> ``dynamic_block.mlp``
+            - ``block.self_attn.`` -> ``dynamic_block.cross_attn``
+        """
+        for block, dynamic_block in zip(self.blocks, self.dynamic_blocks):
+            # Copy the parameters of the self-attention layer to the cross-attention layer
+            dynamic_block.cross_attn.copy_parameters(block.self_attn)
+
+            # Copy the parameters of the MLP layer to the dynamic MLP layer
+            for name, param in block.mlp.named_parameters():
+                if hasattr(dynamic_block.mlp, name):
+                    setattr(dynamic_block.mlp, name, nn.Parameter(param.clone()))
 
     def create_mask(
         self,
@@ -405,6 +466,7 @@ class ConvViT(AdaptiveViT):
         moe_layers: List[int] = [],
         layer_scale: float | None = None,
         layer_scale_adaptive: float | None = 1e-4,
+        share_layers: bool = False,
         kernel_size: int | Dims2D = 7,
     ):
         super().__init__(
@@ -427,13 +489,17 @@ class ConvViT(AdaptiveViT):
             moe_layers,
             layer_scale,
             layer_scale_adaptive,
+            share_layers,
         )
         self._kernel_size = kernel_size
 
         # Update dynamic blocks to include the ConvNext mixer
         self.dynamic_blocks = nn.ModuleList(
-            [self.create_conv_decoder_layer(i + len(self.blocks), self_attn=False) for i in range(depth)]
+            [self.create_conv_decoder_layer(i + len(self.blocks), self_attn=False, kv_norm=True) for i in range(depth)]
         )
+        if share_layers:
+            self.set_shared_layers()
+
         # Override the layer scale of the ConvNext mixer
         for block in self.dynamic_blocks:
             block.conv.layer_scale = (
