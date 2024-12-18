@@ -145,7 +145,7 @@ class MLP(nn.Module):
 
     @property
     def out_features(self) -> int:
-        return self.w_out.shape[-1]
+        return self.w_out.shape[-2]
 
     @property
     def hidden_features(self) -> int:
@@ -154,6 +154,22 @@ class MLP(nn.Module):
     @property
     def norm(self) -> bool:
         return self.w_norm is not None
+
+    @property
+    def bias(self) -> bool:
+        return self.b_in is not None
+
+    def extra_repr(self) -> str:
+        return (
+            f"in={self.in_features}, "
+            f"hidden={self.hidden_features}, "
+            f"out={self.out_features}, "
+            f"dropout={self.dropout}, "
+            f"act={self.activation.__name__}, "
+            f"gate_act={self.gate_activation.__name__ if self.gate_activation is not None else None}, "
+            f"bias={self.bias}, "
+            f"norm={self.norm}"
+        )
 
     def forward(self, x: Tensor) -> Tensor:
         return mlp_forward(

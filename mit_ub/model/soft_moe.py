@@ -343,8 +343,40 @@ class SoftMoE(nn.Module):
         return self.w_norm is not None
 
     @property
+    def in_features(self) -> int:
+        return self.w_in.shape[-1]
+
+    @property
+    def out_features(self) -> int:
+        return self.w_out.shape[-2]
+
+    @property
+    def hidden_features(self) -> int:
+        return self.w_in.shape[-2]
+
+    @property
+    def bias(self) -> bool:
+        return self.b_in is not None
+
+    @property
     def norm(self) -> bool:
         return self.w_pre_norm is not None
+
+    def extra_repr(self) -> str:
+        return (
+            f"in={self.in_features}, "
+            f"hidden={self.hidden_features}, "
+            f"out={self.out_features}, "
+            f"experts={self.num_experts}, "
+            f"slots={self.num_slots}, "
+            f"nhead={self.nhead}, "
+            f"dropout={self.dropout}, "
+            f"act={self.activation.__name__}, "
+            f"gate_act={self.gate_activation.__name__ if self.gate_activation is not None else None}, "
+            f"bias={self.bias}, "
+            f"norm={self.norm}, "
+            f"qk_norm={self.qk_norm}"
+        )
 
     def forward(self, x: Tensor) -> Tensor:
         return soft_moe_forward(

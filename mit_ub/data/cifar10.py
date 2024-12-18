@@ -1,14 +1,11 @@
 from copy import copy
-from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union, cast
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 from lightning_fabric.utilities.rank_zero import rank_zero_info
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset
-from torch_dicom.datasets import collate_fn
-from torch_dicom.datasets.helpers import Transform
 from torchvision.datasets import CIFAR10 as CIFAR10Base
 
 
@@ -72,10 +69,10 @@ class CIFAR10DataModule(LightningDataModule):
         self.seed = seed
         # NOTE: Callable[[E], E] generic seems to break jsonargparse
         # Accept transforms as Callable and cast to Transform
-        self.train_transforms = cast(Transform, train_transforms)
-        self.train_gpu_transforms = cast(Transform, train_gpu_transforms)
-        self.val_transforms = cast(Transform, val_transforms)
-        self.test_transforms = cast(Transform, test_transforms)
+        self.train_transforms = train_transforms
+        self.train_gpu_transforms = train_gpu_transforms
+        self.val_transforms = val_transforms
+        self.test_transforms = test_transforms
         self.train_dataset_kwargs = train_dataset_kwargs
         self.dataset_kwargs = dataset_kwargs
         self.num_workers = num_workers
@@ -106,7 +103,7 @@ class CIFAR10DataModule(LightningDataModule):
         """The train dataloader."""
         if not hasattr(self, "dataset_train"):
             raise RuntimeError("setup() must be called before train_dataloader()")  # pragma: no cover
-        return self._data_loader(self.dataset_train, shuffle=True)
+        return self._data_loader(self.dataset_train, shuffle=True, drop_last=True)
 
     def val_dataloader(self, *args: Any, **kwargs: Any) -> Union[DataLoader, List[DataLoader]]:
         """The val dataloader."""
@@ -133,7 +130,6 @@ class CIFAR10DataModule(LightningDataModule):
 
         return DataLoader(
             dataset,
-            collate_fn=partial(collate_fn, default_fallback=False),
             pin_memory=self.pin_memory,
             num_workers=self.num_workers,
             prefetch_factor=self.prefetch_factor,

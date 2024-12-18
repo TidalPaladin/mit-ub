@@ -9,11 +9,20 @@ import torch.nn.functional as F
 from torch.multiprocessing import spawn  # type: ignore
 from torch.testing import assert_close
 
-from mit_ub.tasks.jepa import JEPA, average_pairwise_cosine_similarity
+from mit_ub.tasks.jepa import JEPA, JEPAConfig, average_pairwise_cosine_similarity
 
 
-def test_average_pairwise_cosine_similarity():
-    B, L, D = 10, 128, 32
+@pytest.mark.parametrize(
+    "batch, tokens",
+    [
+        (10, 128),
+        (1, 128),
+        (10, 1),
+        (1, 1),
+    ],
+)
+def test_average_pairwise_cosine_similarity(batch, tokens):
+    B, L, D = batch, tokens, 32
     torch.manual_seed(0)
     x = torch.randn(B, L, D)
 
@@ -61,7 +70,10 @@ def run_ema_sync(rank, world_size, backbone, optimizer_init):
 class TestJEPA:
     @pytest.fixture
     def task(self, optimizer_init, backbone):
-        return JEPA(backbone, optimizer_init=optimizer_init, context_scale=1)
+        config = JEPAConfig()
+        config.context_scale = 1
+        config.target_scale = 1
+        return JEPA(backbone, optimizer_init=optimizer_init, jepa_config=config)
 
     @pytest.mark.parametrize(
         "momentum_schedule,max_steps,current_step,ema_alpha,expected",
@@ -75,7 +87,8 @@ class TestJEPA:
     def test_ema_momentum_step(
         self, mocker, vit_dummy, optimizer_init, momentum_schedule, max_steps, current_step, ema_alpha, expected
     ):
-        task = JEPA(vit_dummy, optimizer_init=optimizer_init, ema_alpha=ema_alpha, momentum_schedule=momentum_schedule)
+        config = JEPAConfig(ema_alpha=ema_alpha, momentum_schedule=momentum_schedule)
+        task = JEPA(vit_dummy, optimizer_init=optimizer_init, jepa_config=config)
         trainer = mocker.MagicMock(spec_set=pl.Trainer)
         trainer.max_steps = max_steps
         trainer.global_step = current_step
@@ -98,7 +111,8 @@ class TestJEPA:
     def test_ema_momentum_epoch(
         self, mocker, vit_dummy, optimizer_init, momentum_schedule, max_epochs, current_epoch, ema_alpha, expected
     ):
-        task = JEPA(vit_dummy, optimizer_init=optimizer_init, ema_alpha=ema_alpha, momentum_schedule=momentum_schedule)
+        config = JEPAConfig(ema_alpha=ema_alpha, momentum_schedule=momentum_schedule)
+        task = JEPA(vit_dummy, optimizer_init=optimizer_init, jepa_config=config)
         trainer = mocker.MagicMock(spec_set=pl.Trainer)
         trainer.max_steps = None
         trainer.global_step = None
@@ -117,7 +131,8 @@ class TestJEPA:
         ],
     )
     def test_update_ema(self, mocker, vit_dummy, optimizer_init, current, new, momentum, expected):
-        task = JEPA(vit_dummy, optimizer_init=optimizer_init)
+        config = JEPAConfig(ema_alpha=0.95, momentum_schedule=True)
+        task = JEPA(vit_dummy, optimizer_init=optimizer_init, jepa_config=config)
         mocker.patch.object(task, "get_ema_momentum", return_value=momentum)
         trainer = mocker.MagicMock(spec_set=pl.Trainer)
         trainer.world_size = 1
@@ -168,7 +183,7 @@ class TestJEPA:
         task.parameter_groups = [
             {"params": ("jepa_predictor",), "weight_decay": 1.0},
         ]
-        task.weight_decay_final = 0.5
+        task.jepa_config.weight_decay_final = 0.5
         trainer = mocker.MagicMock(spec_set=pl.Trainer)
         trainer.global_step = 100
         trainer.max_steps = 100
@@ -181,11 +196,11 @@ class TestJEPA:
         assert opt.param_groups[0]["weight_decay"] == 1.0
         assert opt.param_groups[1]["weight_decay"] == 0.5
 
-    def test_fit(self, task, datamodule, logger):
+    def test_fit(self, task, cifar10_datamodule, logger):
         task.weight_decay_final = 4.0
         trainer = pl.Trainer(
             accelerator="cpu",
             fast_dev_run=True,
             logger=logger,
         )
-        trainer.fit(task, datamodule=datamodule)
+        trainer.fit(task, datamodule=cifar10_datamodule)

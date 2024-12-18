@@ -5,11 +5,10 @@ from typing import Callable, Generic, Sequence, Tuple, TypeVar
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from deep_helpers.helpers import to_tuple
 from einops import rearrange
 from torch import Tensor
 
-from ..helpers import compile_backend, compile_is_disabled
+from ..helpers import Dims2D, Dims3D, compile_backend, compile_is_disabled, to_tuple
 from ..pos_enc import DEFAULT_POS_ENC_ACTIVATION, RelativeFactorizedPosition, relative_factorized_position_forward
 
 
@@ -25,6 +24,26 @@ class PatchEmbed(ABC, Generic[T]):
 
     @abstractmethod
     def tokenized_size(self, size: T) -> T:
+        r"""Computes the tokenized size of an input image.
+        This is the size of the of the visual token grid accounting for the patch size.
+        """
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def in_channels(self) -> int:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def embed_dim(self) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def original_size(self, size: T) -> T:
+        r"""Computes the original size of a tokenized image.
+        This is the size of the of the visual token grid upscaling by the patch size.
+        """
         raise NotImplementedError
 
 
@@ -70,8 +89,7 @@ def patch_embed_forward(
     pos = relative_factorized_position_forward(
         dims, w1_pos, b1_pos, w2_pos, b2_pos, w_pos_norm, b_pos_norm, activation, dropout=dropout, training=training
     )
-    x += pos
-    return x
+    return x + pos
 
 
 def _init_patch_embed(layer: nn.Module) -> None:
@@ -82,13 +100,13 @@ def _init_patch_embed(layer: nn.Module) -> None:
     nn.init.zeros_(layer.b_in)
 
 
-class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
+class PatchEmbed2d(nn.Module, PatchEmbed[Dims2D]):
 
     def __init__(
         self,
         in_channels: int,
         embed_dim: int,
-        patch_size: int | Tuple[int, int],
+        patch_size: int | Dims2D,
         dropout: float = 0.0,
         activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
     ):
@@ -109,9 +127,24 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
     def patch_size(self) -> Tuple[int, int]:
         return self._patch_size
 
+    @property
+    def in_channels(self) -> int:
+        return self.w_in.shape[1] // math.prod(self.patch_size)
+
+    @property
+    def embed_dim(self) -> int:
+        return self.w_in.shape[0]
+
     def tokenized_size(self, size: Tuple[int, int]) -> Tuple[int, int]:
         ht, wt = tuple(s // p for s, p in zip(size, self.patch_size))
         return ht, wt
+
+    def original_size(self, size: Tuple[int, int]) -> Tuple[int, int]:
+        ht, wt = tuple(s * p for s, p in zip(size, self.patch_size))
+        return ht, wt
+
+    def extra_repr(self) -> str:
+        return f"in={self.in_channels}, " f"embed={self.embed_dim}, " f"patch_size={self.patch_size}"
 
     def forward(self, x: Tensor) -> Tensor:
         return patch_embed_forward(
@@ -133,13 +166,13 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         )
 
 
-class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
+class PatchEmbed3d(nn.Module, PatchEmbed[Dims3D]):
 
     def __init__(
         self,
         in_channels: int,
         embed_dim: int,
-        patch_size: Tuple[int, int, int],
+        patch_size: int | Dims3D,
         dropout: float = 0.0,
         activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
     ):
@@ -160,9 +193,30 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
     def patch_size(self) -> Tuple[int, int, int]:
         return self._patch_size
 
+    @property
+    def in_channels(self) -> int:
+        return self.w_in.shape[1] // math.prod(self.patch_size)
+
+    @property
+    def embed_dim(self) -> int:
+        return self.w_in.shape[0]
+
     def tokenized_size(self, size: Tuple[int, int, int]) -> Tuple[int, int, int]:
+        r"""Computes the tokenized size of an input image.
+        This is the size of the of the visual token grid accounting for the patch size.
+        """
         dt, ht, wt = tuple(s // p for s, p in zip(size, self.patch_size))
         return dt, ht, wt
+
+    def original_size(self, size: Tuple[int, int, int]) -> Tuple[int, int, int]:
+        r"""Computes the original size of a tokenized image.
+        This is the size of the of the visual token grid upscaling by the patch size.
+        """
+        dt, ht, wt = tuple(s * p for s, p in zip(size, self.patch_size))
+        return dt, ht, wt
+
+    def extra_repr(self) -> str:
+        return f"in={self.in_channels}, " f"embed={self.embed_dim}, " f"patch_size={self.patch_size}"
 
     def forward(self, x: Tensor) -> Tensor:
         return patch_embed_forward(

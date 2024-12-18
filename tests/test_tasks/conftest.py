@@ -38,7 +38,7 @@ def vit_adaptive_dummy():
         dim=dim,
         kv_dim=dim // 4,
         patch_size=2,
-        target_shape=(4, 4),
+        target_shape=(8, 8),
         depth=2,
         high_res_depth=2,
         nhead=dim // 32,

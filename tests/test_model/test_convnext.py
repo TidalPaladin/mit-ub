@@ -3,7 +3,7 @@ import torch
 from mit_ub.model import ConvNext
 
 
-class TestConvNextUnet:
+class TestConvNext:
 
     def test_forward(self):
         torch.random.manual_seed(42)

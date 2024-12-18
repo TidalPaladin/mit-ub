@@ -5,11 +5,10 @@ from typing import Callable, Sequence, Tuple, cast
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from deep_helpers.helpers import to_tuple
 from einops import rearrange
 from torch import Tensor
 
-from ..helpers import compile_backend, compile_is_disabled
+from ..helpers import compile_backend, compile_is_disabled, to_tuple
 from ..pos_enc import DEFAULT_POS_ENC_ACTIVATION, RelativeFactorizedPosition, relative_factorized_position_forward
 from .patch_embed import PatchEmbed, _init_patch_embed
 
@@ -120,25 +119,43 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
     def patch_size(self) -> Tuple[int, int]:
         return self._patch_size
 
-    def tokenized_size(self, _: Tuple[int, int]) -> Tuple[int, int]:
+    @property
+    def target_shape(self) -> Tuple[int, int]:
         return self._target_shape
 
-    def kv_size(self, input_size: Tuple[int, int]) -> Tuple[int, int]:
-        result = tuple(s // p for s, p in zip(input_size, self.patch_size))
-        return cast(Tuple[int, int], result)
+    @property
+    def target_tokenized_shape(self) -> Tuple[int, int]:
+        ht, wt = tuple(s // p for s, p in zip(self.target_shape, self.patch_size))
+        return ht, wt
 
-    def equivalent_size(self, input_size: Tuple[int, int]) -> Tuple[int, int]:
-        h, w = tuple(s * p for s, p in zip(self.tokenized_size(input_size), self.patch_size))
-        return h, w
+    @property
+    def in_channels(self) -> int:
+        return self.w_in.shape[1] // math.prod(self.patch_size)
 
-    def equivalent_size_kv(self, input_size: Tuple[int, int]) -> Tuple[int, int]:
-        h, w = tuple(s * p for s, p in zip(self.kv_size(input_size), self.patch_size))
-        return h, w
+    @property
+    def embed_dim(self) -> int:
+        return self.w_in.shape[0]
+
+    def tokenized_size(self, size: Tuple[int, int]) -> Tuple[int, int]:
+        ht, wt = tuple(s // p for s, p in zip(size, self.patch_size))
+        return ht, wt
+
+    def original_size(self, size: Tuple[int, int]) -> Tuple[int, int]:
+        ht, wt = tuple(s * p for s, p in zip(size, self.patch_size))
+        return ht, wt
+
+    def extra_repr(self) -> str:
+        return (
+            f"in={self.in_channels}, "
+            f"embed={self.embed_dim}, "
+            f"patch_size={self.patch_size}, "
+            f"target_shape={self._target_shape}"
+        )
 
     def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
         return adaptive_patch_embed_forward(
             x,
-            self._target_shape,
+            self.target_tokenized_shape,
             self._pool_type,
             self.w_in,
             self.b_in,
@@ -188,21 +205,43 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
     def patch_size(self) -> Tuple[int, int, int]:
         return self._patch_size
 
-    def tokenized_size(self, _: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    @property
+    def target_shape(self) -> Tuple[int, int, int]:
         return self._target_shape
 
-    def kv_size(self, input_size: Tuple[int, int, int]) -> Tuple[int, int, int]:
-        result = tuple(s // p for s, p in zip(input_size, self.patch_size))
-        return cast(Tuple[int, int, int], result)
+    @property
+    def target_tokenized_shape(self) -> Tuple[int, int, int]:
+        dt, ht, wt = tuple(s // p for s, p in zip(self.target_shape, self.patch_size))
+        return dt, ht, wt
 
-    def equivalent_size(self, input_size: Tuple[int, int, int]) -> Tuple[int, int, int]:
-        d, h, w = tuple(s * p for s, p in zip(self.tokenized_size(input_size), self.patch_size))
-        return d, h, w
+    @property
+    def in_channels(self) -> int:
+        return self.w_in.shape[1] // math.prod(self.patch_size)
+
+    @property
+    def embed_dim(self) -> int:
+        return self.w_in.shape[0]
+
+    def tokenized_size(self, size: Tuple[int, int, int]) -> Tuple[int, int, int]:
+        dt, ht, wt = tuple(s // p for s, p in zip(size, self.patch_size))
+        return dt, ht, wt
+
+    def original_size(self, size: Tuple[int, int, int]) -> Tuple[int, int, int]:
+        dt, ht, wt = tuple(s * p for s, p in zip(size, self.patch_size))
+        return dt, ht, wt
+
+    def extra_repr(self) -> str:
+        return (
+            f"in={self.in_channels}, "
+            f"embed={self.embed_dim}, "
+            f"patch_size={self.patch_size}, "
+            f"target_shape={self._target_shape}"
+        )
 
     def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
         return adaptive_patch_embed_forward(
             x,
-            self._target_shape,
+            self.target_tokenized_shape,
             self._pool_type,
             self.w_in,
             self.b_in,
