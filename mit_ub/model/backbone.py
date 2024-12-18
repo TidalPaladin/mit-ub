@@ -1,4 +1,3 @@
-from copy import deepcopy
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import torch
@@ -11,7 +10,7 @@ from .convnext.convnext import grid_to_tokens, tokens_to_grid
 from .helpers import Dims2D, compile_is_disabled
 from .layer_scale import LayerScale
 from .mlp import relu2
-from .stem import PatchEmbed2d, PatchEmbed3d
+from .stem import AdaptiveTokenizer2d, AdaptiveTokenizer3d, PatchEmbed2d, PatchEmbed3d, PoolType
 from .transformer import TransformerConvDecoderLayer, TransformerDecoderLayer, TransformerEncoderLayer
 
 
@@ -239,6 +238,7 @@ class ViT(nn.Module):
 
 
 class AdaptiveViT(ViT):
+    stem: AdaptiveTokenizer2d | AdaptiveTokenizer3d
 
     def __init__(
         self,
@@ -282,16 +282,10 @@ class AdaptiveViT(ViT):
             bias,
         )
         self.target_shape = cast(Any, target_shape)
-
-        # Resize input for the fixed tokens
-        self.resize_to_fixed = nn.Upsample(
-            size=target_shape,
-            mode="bilinear",
-            align_corners=False,
+        stem_type = AdaptiveTokenizer2d if isinstance(patch_size, int) or len(patch_size) == 2 else AdaptiveTokenizer3d
+        self.stem = stem_type(
+            in_channels, dim, cast(Any, patch_size), self.target_shape, dropout=dropout, pool_type=PoolType.AVG
         )
-
-        # Separate stem for dynamic tokens
-        self.dynamic_stem = deepcopy(self.stem)
 
         # Convert ViT blocks into decoder layers that cross-attend to the dynamic tokens.
         # We also override the layer scale of the cross attention so that the initialization condition
@@ -346,13 +340,12 @@ class AdaptiveViT(ViT):
         mask_fill_value: float | Tensor | None = None,
     ) -> Tensor:
         B, C, *original_size = x.shape
-        dynamic_tokenized_size = self.dynamic_stem.tokenized_size(cast(Any, tuple(original_size)))
-        fixed_tokenized_size = self.stem.tokenized_size(cast(Any, tuple(self.target_shape)))
+        dynamic_tokenized_size = self.stem.tokenized_size(cast(Any, tuple(original_size)))
+        fixed_tokenized_size = self.stem.target_tokenized_shape
         fixed_mask = resize_mask(dynamic_tokenized_size, fixed_tokenized_size, mask) if mask is not None else None
 
         # Tokenize to fixed and dynamic tokens
-        dynamic_tokens = self.dynamic_stem(x)
-        fixed_tokens = self.stem(self.resize_to_fixed(x))
+        fixed_tokens, dynamic_tokens = self.stem(x)
 
         # Mask tokens if given, storing the resized mask
         if mask is not None and fixed_mask is not None:
@@ -496,12 +489,11 @@ class ConvViT(AdaptiveViT):
 
     def forward(self, x: Tensor, reshape: bool = True) -> Tensor:
         B, C, *original_size = x.shape
-        dynamic_tokenized_size = self.dynamic_stem.tokenized_size(cast(Any, tuple(original_size)))
-        fixed_tokenized_size = self.stem.tokenized_size(cast(Any, tuple(self.target_shape)))
+        dynamic_tokenized_size = self.stem.tokenized_size(cast(Any, tuple(original_size)))
+        fixed_tokenized_size = self.stem.target_tokenized_shape
 
         # Tokenize to fixed and dynamic tokens
-        dynamic_tokens = self.dynamic_stem(x)
-        fixed_tokens = self.stem(self.resize_to_fixed(x))
+        fixed_tokens, dynamic_tokens = self.stem(x)
 
         # Run the backbone
         for block, dynamic_block in zip(self.blocks, self.dynamic_blocks):
