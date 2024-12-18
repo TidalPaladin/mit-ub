@@ -1,5 +1,6 @@
 from typing import Final
 
+import torch
 import torch.nn.functional as F
 from registry import Registry
 
@@ -9,6 +10,8 @@ from .helpers import compile_is_disabled
 from .mlp import identity
 from .transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
+
+torch._dynamo.config.cache_size_limit = 128  # type: ignore
 
 BACKBONES = Registry("backbones")
 
@@ -67,7 +70,7 @@ BACKBONES(
     qk_norm=True,
     activation=identity,
     gate_activation=F.silu,
-    layer_scale=0.01,
+    # layer_scale=0.01,
     layer_scale_adaptive=0.001,
     share_weights=True,
 )
