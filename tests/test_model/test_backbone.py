@@ -237,6 +237,47 @@ class TestAdaptiveViT:
         out2 = model(x, mask=mask, reshape=False)
         assert_close(out1, out2)
 
+    def test_share_layers(self):
+        C, D = 3, 128
+        H, W = 256, 256
+        depth = 3
+        nhead = 128 // 16
+
+        model = AdaptiveViT(C, D, (16, 16), (256, 256), depth, nhead, share_layers=True)
+        for block, dynamic_block in zip(model.blocks, model.dynamic_blocks):
+            for name in ("mlp", "cross_attn"):
+                dynamic_child = dynamic_block.get_submodule(name)
+                fixed_child = block.get_submodule(name)
+                assert dynamic_child is fixed_child
+
+        x = torch.randn(1, C, H, W)
+        model(x)
+
+    def test_init_dynamic_from_fixed(self):
+        C, D = 3, 128
+        H, W = 256, 256
+        L = 32
+        depth = 3
+        nhead = 128 // 16
+
+        model = AdaptiveViT(C, D, (16, 16), (256, 256), depth, nhead)
+        model.init_dynamic_from_fixed()
+        model.eval()
+        seq = torch.randn(1, L, D)
+        for block, dynamic_block in zip(model.blocks, model.dynamic_blocks):
+            # Check MLP weights initialized
+            exp = block.mlp(seq)
+            act = dynamic_block.mlp(seq)
+            assert_close(act, exp)
+
+            # Check cross-attention weights initialized from self-attention
+            exp = block.self_attn(seq, seq, seq)
+            act = dynamic_block.cross_attn(seq, seq.clone(), seq.clone())
+            assert_close(act, exp)
+
+        x = torch.randn(1, C, H, W)
+        model(x)
+
 
 class TestConvViT:
 

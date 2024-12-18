@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Final, Iterator, List, Optional, Tuple, cast
 
 import torch
@@ -216,6 +217,9 @@ class JEPA(Task):
             self.jepa_config.salt_pepper_prob,
             self.jepa_config.noise_clip,
         )
+
+    def on_task_checkpoint_loaded(self, path: Path, state_dict: Dict[str, Any]) -> None:
+        self.backbone.on_load_checkpoint(state_dict)
 
     def prepare_backbone(self, name: str) -> nn.Module:
         backbone = BACKBONES.get(name).instantiate_with_metadata().fn

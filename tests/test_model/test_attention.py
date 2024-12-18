@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import pytest
 import torch
 import torch.nn as nn
@@ -209,6 +211,63 @@ class TestMultiHeadAttention:
             out2 = model(q, k, v)
         assert torch.allclose(out1, out2)
 
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    @pytest.mark.parametrize("norm", [False, True])
+    @pytest.mark.parametrize("qk_norm", [False, True])
+    @pytest.mark.parametrize(
+        "num_heads,L,D",
+        [
+            (32, 32, 128),
+            (16, 16, 64),
+        ],
+    )
+    def test_packed_matches_unpacked(self, device, norm, qk_norm, num_heads, L, D):
+        packed = MultiHeadAttention(
+            D,
+            num_heads,
+            num_heads,
+            qk_norm=qk_norm,
+            norm=norm,
+            dropout=0.1,
+            kv_norm=True,
+        )
+        unpacked = deepcopy(packed)
+        w_q, w_k, w_v = packed.w_in.split([D, D, D], dim=0)
+        b_q, b_k, b_v = packed.b_in.split([D, D, D], dim=0)  # type: ignore
+        unpacked.w_q = nn.Parameter(w_q)
+        unpacked.w_k = nn.Parameter(w_k)
+        unpacked.w_v = nn.Parameter(w_v)
+        unpacked.b_q = nn.Parameter(b_q)
+        unpacked.b_k = nn.Parameter(b_k)
+        unpacked.b_v = nn.Parameter(b_v)
+        unpacked.w_in = None  # type: ignore
+        unpacked.b_in = None
+
+        sum_packed = sum(p.sum() for p in packed.parameters())
+        sum_unpacked = sum(p.sum() for p in unpacked.parameters())
+        assert_close(sum_packed, sum_unpacked)
+
+        B = 2
+        x = torch.randn(B, L, D, device=device)
+
+        packed = packed.to(device)
+        unpacked = unpacked.to(device)
+        packed.eval()
+        unpacked.eval()
+
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            packed_out = packed(x, x, x)
+            unpacked_out = unpacked(x, x.clone(), x.clone())
+
+        # Fused LayerNorm differs between self and cross attention
+        assert_close(packed_out, unpacked_out)
+
     def test_fused_norm(self):
         num_heads, num_kv_heads, Lq, Lk, Dq, Dk = 32, 32, 32, 32, 128, 128
         model = MultiHeadAttention(
@@ -243,5 +302,56 @@ class TestMultiHeadAttention:
         result = str(layer)
         assert (
             result
-            == "MultiHeadAttention(dim=32, heads=8, kv_heads=8, head_dim=4, kv_dim=32, dropout=0.0, norm=False, qk_norm=False, bias=True)"
+            == "MultiHeadAttention(dim=32, heads=8, kv_heads=8, head_dim=4, kv_dim=32, dropout=0.0, norm=False, qk_norm=False, bias=True, kv_norm=False)"
         )
+
+    def test_copy_parameters_self(self):
+        D, H, HKV = 128, 128 // 32, 128 // 32
+        src = MultiHeadAttention(D, H, HKV, norm=True, qk_norm=True, kv_norm=True)
+        dst = MultiHeadAttention(D, H, HKV, norm=True, qk_norm=True, kv_norm=True)
+        dst.copy_parameters(src)
+        src.eval()
+        dst.eval()
+        L = 32
+        seq = torch.randn(1, L, D)
+        exp = src(seq, seq, seq)
+        act = dst(seq, seq, seq)
+        assert_close(act, exp)
+
+    @pytest.mark.parametrize("norm", [False, True])
+    @pytest.mark.parametrize("qk_norm", [False, True])
+    def test_copy_parameters_cross(self, norm, qk_norm):
+        D, H, HKV = 128, 128 // 32, 128 // 32
+        src = MultiHeadAttention(D, H, HKV, norm=norm, qk_norm=qk_norm, kv_norm=True)
+        dst = MultiHeadAttention(D, H, HKV, norm=norm, qk_norm=qk_norm, kdim=D, vdim=D, kv_norm=True)
+        dst.copy_parameters(src)
+
+        sum_src = sum(p.sum() for p in src.parameters())
+        sum_dst = sum(p.sum() for p in dst.parameters())
+        assert_close(sum_src, sum_dst)
+
+        src.eval()
+        dst.eval()
+        L = 32
+        seq = torch.randn(1, L, D)
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            exp = src(seq, seq, seq)
+            act = dst(seq, seq.clone(), seq.clone())
+        assert_close(act, exp)
+
+    @pytest.mark.parametrize(
+        "d1,h1,hkv1,norm1,qk1,d2,h2,hkv2,norm2,qk2",
+        [
+            (32, 8, 8, False, False, 32, 8, 8, False, False),
+            (32, 8, 8, False, False, 32, 8, 8, True, False),
+            (32, 8, 8, False, False, 32, 8, 8, False, True),
+            (32, 8, 8, False, False, 32, 8, 8, True, True),
+            (32, 8, 8, False, False, 32, 8, 8, False, False),
+            (32, 8, 8, True, False, 32, 8, 8, False, False),
+            (32, 8, 8, False, True, 32, 8, 8, False, False),
+        ],
+    )
+    def test_copy_parameters_no_error(self, d1, h1, hkv1, norm1, qk1, d2, h2, hkv2, norm2, qk2):
+        src = MultiHeadAttention(d1, h1, hkv1, norm=norm1, qk_norm=qk1)
+        dst = MultiHeadAttention(d2, h2, hkv2, norm=norm2, qk_norm=qk2)
+        dst.copy_parameters(src)
