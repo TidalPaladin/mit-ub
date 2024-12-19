@@ -1,4 +1,3 @@
-
 \newcommand{\drawRCC}{
   \begin{tikzpicture}
     \fill[black] (0,0) rectangle (3, 4);
@@ -90,7 +89,7 @@
 
 \newcommand{\drawPosEnc}{
   \begin{tikzpicture}
-  \node[circle, draw=black, minimum size=6cm] (circle) at (0, 0) {};
+  \node[circle, draw=black, minimum size=6cm, inner sep=1cm] (circle) at (0, 0) {};
   \draw[black] (-3, 0) sin (-1.5, -1) cos (0, 0) sin (1.5, 1) cos (3, 0);
   \end{tikzpicture}
 }
@@ -111,5 +110,215 @@
         \draw[#4] (0,-\i*1) rectangle (1,-\i*1-1);
       }
     }
+  \end{tikzpicture}
+}
+
+
+\newcommand{\drawLayerBlock}[2]{
+  % #1: Inner text
+  % #2: Fill color
+  \begin{tikzpicture}
+    \tikzset{
+        curved box/.style={
+            draw,
+            rounded corners=5pt,
+            minimum width=1cm,
+            minimum height=3cm,
+            align=center,
+            fill=#2
+        }
+    }
+    \node[curved box, name=block] at (0,0) {\rotatebox{-90}{#1}};
+  \end{tikzpicture}
+}
+
+\newcommand{\drawEncoderBlock}{
+  \begin{tikzpicture}
+    \node[name=sa] at (0, 0){\drawLayerBlock{Self Attention}{red!20}};
+    \node[name=mlp] at (1.5, 0){\drawLayerBlock{MLP}{purple!20}};
+    \draw[->, black, >=stealth] (sa) -- (mlp);
+
+    \tikzset{
+        curved box/.style={
+            draw,
+            rounded corners=5pt,
+            minimum width=1cm,
+            minimum height=3cm,
+            align=center,
+        }
+    }
+    \node[curved box, draw, fit=(sa) (mlp), inner sep=4pt] {};
+  \end{tikzpicture}
+}
+
+\newcommand{\drawAddNode}{
+  \begin{tikzpicture}
+    \node[circle, draw, minimum size=10pt] (plus) at (0,0) {$+$};
+  \end{tikzpicture}
+}
+
+\newcommand{\drawDetailedEncoderBlock}{
+  \begin{tikzpicture}
+    \node[outer sep=1pt, inner sep=0pt] (start) {};
+
+    % Define spacing variable
+    \def\blockspacing{0.4cm}
+
+    % Self Attention
+    \node[name=norm1, right=\blockspacing of start]{\drawLayerBlock{Layer Norm}{green!20}};
+    \node[name=sa, right=\blockspacing of norm1]{\drawLayerBlock{Self Attention}{red!20}};
+    \node[name=scale_sa, right=\blockspacing of sa]{\drawLayerBlock{Layer Scale}{gray!20}};
+    \node[name=resid1, scale=0.75, outer sep=1pt, inner sep=1pt, right=\blockspacing of scale_sa]{\drawAddNode};
+    \draw[->, black, >=stealth] (start) -- (norm1);
+    \draw[->, black, >=stealth] (norm1) -- (sa);
+    \draw[->, black, >=stealth] (sa) -- (scale_sa);
+    \draw[->, black, >=stealth] (scale_sa) -- (resid1);
+    \draw[->, black, >=stealth] (start) 
+        |- (norm1.north west) 
+        -| (resid1.north west);
+
+    % MLP
+    \node[name=norm2, right=\blockspacing of resid1]{\drawLayerBlock{Layer Norm}{green!20}};
+    \node[name=mlp, right=\blockspacing of norm2]{\drawLayerBlock{MLP}{purple!20}};
+    \node[name=scale_mlp, right=\blockspacing of mlp]{\drawLayerBlock{Layer Scale}{gray!20}};
+    \node[name=resid2, scale=0.75, outer sep=1pt, inner sep=1pt, right=\blockspacing of scale_mlp]{\drawAddNode};
+    \draw[->, black, >=stealth] (resid1) -- (norm2);
+    \draw[->, black, >=stealth] (norm2) -- (mlp);
+    \draw[->, black, >=stealth] (mlp) -- (scale_mlp);
+    \draw[->, black, >=stealth] (scale_mlp) -- (resid2);
+    \draw[->, black, >=stealth] (resid1.north east) 
+        |- (norm2.north west) 
+        -| (resid2);
+
+    % Group
+    \tikzset{
+        curved box/.style={
+            draw,
+            rounded corners=5pt,
+            minimum width=1cm,
+            minimum height=4cm,
+            align=center,
+            line width=1pt
+        }
+    }
+    \node[curved box, draw, fit= (start) (norm1) (sa) (scale_sa) (norm2) (mlp) (scale_mlp) (resid2), inner sep=4pt] {};
+  \end{tikzpicture}
+}
+
+\newcommand{\drawDecoderBlock}{
+  \begin{tikzpicture}
+    \node[name=sa] at (0, 0){\drawLayerBlock{Self Attention}{red!20}};
+    \node[name=ca] at (1.5, 0){\drawLayerBlock{Cross Attention}{green!20}};
+    \node[name=mlp] at (3, 0){\drawLayerBlock{MLP}{purple!20}};
+    \draw[->, black, >=stealth] (sa) -- (ca);
+    \draw[->, black, >=stealth] (ca) -- (mlp);
+
+    \tikzset{
+        curved box/.style={
+            draw,
+            rounded corners=5pt,
+            minimum width=1cm,
+            minimum height=3cm,
+            align=center,
+        }
+    }
+    \node[curved box, draw, fit=(sa) (ca) (mlp), inner sep=4pt] {};
+  \end{tikzpicture}
+}
+
+\newcommand{\drawConv}[3]{
+  % #1: kernel size
+  % #2: color
+  % #3: filter count
+  \begin{tikzpicture}
+    % Draw the stacked filters with perspective
+    \foreach \i in {0,...,#3} {
+      \begin{scope}[yshift=\i*5pt]
+        \foreach \x in {0,...,\numexpr#1-1\relax} {
+          \foreach \y in {0,...,\numexpr#1-1\relax} {
+            \draw[fill=#2] (\x*0.2,\y*0.2) rectangle ++(0.2,0.2);
+          }
+        }
+      \end{scope}
+    }
+  \end{tikzpicture}
+}
+
+
+\newcommand{\drawDetailedDecoderBlock}[1]{
+  % #1: t to use self attn, f to not use self attn
+  \begin{tikzpicture}
+    \node[outer sep=1pt, inner sep=0pt] (start) {};
+
+    % Define spacing variable
+    \def\blockspacing{0.4cm}
+
+    % Self Attention (only if #1 is t)
+    \ifthenelse{\equal{#1}{t}}{
+      \node[name=norm1, right=\blockspacing of start]{\drawLayerBlock{Layer Norm}{green!20}};
+      \node[name=sa, right=\blockspacing of norm1]{\drawLayerBlock{Self Attention}{red!20}};
+      \node[name=scale_sa, right=\blockspacing of sa]{\drawLayerBlock{Layer Scale}{gray!20}};
+      \node[name=resid1, scale=0.75, outer sep=1pt, inner sep=1pt, right=\blockspacing of scale_sa]{\drawAddNode};
+      \draw[->, black, >=stealth] (start) -- (norm1);
+      \draw[->, black, >=stealth] (norm1) -- (sa);
+      \draw[->, black, >=stealth] (sa) -- (scale_sa);
+      \draw[->, black, >=stealth] (scale_sa) -- (resid1);
+      \draw[->, black, >=stealth] (start) 
+          |- (norm1.north west) 
+          -| (resid1.north west);
+    }{
+      \node[name=resid1] at (start) {};
+    }
+
+    % Cross Attention
+    \node[name=norm2, right=\blockspacing of resid1]{\drawLayerBlock{Layer Norm}{green!20}};
+    \node[name=ca, right=\blockspacing of norm2]{\drawLayerBlock{Cross Attention}{blue!20}};
+    \node[name=scale_ca, right=\blockspacing of ca]{\drawLayerBlock{Layer Scale}{gray!20}};
+    \node[name=resid2, scale=0.75, outer sep=1pt, inner sep=1pt, right=\blockspacing of scale_ca]{\drawAddNode};
+    \draw[->, black, >=stealth] (resid1) -- (norm2);
+    \draw[->, black, >=stealth] (norm2) -- (ca);
+    \draw[->, black, >=stealth] (ca) -- (scale_ca);
+    \draw[->, black, >=stealth] (scale_ca) -- (resid2);
+    \ifthenelse{\equal{#1}{t}}{
+      \draw[->, black, >=stealth] (resid1.north east) 
+          |- (norm2.north west) 
+          -| (resid2);
+    }{
+      \draw[->, black, >=stealth] (start.north east)
+          |- (norm2.north west)
+          -| (resid2);
+    }
+
+    % MLP
+    \node[name=norm3, right=\blockspacing of resid2]{\drawLayerBlock{Layer Norm}{green!20}};
+    \node[name=mlp, right=\blockspacing of norm3]{\drawLayerBlock{MLP}{purple!20}};
+    \node[name=scale_mlp, right=\blockspacing of mlp]{\drawLayerBlock{Layer Scale}{gray!20}};
+    \node[name=resid3, scale=0.75, outer sep=1pt, inner sep=1pt, right=\blockspacing of scale_mlp]{\drawAddNode};
+    \draw[->, black, >=stealth] (resid2) -- (norm3);
+    \draw[->, black, >=stealth] (norm3) -- (mlp);
+    \draw[->, black, >=stealth] (mlp) -- (scale_mlp);
+    \draw[->, black, >=stealth] (scale_mlp) -- (resid3);
+    \draw[->, black, >=stealth] (resid2.north east) 
+        |- (norm3.north west) 
+        -| (resid3);
+
+    % Group
+    \tikzset{
+        curved box/.style={
+            draw,
+            rounded corners=5pt,
+            minimum width=1cm,
+            minimum height=4cm,
+            align=center,
+            line width=1pt
+        }
+    }
+    \node[curved box, draw, fit= (start) (norm2) (ca) (scale_ca) (norm3) (mlp) (scale_mlp) (resid3), inner sep=4pt] {};
+
+    % Anchors
+    \coordinate (ca_north) at (ca.north);
+    \coordinate (ca_south) at (ca.south);
+    \coordinate (ca_east) at (ca.east); 
+    \coordinate (ca_west) at (ca.west);
   \end{tikzpicture}
 }

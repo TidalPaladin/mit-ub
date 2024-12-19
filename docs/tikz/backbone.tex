@@ -1,0 +1,43 @@
+\documentclass[tikz,convert={outfile=\jobname.svg}]{standalone}
+\usepackage{pgf} 
+\usepackage{amsmath}
+\usepackage{ifthen}
+\usetikzlibrary{positioning}
+\usetikzlibrary{fit}
+
+\begin{document}
+\include{macros}
+\tikzset{every picture/.style={/utils/exec={\sffamily}}}
+
+\begin{tikzpicture}
+    % Input image
+    \node[name=rcc] at (0, 0){\drawRCC};
+    \node[below=0.5cm of rcc.south, anchor=center] {Input Image};
+
+    % Patch embedding
+    \node[name=patch_embedding, right=1cm of rcc.east, anchor=west] {\drawMLP};
+    \node[below=0.5cm of patch_embedding.south, anchor=center] {Patch Embedding};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (rcc) -- (patch_embedding);
+
+    % Position encoding
+    \node[name=position_encoding, above=1cm of patch_embedding.north, anchor=center, scale=0.1, outer sep=1cm] {\drawPosEnc};
+    \node[above=0.5cm of position_encoding.north, anchor=center] {Position Encoding};
+
+    % Encoder Block
+    \node[name=block1, right=1cm of patch_embedding.east, anchor=west] {\drawDetailedEncoderBlock};
+    \node[below=0.5cm of block1.south, anchor=center] {Transformer Encoder};
+    \node[above=0.5cm of block1.north east, anchor=east] {Repeat Nx};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (patch_embedding) -- (block1);
+    %\draw[->, thick, black, >=stealth, line width=1.5pt] (position_encoding) -- (block1) node[midway, above] {$x_{in}$};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] 
+        (position_encoding) 
+        to[out=0, in=180]
+        (block1);
+
+    % Output
+    \node[name=output, right=1cm of block1.east, anchor=west] {\drawMaskedRCC{3}{1.0}{blue}{0.2}{3}{4}};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (block1) -- (output);
+    \node[below=0.5cm of output.south, anchor=center] {Output Features};
+
+\end{tikzpicture}
+\end{document}

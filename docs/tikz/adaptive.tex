@@ -3,52 +3,84 @@
 \usepackage{amsmath}
 \usepackage{ifthen}
 \usetikzlibrary{positioning}
+\usetikzlibrary{fit}
+\usetikzlibrary{calc}
 
 \begin{document}
 \include{macros}
 \tikzset{every picture/.style={/utils/exec={\sffamily}}}
 
 \begin{tikzpicture}
-    % Input image with separate nodes for braces and arrows
+    % Input image
     \node[name=rcc] at (0, 0){\drawRCC};
-    \node[above=0.5cm of rcc.north, anchor=center] {Input Image};
+    \node[below=0.5cm of rcc.south, anchor=center] {Input Image};
 
-    % Resized image (same approach)
-    \node[name=resized, scale=0.5] at (0, -6){\drawRCC};
-    \node[below=0.5cm of resized.south, anchor=center] {Resized Image};
+    % Patch embedding
+    \node[name=patch_embedding] at (4, 0){\drawMLP};
+    \node[below=0.5cm of patch_embedding.south, anchor=center] {Patch Embedding};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (rcc) -- (patch_embedding);
 
-    % Arrow with default spacing
-    \draw[->, thick, black, >=stealth, line width=1.5pt] (rcc) -- (resized);
+    % Dynamic features
+    \node[name=dynamic] at (8, 0){\drawMaskedRCC{3}{1.0}{red}{0.2}{4}{6}};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (patch_embedding) -- (dynamic);
+    \node[above=0.5cm of dynamic.north, anchor=center] {Embeddings};
 
-    % Coarse encoder
-    \node[name=coarse_encoder] at (4, -6){\drawMLP};
-    \node[below=0.5cm of coarse_encoder.south, anchor=center] {Coarse Encoder};
-    \draw[->, thick, black, >=stealth, line width=1.5pt] (resized) -- (coarse_encoder);
+    % Fixed features
+    \node[name=fixed] at (8, -8){\drawMaskedRCC{3}{1.0}{green}{0.2}{3}{4}};
+    \node[below=0.5cm of fixed.south, anchor=center] {Fixed Embeddings};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (dynamic) -- (fixed) 
+        node[name=midpool, midway, anchor=center, right] {\rotatebox{-90}{Adaptive Pooling}};
 
-    % Coarse features
-    \node[name=coarse_features, scale=0.5] at (8, -6){\drawMaskedRCC{5}{1.0}{red}{0.25}{3}{4}};
-    \node[below=0.5cm of coarse_features.south, anchor=center] {Features};
-    \draw[->, thick, black, >=stealth, line width=1.5pt] (coarse_encoder) -- (coarse_features);
+    % Position encoding
+    \node[name=position_encoding, right=1.5cm of midpool.east, anchor=center, scale=0.1, outer sep=1cm] {\drawPosEnc};
 
-    % Visual tokenizer
-    \node[name=visual_tokenizer] at (4, 0){\drawMLP};
-    \node[above=0.5cm of visual_tokenizer.north, anchor=center] {Visual Tokenizer};
-    \draw[->, thick, black, >=stealth, line width=1.5pt] (rcc) -- (visual_tokenizer);
+    % Fixed Block
+    \node[name=block2, right=1cm of fixed.east, anchor=west] {\drawDetailedDecoderBlock{t}};
+    \node[below=0.5cm of block2.south, anchor=center] {Transformer Decoder};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (fixed) -- (block2);
+    \node[below=0.5cm of block2.south east, anchor=east] {Repeat Nx};
 
-    % Fine features
-    \node[name=fine_features] at (8, 0){\drawMaskedRCC{5}{1.0}{blue}{0.25}{6}{8}};
-    \node[above=0.5cm of fine_features.north, anchor=center] {Features};
-    \draw[->, thick, black, >=stealth, line width=1.5pt] (visual_tokenizer) -- (fine_features);
+    % Dynamic Block
+    \node[name=block1, right=1cm of dynamic.east, anchor=west] {\drawDetailedDecoderBlock{f}};
+    \node[above=0.5cm of block1.north, anchor=center] {Transformer Decoder};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (dynamic) -- (block1);
+    \node[above=0.5cm of block1.north east, anchor=east] {Repeat Nx};
 
-    % Cross attention
-    \node[name=cross_attention] at (15, -3){\drawMLP};
     \draw[->, thick, black, >=stealth, line width=1.5pt] 
-        (fine_features) -- ++(3, 0) -- (cross_attention);
+        (position_encoding) 
+        to[out=90, in=180]
+        (block1);
     \draw[->, thick, black, >=stealth, line width=1.5pt] 
-        (coarse_features) -- ++(7,0) -- (cross_attention);
+        (position_encoding) 
+        to[out=270, in=180]
+        (block2);
+
+    % Output scale
+    \node[name=output_scale, right=1cm of block1.east, anchor=west] {\drawLayerBlock{Layer Scale}{gray!20}};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (block1) -- (output_scale);
+
+    % Output
+    \node[name=output, right=4cm of output_scale.east, anchor=west] {\drawMaskedRCC{3}{1.0}{blue}{0.2}{4}{6}};
+    \draw[->, thick, black, >=stealth, line width=1.5pt] (output_scale) -- (output);
+    \node[above=0.5cm of output.north, anchor=center] {Output Features};
+
+    % Resize and add
+    \draw[->, thick, black, >=stealth, line width=1.5pt] 
+        (block2) 
+        to[out=0, in=270]
+        node[near end, left] {Resize and Add}
+        (output);
+
+    % Cross attention connections
+    \draw[->, thick, red, >=stealth, line width=1.5pt] 
+        ($(block1.south west)+(3.25cm,0)$) 
+        -- ($(block2.north west)+(3.25cm,0)$);
+    \draw[->, thick, red, >=stealth, line width=1.5pt] 
+        ($(block2.north west)+(8.9cm,0)$)
+        -- ($(block1.south west)+(8.9cm,0)$);
 
 
-
+  
 
 \end{tikzpicture}
 \end{document}
