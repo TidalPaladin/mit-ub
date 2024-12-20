@@ -1,6 +1,6 @@
 import pytest
 
-from mit_ub.model import BACKBONES, AdaptiveViT, ViT
+from mit_ub.model import AdaptiveViTConfig, ConvNextConfig, ViTConfig
 
 
 @pytest.fixture
@@ -14,46 +14,83 @@ def optimizer_init():
 @pytest.fixture(scope="session")
 def vit_dummy():
     dim = 128
-    BACKBONES(
-        ViT,
-        name="vit-dummy",
+    config = ViTConfig(
         in_channels=1,
         dim=dim,
-        patch_size=2,
+        patch_size=(2, 2),
         depth=2,
         nhead=dim // 32,
+        dim_feedforward=dim,
         dropout=0.1,
-        override=True,
     )
-    return "vit-dummy"
+    return config
 
 
 @pytest.fixture(scope="session")
 def vit_adaptive_dummy():
     dim = 128
-    BACKBONES(
-        AdaptiveViT,
-        name="vit-adaptive-dummy",
+    config = AdaptiveViTConfig(
         in_channels=1,
         dim=dim,
-        kv_dim=dim // 4,
-        patch_size=2,
-        target_shape=(8, 8),
+        patch_size=(2, 2),
         depth=2,
-        high_res_depth=2,
         nhead=dim // 32,
+        dim_feedforward=dim,
         dropout=0.1,
-        override=True,
+        target_shape=(8, 8),
     )
-    return "vit-adaptive-dummy"
+    return config
+
+
+@pytest.fixture(scope="session")
+def convnext_dummy():
+    config = ConvNextConfig(
+        in_channels=1,
+        depths=(2, 2, 2),
+        dims=(32, 48, 64),
+        dims_feedforward=(128, 192, 256),
+        dropout=0.1,
+        stochastic_depth=0.1,
+        patch_size=2,
+    )
+    return config
+
+
+@pytest.fixture(scope="session")
+def vit_distillation():
+    dim = 128
+    config = ViTConfig(
+        in_channels=1,
+        dim=dim,
+        patch_size=(4, 4),
+        depth=2,
+        nhead=dim // 32,
+        dim_feedforward=dim,
+        dropout=0.1,
+    )
+    return config
+
+
+@pytest.fixture(scope="session")
+def convnext_distillation():
+    config = ConvNextConfig(
+        in_channels=1,
+        depths=(2, 2, 2),
+        up_depths=(2, 2),
+        dims=(32, 48, 64),
+        dims_feedforward=(128, 192, 256),
+        dropout=0.1,
+        stochastic_depth=0.1,
+        patch_size=2,
+    )
+    return config
 
 
 @pytest.fixture(scope="session", params=["vit-dummy", "vit-adaptive-dummy"])
 def backbone(request):
     if request.param == "vit-dummy":
-        request.getfixturevalue("vit_dummy")
+        return request.getfixturevalue("vit_dummy")
     elif request.param == "vit-adaptive-dummy":
-        request.getfixturevalue("vit_adaptive_dummy")
+        return request.getfixturevalue("vit_adaptive_dummy")
     else:
         pytest.fail(f"Unsupported backbone: {request.param}")
-    return request.param

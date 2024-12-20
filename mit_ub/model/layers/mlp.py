@@ -1,27 +1,10 @@
-from typing import Callable, Final
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from .helpers import compile_backend, compile_is_disabled
-
-
-@torch.compile(fullgraph=True, backend=compile_backend(), disable=compile_is_disabled())
-def relu2(x: Tensor) -> Tensor:
-    r"""Computes squared ReLU of an input."""
-    # NOTE: This is roughly as fast as the custom triton kernel
-    y = F.relu(x)
-    return y * y
-
-
-def identity(x: Tensor) -> Tensor:
-    return x
-
-
-DEFAULT_MLP_ACTIVATION: Final = relu2
-DEFAULT_MLP_GATE_ACTIVATION: Final = None
+from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
+from ..helpers import compile_backend, compile_is_disabled
 
 
 @torch.compile(
@@ -44,8 +27,8 @@ def mlp_forward(
     w_gate: Tensor | None = None,
     b_gate: Tensor | None = None,
     dropout: float = 0.0,
-    activation: Callable[[Tensor], Tensor] = DEFAULT_MLP_ACTIVATION,
-    gate_activation: Callable[[Tensor], Tensor] | None = DEFAULT_MLP_GATE_ACTIVATION,
+    activation: Activation = DEFAULT_MLP_ACTIVATION,
+    gate_activation: Activation | None = DEFAULT_MLP_GATE_ACTIVATION,
     w_norm: Tensor | None = None,
     b_norm: Tensor | None = None,
     eps: float = 1e-5,
@@ -96,8 +79,8 @@ class MLP(nn.Module):
         hidden_features: int,
         out_features: int,
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = DEFAULT_MLP_ACTIVATION,
-        gate_activation: Callable[[Tensor], Tensor] | None = DEFAULT_MLP_GATE_ACTIVATION,
+        activation: Activation = DEFAULT_MLP_ACTIVATION,
+        gate_activation: Activation | None = DEFAULT_MLP_GATE_ACTIVATION,
         bias: bool = True,
         norm: bool = False,
     ):

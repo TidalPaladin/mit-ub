@@ -1,15 +1,11 @@
-# Config for training a basic ViT using MJEPA on CIFAR-10.
-# NOTE: Set environment variable TORCH_COMPILE=0 to disable torch.compile. This is helpful for debugging
-# since compilation takes time. However, it does yield a substantial throughput improvement.
+# Config for training a ConvNext baseline fully supervised on CIFAR-10.
+# See 'mjepa.yaml' for explanation of the config.
 fit:
-  # Leverage tensor cores for matmul
   float32_matmul_precision: medium
 
   trainer:
-    # Train on GPU 1 in BF16 mixed precision for 50k steps, validating every 10 epochs.
-    # Sanity validation steps are recommended to trigger torch.compile of the model in inference mode.
     accelerator: gpu
-    devices: [1]
+    devices: [2]
     precision: "bf16-mixed"
     max_steps: 50000
     num_sanity_val_steps: 2
@@ -40,65 +36,36 @@ fit:
 
   model:
     # Use the MJEPA task with a linear probe
-    class_path: mit_ub.tasks.JEPAWithClassification
+    class_path: mit_ub.tasks.ClassificationTask
     init_args:
 
-      # The ViT backbone
       backbone_config:
-        class_path: mit_ub.model.ViTConfig
+        class_path: mit_ub.model.ConvNextConfig
         init_args:
           in_channels: 3
-          dim: 384
-          dim_feedforward: 1536
-          patch_size: [4, 4]
-          depth: 12
-          nhead: 12
+          depths: [3, 5, 3]
+          dims: [96, 192, 384]
+          dims_feedforward: [384, 768, 1536]
+          patch_size: 2
           activation: "relu2"
           gate_activation: null
           bias: false
           dropout: 0.1
           stochastic_depth: 0.1
-          layer_scale: 0.1
-          qk_norm: false
+          kernel_size: 3
 
       num_classes: 10
-
-      #checkpoint: ...
 
       # Partial checkpoints are supported. In non-strict mode we ignore missing keys, unexpected keys, and
       # weights of mismatched shapes. The training pipeline reports the % of weights successfully loaded and
       # the names of unloaded layers.
-      #strict_checkpoint: true
-
-      jepa_config:
-        # Momentum of teacher weight update and an optional linear schedule for increasing alpha to 1.0
-        ema_alpha: 0.98
-        momentum_schedule: false
-
-        # Optional final weight decay for the backbone
-        weight_decay_final: null
-
-        # Depth of transformer decoder making JEPA predictions
-        predictor_depth: 4
-
-        # Ratios of input to sample as context and targets
-        context_ratio: 0.5
-        target_ratio: 0.25
-
-        # How much to subsample the encoded context before passing to decoder.
-        # context_ratio = 0.5, context_subsample_ratio = 0.5 -> 1/4 of input given to decoder
-        context_subsample_ratio: 0.5
-
-        # Scale of context and target sampling. 
-        # At scale=2, tokens are guaranteed to appear in 2x2 contiguous groups.
-        context_scale: 2
-        target_scale: 2
+      strict_checkpoint: false
 
       # Use AdamW optimizer with 8-bit precision, and a reciplrocal square root learning rate schedule
       optimizer_init:
         class_path: bitsandbytes.optim.AdamW8bit
         init_args:
-          lr: 0.0005
+          lr: 0.0001
           weight_decay: 0.05
           betas: [0.85, 0.999]
       lr_interval: "step"
@@ -109,18 +76,12 @@ fit:
           cooldown_steps: 25000
           total_steps: ${fit.trainer.max_steps}
           timescale: 10000
-          initial_lr: 0.0001
+          initial_lr: 0.00002
           initial_momentum: 0.95
 
-      # Use a higher weight decay on the JEPA predictor and output projection
-      # Use an even higher weight decay on the linear probe
       parameter_groups:
         - params:
-            - "jepa_predictor"
-            - "jepa_out_proj"
-          weight_decay: 0.25
-        - params:
-            - "linear_probe"
+            - "classification_head"
           weight_decay: 1.0
 
   data:
@@ -128,7 +89,7 @@ fit:
     init_args:
       root: /mnt/data/cifar10/cifar-10-batches-py
       batch_size: 512
-      num_workers: 24
+      num_workers: 12
       pin_memory: true
 
       # A minimal set of augmentations are used

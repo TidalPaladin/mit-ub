@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.testing import assert_close
 
-from mit_ub.model.transformer import (
+from mit_ub.model.layers.transformer import (
     TransformerConvDecoderLayer,
     TransformerConvEncoderLayer,
     TransformerDecoderLayer,

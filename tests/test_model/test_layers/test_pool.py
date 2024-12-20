@@ -2,7 +2,7 @@ import pytest
 import torch
 from torch.testing import assert_close
 
-from mit_ub.model.pool import MultiHeadAttentionPool
+from mit_ub.model.layers.pool import MultiHeadAttentionPool
 
 
 class TestMultiHeadAttentionPool:

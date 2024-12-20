@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.testing import assert_close
 
-from mit_ub.model.mlp import MLP, mlp_forward
+from mit_ub.model.layers.mlp import MLP, mlp_forward
 
 
 @pytest.mark.parametrize("dropout", [0.0, 0.1])

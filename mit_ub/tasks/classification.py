@@ -1,4 +1,5 @@
 from copy import copy
+from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
 
 import torch
@@ -10,7 +11,8 @@ from deep_helpers.tasks import Task
 from einops.layers.torch import Rearrange
 from torch import Tensor
 
-from ..model import BACKBONES, ViT
+from ..model import AdaptiveViTConfig, AnyModelConfig, ViTConfig
+from .distillation import DistillationConfig, DistillationWithProbe
 from .jepa import JEPAConfig, JEPAWithProbe
 
 
@@ -35,7 +37,7 @@ class ClassificationTask(Task):
 
     def __init__(
         self,
-        backbone: str,
+        backbone_config: AnyModelConfig,
         num_classes: int,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
@@ -62,8 +64,8 @@ class ClassificationTask(Task):
         )
         self.num_classes = num_classes
 
-        self.backbone = cast(ViT, self.prepare_backbone(backbone))
-        dim = self.backbone.dim
+        self.backbone = backbone_config.instantiate()
+        dim = self.backbone.config.dim
         self.classification_head = nn.Sequential(
             nn.AdaptiveAvgPool2d((1, 1)),
             Rearrange("b c () () -> b c"),
@@ -75,11 +77,6 @@ class ClassificationTask(Task):
         nn.init.trunc_normal_(self.classification_head[-1].weight, std=0.02)
         self.criterion = nn.CrossEntropyLoss()
         self.save_hyperparameters()
-
-    def prepare_backbone(self, name: str) -> nn.Module:
-        backbone = BACKBONES.get(name).instantiate_with_metadata().fn
-        assert isinstance(backbone, nn.Module)
-        return backbone
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
         return tm.MetricCollection(
@@ -126,7 +123,7 @@ class ClassificationTask(Task):
 class JEPAWithClassification(JEPAWithProbe):
     def __init__(
         self,
-        backbone: str,
+        backbone_config: ViTConfig | AdaptiveViTConfig,
         num_classes: int,
         jepa_config: JEPAConfig = JEPAConfig(),
         optimizer_init: Dict[str, Any] = {},
@@ -142,7 +139,7 @@ class JEPAWithClassification(JEPAWithProbe):
     ):
         self.num_classes = num_classes
         super().__init__(
-            backbone,
+            backbone_config,
             jepa_config,
             optimizer_init,
             lr_scheduler_init,
@@ -157,9 +154,98 @@ class JEPAWithClassification(JEPAWithProbe):
         )
 
     def create_probe_head(self) -> nn.Module:
+        dim = self.backbone.config.dim
         return nn.Sequential(
-            nn.LayerNorm(self.backbone.dim),
-            nn.Linear(self.backbone.dim, self.num_classes),
+            nn.LayerNorm(dim),
+            nn.Linear(dim, self.num_classes),
+        )
+
+    def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
+        metrics = super().create_metrics(*args, **kwargs)
+        metrics.add_metrics({"acc": tm.Accuracy(task="multiclass", num_classes=self.num_classes)})
+        return metrics
+
+    @torch.no_grad()
+    def create_gt(self, batch: Dict[str, Any]) -> Tensor:
+        y = batch["label"].long()
+        return y
+
+    def step_linear_probe(
+        self, batch: Dict[str, Any], output: Dict[str, Any], metrics: tm.MetricCollection | None
+    ) -> Dict[str, Any]:
+        # Forward pass of linear probe using target features
+        features = self.get_probe_features_from_output(output)
+
+        assert self.linear_probe is not None
+        N = features.shape[0]
+        linprobe_logits = self.linear_probe(features.mean(1).view(N, -1)).view(N, -1)
+        assert linprobe_logits.requires_grad or not self.training
+
+        # Build ground truth and compute loss
+        linprobe_gt = self.create_gt(batch).view(N)
+        mask = linprobe_gt != -1
+        linprobe_loss = F.cross_entropy(linprobe_logits[mask], linprobe_gt[mask].long())
+        if not mask.any():
+            linprobe_loss = torch.zeros_like(linprobe_loss)
+
+        # Logits -> probs
+        with torch.no_grad():
+            linprobe_probs = torch.sigmoid(linprobe_logits)
+
+        # Compute metrics
+        with torch.no_grad():
+            if mask.any():
+                for name, metric in (metrics or {}).items():
+                    if "acc" in name and linprobe_gt.numel():
+                        metric.update(linprobe_probs[mask], linprobe_gt[mask])
+
+        output = copy(output)
+        output["log"]["loss_linprobe"] = linprobe_loss
+        return output
+
+
+class DistillationWithClassification(DistillationWithProbe):
+    def __init__(
+        self,
+        backbone_config: AnyModelConfig,
+        teacher_config: AnyModelConfig,
+        teacher_checkpoint: Path,
+        num_classes: int,
+        distillation_config: DistillationConfig = DistillationConfig(),
+        optimizer_init: Dict[str, Any] = {},
+        lr_scheduler_init: Dict[str, Any] = {},
+        lr_interval: str = "epoch",
+        lr_monitor: str = "train/total_loss_epoch",
+        named_datasets: bool = False,
+        checkpoint: Optional[str] = None,
+        strict_checkpoint: bool = True,
+        log_train_metrics_interval: int = 1,
+        log_train_metrics_on_epoch: bool = False,
+        parameter_groups: List[Dict[str, Any]] = [],
+    ):
+        self.num_classes = num_classes
+        super().__init__(
+            backbone_config,
+            teacher_config,
+            teacher_checkpoint,
+            distillation_config,
+            optimizer_init,
+            lr_scheduler_init,
+            lr_interval,
+            lr_monitor,
+            named_datasets,
+            checkpoint,
+            strict_checkpoint,
+            log_train_metrics_interval,
+            log_train_metrics_on_epoch,
+            parameter_groups,
+        )
+
+    def create_probe_head(self) -> nn.Module:
+        dim = self.backbone.config.dim
+        return nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, self.num_classes),
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:

@@ -16,10 +16,10 @@ from torch.distributed import barrier as dist_barrier
 from torch.optim.optimizer import Optimizer
 
 from ..data.augment import RandomNoise
-from ..model import BACKBONES, AdaptiveViT, ViT, compile_is_disabled
-from ..model.layer_scale import LayerScale
-from ..model.pos_enc import RelativeFactorizedPosition
-from ..model.transformer import TransformerDecoderLayer
+from ..model import AdaptiveViT, AdaptiveViTConfig, ViT, ViTConfig, compile_is_disabled
+from ..model.layers.layer_scale import LayerScale
+from ..model.layers.pos_enc import RelativeFactorizedPosition
+from ..model.layers.transformer import TransformerDecoderLayer
 from ..tokens import apply_mask, create_mask
 
 
@@ -67,6 +67,59 @@ class MeanLayerScale(tm.MeanMetric):
     def update(self, module: nn.Module) -> None:
         for t in iterate_layer_scales(module):
             super().update(t.abs().mean())
+
+
+@torch.no_grad()
+def mixup(x: Tensor, target: Tensor, mixup_prob: float = 0.2, mixup_alpha: float = 1.0) -> Tuple[Tensor, Tensor]:
+    r"""Implements MixUp on inputs and teacher network outputs.
+
+    At a high level, this involves linearly combining two inputs and their
+    corresponding targets in a random manner.
+
+    Args:
+        x: The input tensor.
+        target: The target tensor.
+        mixup_prob: The probability of applying mixup to the input and target.
+        mixup_alpha: The alpha parameter for the Beta distribution used to sample the mixup weight.
+
+    Returns:
+        A tuple containing the mixed input and target.
+    """
+    # Generate mixup weight
+    N = x.shape[0]
+    dist = torch.distributions.Beta(mixup_alpha, mixup_alpha)
+    lam = dist.sample(torch.Size((N,))).to(x.device)
+
+    # Generate mask of mixup samples
+    mixup_mask = torch.rand_like(lam) < mixup_prob
+
+    def right_broadcast(inp: Tensor, proto: Tensor) -> Tensor:
+        return inp.view(-1, *(1,) * len(proto.shape[1:]))
+
+    # Apply mixup to input and target
+    x = torch.where(
+        right_broadcast(mixup_mask, x),
+        x.roll(1, 0).lerp_(x, right_broadcast(lam, x)),
+        x,
+    )
+    target = torch.where(
+        right_broadcast(mixup_mask, target),
+        target.roll(1, 0).lerp_(target, right_broadcast(lam.type_as(target), target)),
+        target,
+    )
+    return x, target
+
+
+@torch.no_grad()
+def apply_noise_batched(transform: RandomNoise, x: Tensor) -> Tensor:
+    r"""Applies noise to a batch of images such that each image in the batch is
+    independently transformed. This is an alternative to `self.random_noise` which
+    applies the same noise to all images in the batch.
+    """
+    x = x.clone()
+    for i in range(x.shape[0]):
+        x[i] = transform(x[i])
+    return x
 
 
 @dataclass
@@ -156,7 +209,7 @@ class JEPA(Task):
 
     def __init__(
         self,
-        backbone: str,
+        backbone_config: ViTConfig | AdaptiveViTConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
@@ -184,21 +237,23 @@ class JEPA(Task):
         self.jepa_config = jepa_config
 
         # Backbone and EMA weights
-        self.backbone = cast(ViT | AdaptiveViT, self.prepare_backbone(backbone))
-        self.ema_backbone = deepcopy(self.backbone)
-        for p in self.ema_backbone.parameters():
+        backbone = backbone_config.instantiate()
+        assert isinstance(backbone, (ViT, AdaptiveViT))
+        self.backbone = backbone
+        self.teacher_backbone = deepcopy(self.backbone)
+        for p in self.teacher_backbone.parameters():
             p.requires_grad = False
 
         # Position encoding / initialization for prediction queries.
         self.pos_enc = RelativeFactorizedPosition(
             len(self.backbone.stem.patch_size),
-            self.backbone.dim,
+            self.backbone.config.dim,
             dropout=0.1,
         )
 
         # Projections for the input context and output predictions
-        self.jepa_norm = nn.LayerNorm(self.backbone.dim)
-        self.jepa_out_proj = nn.Linear(self.backbone.dim, self.backbone.dim)
+        self.jepa_norm = nn.LayerNorm(self.backbone.config.dim)
+        self.jepa_out_proj = nn.Linear(self.backbone.config.dim, self.backbone.config.dim)
         nn.init.xavier_uniform_(self.jepa_out_proj.weight)
         nn.init.zeros_(self.jepa_out_proj.bias)
 
@@ -220,11 +275,6 @@ class JEPA(Task):
 
     def on_task_checkpoint_loaded(self, path: Path, state_dict: Dict[str, Any]) -> None:
         self.backbone.on_load_checkpoint(state_dict)
-
-    def prepare_backbone(self, name: str) -> nn.Module:
-        backbone = BACKBONES.get(name).instantiate_with_metadata().fn
-        assert isinstance(backbone, nn.Module)
-        return backbone
 
     def create_metrics(self, state: State) -> tm.MetricCollection:
         r"""Gets a MetricCollection for a given state"""
@@ -290,7 +340,7 @@ class JEPA(Task):
     def update_ema(self) -> None:
         """Update the Exponential Moving Average (EMA) of the backbone parameters."""
         momentum = self.get_ema_momentum()
-        for ema_param, param in zip(self.ema_backbone.parameters(), self.backbone.parameters()):
+        for ema_param, param in zip(self.teacher_backbone.parameters(), self.backbone.parameters()):
             ema_param.lerp_(param, 1 - momentum)
         self.synchronize_ema_weights()
 
@@ -304,7 +354,7 @@ class JEPA(Task):
         in Distributed Data Parallel (DDP) training.
         """
         if self.trainer.world_size > 1:
-            for ema_param in self.ema_backbone.parameters():
+            for ema_param in self.teacher_backbone.parameters():
                 # There seems to be sporadic deadlocks in DDP, so we use barriers to keep things synchronized
                 dist_barrier()
                 all_reduce(ema_param.data, op=ReduceOp.SUM)
@@ -344,55 +394,6 @@ class JEPA(Task):
         )
         return list(updates)
 
-    @torch.no_grad()
-    def mixup(self, x: Tensor, target: Tensor) -> Tuple[Tensor, Tensor]:
-        r"""Implements MixUp on inputs and teacher network outputs.
-
-        At a high level, this involves linearly combining two inputs and their
-        corresponding targets in a random manner.
-
-        Args:
-            x: The input tensor.
-            target: The target tensor.
-
-        Returns:
-            A tuple containing the mixed input and target.
-        """
-        # Generate mixup weight
-        N = x.shape[0]
-        dist = torch.distributions.Beta(self.jepa_config.mixup_alpha, self.jepa_config.mixup_alpha)
-        lam = dist.sample(torch.Size((N,))).to(x.device)
-
-        # Generate mask of mixup samples
-        mixup_mask = torch.rand_like(lam) < self.jepa_config.mixup_prob
-
-        def right_broadcast(inp: Tensor, proto: Tensor) -> Tensor:
-            return inp.view(-1, *(1,) * len(proto.shape[1:]))
-
-        # Apply mixup to input and target
-        x = torch.where(
-            right_broadcast(mixup_mask, x),
-            x.roll(1, 0).lerp_(x, right_broadcast(lam, x)),
-            x,
-        )
-        target = torch.where(
-            right_broadcast(mixup_mask, target),
-            target.roll(1, 0).lerp_(target, right_broadcast(lam.type_as(target), target)),
-            target,
-        )
-        return x, target
-
-    @torch.no_grad()
-    def apply_noise_batched(self, x: Tensor) -> Tensor:
-        r"""Applies noise to a batch of images such that each image in the batch is
-        independently transformed. This is an alternative to `self.random_noise` which
-        applies the same noise to all images in the batch.
-        """
-        x = x.clone()
-        for i in range(x.shape[0]):
-            x[i] = self.random_noise(x[i])
-        return x
-
     def step(
         self,
         batch: Any,
@@ -416,15 +417,15 @@ class JEPA(Task):
 
         # generate ground truth with forward pass of ema backbone on unmasked image
         with torch.no_grad():
-            self.ema_backbone.eval()
-            full_target: Tensor = self.ema_backbone(x, reshape=False)
+            self.teacher_backbone.eval()
+            full_target: Tensor = self.teacher_backbone(x, reshape=False)
 
             # apply random noise
-            x = self.apply_noise_batched(x)
+            x = apply_noise_batched(self.random_noise, x)
 
             # apply mixup, not overwriting full_target
             if self.training and self.jepa_config.mixup_prob > 0:
-                x, full_target_mixed = self.mixup(x, full_target)
+                x, full_target_mixed = mixup(x, full_target, self.jepa_config.mixup_alpha, self.jepa_config.mixup_prob)
                 target = apply_mask(target_mask, full_target_mixed, fill_value=None)
             else:
                 target = apply_mask(target_mask, full_target, fill_value=None)
@@ -473,7 +474,7 @@ class JEPA(Task):
 class JEPAWithProbe(JEPA, ABC):
     def __init__(
         self,
-        backbone: str,
+        backbone_config: ViTConfig | AdaptiveViTConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
@@ -487,7 +488,7 @@ class JEPAWithProbe(JEPA, ABC):
         parameter_groups: List[Dict[str, Any]] = [],
     ):
         super().__init__(
-            backbone,
+            backbone_config,
             jepa_config,
             optimizer_init,
             lr_scheduler_init,

@@ -2,7 +2,7 @@ import pytest
 import torch
 from torch.testing import assert_close
 
-from mit_ub.model.layer_scale import LayerScale
+from mit_ub.model.layers.layer_scale import LayerScale
 
 
 class TestLayerScale:

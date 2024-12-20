@@ -1,15 +1,16 @@
 from argparse import ArgumentParser, Namespace
-from typing import cast
+from pathlib import Path
 
 import torch
 from torch.profiler import ProfilerActivity, profile, record_function
 
-from mit_ub.model import BACKBONES, AdaptiveViT, ViT
+from mit_ub.model import AdaptiveViTConfig, ConvNextConfig, ViTConfig
 
 
 def parse_args() -> Namespace:
     parser = ArgumentParser(prog="profile", description="Profile MiT-UB")
-    parser.add_argument("model", type=str, help="Name of the model to profile")
+    parser.add_argument("model", choices=["vit", "adaptive-vit", "convnext"], help="Model type to profile")
+    parser.add_argument("config", type=Path, help="Path to the model config to profile")
     parser.add_argument("size", type=int, nargs="+", help="Input size")
     parser.add_argument("-b", "--batch-size", type=int, default=1, help="Batch size")
     parser.add_argument("-c", "--channels", type=int, default=3, help="Number of channels")
@@ -19,7 +20,17 @@ def parse_args() -> Namespace:
 
 
 def main(args: Namespace):
-    model = cast(ViT | AdaptiveViT, BACKBONES.get(args.model).instantiate_with_metadata().fn)
+    match args.model:
+        case "vit":
+            config = ViTConfig.from_file(args.config)
+        case "adaptive-vit":
+            config = AdaptiveViTConfig.from_file(args.config)
+        case "convnext":
+            config = ConvNextConfig.from_file(args.config)
+        case _:
+            raise ValueError(f"Invalid model type: {args.model}")
+
+    model = config.instantiate()
     model = model.to(args.device)
     model.train(args.training)
     device = torch.device(args.device)

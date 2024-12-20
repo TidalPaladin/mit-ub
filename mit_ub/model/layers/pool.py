@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
-from .helpers import compile_is_disabled
+from ..helpers import compile_is_disabled
 
 
 @torch.compile(

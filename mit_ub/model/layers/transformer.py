@@ -1,14 +1,15 @@
-from typing import Callable, Tuple
+from typing import Tuple
 
 import torch.nn as nn
 from torch import Tensor
 from torchvision.ops import StochasticDepth
 
+from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
+from ..helpers import Dims2D
 from .attention import MultiHeadAttention
-from .convnext.convnext import ConvNextBlock
-from .helpers import Dims2D
+from .convnext import ConvNextBlock
 from .layer_scale import LayerScale
-from .mlp import MLP, relu2
+from .mlp import MLP
 from .soft_moe import SoftMoE
 
 
@@ -20,8 +21,8 @@ class TransformerEncoderLayer(nn.Module):
         nhead: int,
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
-        activation: Callable[[Tensor], Tensor] = relu2,
-        gate_activation: Callable[[Tensor], Tensor] | None = None,
+        activation: Activation = DEFAULT_MLP_ACTIVATION,
+        gate_activation: Activation | None = DEFAULT_MLP_GATE_ACTIVATION,
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
         layer_scale: float | None = None,
@@ -103,8 +104,8 @@ class TransformerDecoderLayer(nn.Module):
         d_kv: int | None = None,
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
-        activation: Callable[[Tensor], Tensor] = relu2,
-        gate_activation: Callable[[Tensor], Tensor] | None = None,
+        activation: Activation = DEFAULT_MLP_ACTIVATION,
+        gate_activation: Activation | None = DEFAULT_MLP_GATE_ACTIVATION,
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
         layer_scale: float | None = None,
@@ -213,8 +214,8 @@ class TransformerConvEncoderLayer(TransformerEncoderLayer):
         nhead: int,
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
-        activation: Callable[[Tensor], Tensor] = relu2,
-        gate_activation: Callable[[Tensor], Tensor] | None = None,
+        activation: Activation = DEFAULT_MLP_ACTIVATION,
+        gate_activation: Activation | None = DEFAULT_MLP_GATE_ACTIVATION,
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
         layer_scale: float | None = None,
@@ -264,8 +265,8 @@ class TransformerConvDecoderLayer(TransformerDecoderLayer):
         d_kv: int | None = None,
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
-        activation: Callable[[Tensor], Tensor] = relu2,
-        gate_activation: Callable[[Tensor], Tensor] | None = None,
+        activation: Activation = DEFAULT_MLP_ACTIVATION,
+        gate_activation: Activation | None = DEFAULT_MLP_GATE_ACTIVATION,
         num_kv_heads: int | None = None,
         qk_norm: bool = False,
         layer_scale: float | None = None,

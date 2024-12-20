@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.testing import assert_close
 
-from mit_ub.model.attention import MultiHeadAttention
+from mit_ub.model.layers.attention import MultiHeadAttention
 
 
 class TestMultiHeadAttention:

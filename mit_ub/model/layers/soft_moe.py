@@ -1,4 +1,4 @@
-from typing import Callable, List
+from typing import List
 
 import torch
 import torch.nn as nn
@@ -6,8 +6,9 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
-from .helpers import compile_backend
-from .mlp import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, mlp_forward
+from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
+from ..helpers import compile_backend
+from .mlp import mlp_forward
 
 
 @torch.compile(
@@ -120,11 +121,11 @@ def forward_experts(
     b_in: Tensor | None,
     w_out: Tensor,
     b_out: Tensor | None,
-    activation: Callable[[Tensor], Tensor] = DEFAULT_MLP_ACTIVATION,
+    activation: Activation = DEFAULT_MLP_ACTIVATION,
     dropout: float = 0.0,
     w_gate: Tensor | None = None,
     b_gate: Tensor | None = None,
-    gate_activation: Callable[[Tensor], Tensor] | None = DEFAULT_MLP_GATE_ACTIVATION,
+    gate_activation: Activation | None = DEFAULT_MLP_GATE_ACTIVATION,
     training: bool = False,
 ) -> Tensor:
     """Perform forward pass through experts.
@@ -196,11 +197,11 @@ def soft_moe_forward(
     b_in: Tensor | None,
     w_out: Tensor,
     b_out: Tensor | None,
-    activation: Callable[[Tensor], Tensor] = DEFAULT_MLP_ACTIVATION,
+    activation: Activation = DEFAULT_MLP_ACTIVATION,
     dropout: float = 0.0,
     w_gate: Tensor | None = None,
     b_gate: Tensor | None = None,
-    gate_activation: Callable[[Tensor], Tensor] | None = DEFAULT_MLP_GATE_ACTIVATION,
+    gate_activation: Activation | None = DEFAULT_MLP_GATE_ACTIVATION,
     norm_w: Tensor | None = None,
     norm_b: Tensor | None = None,
     pre_norm_w: Tensor | None = None,
@@ -260,8 +261,8 @@ class SoftMoE(nn.Module):
         num_slots: int,
         nhead: int,
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = DEFAULT_MLP_ACTIVATION,
-        gate_activation: Callable[[Tensor], Tensor] | None = DEFAULT_MLP_GATE_ACTIVATION,
+        activation: Activation = DEFAULT_MLP_ACTIVATION,
+        gate_activation: Activation | None = DEFAULT_MLP_GATE_ACTIVATION,
         bias: bool = True,
         qk_norm: bool = False,
         norm: bool = False,

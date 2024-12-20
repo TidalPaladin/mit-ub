@@ -5,8 +5,8 @@ import torch
 import torch.nn.functional as F
 from torch.testing import assert_close
 
-from mit_ub.model.mlp import mlp_forward
-from mit_ub.model.pos_enc import RelativeFactorizedPosition, create_grid, relative_factorized_position_forward
+from mit_ub.model.layers.mlp import mlp_forward
+from mit_ub.model.layers.pos_enc import RelativeFactorizedPosition, create_grid, relative_factorized_position_forward
 
 
 @pytest.mark.parametrize("normalize", [True, False])
@@ -116,4 +116,4 @@ class TestRelativeFactorizedPosition:
     def test_extra_repr(self):
         layer = RelativeFactorizedPosition(2, 16)
         result = str(layer)
-        assert result == "RelativeFactorizedPosition(in=2, hidden=32, out=16, dropout=0.0, act=silu)"
+        assert result == "RelativeFactorizedPosition(in=2, hidden=32, out=16, dropout=0.0, act=relu2)"

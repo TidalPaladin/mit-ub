@@ -3,8 +3,8 @@ import torch
 import torch.nn.functional as F
 from torch.testing import assert_close
 
-from mit_ub.model.mlp import mlp_forward
-from mit_ub.model.soft_moe import SoftMoE, forward_experts
+from mit_ub.model.layers.mlp import mlp_forward
+from mit_ub.model.layers.soft_moe import SoftMoE, forward_experts
 
 
 class TestSoftMoE:

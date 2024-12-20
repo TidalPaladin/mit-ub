@@ -1,15 +1,13 @@
 import math
-from typing import Callable, Final, Sequence
+from typing import Sequence
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from .helpers import compile_backend, compile_is_disabled
-
-
-DEFAULT_POS_ENC_ACTIVATION: Final[Callable[[Tensor], Tensor]] = F.silu
+from ..activations import DEFAULT_POS_ENC_ACTIVATION, Activation
+from ..helpers import compile_backend, compile_is_disabled
 
 
 @torch.compile(fullgraph=True, backend=compile_backend(), disable=compile_is_disabled())
@@ -58,7 +56,7 @@ def relative_factorized_position_forward(
     b2: Tensor | None,
     w_norm: Tensor | None,
     b_norm: Tensor | None,
-    activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
+    activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
     dropout: float = 0.0,
     training: bool = False,
 ) -> Tensor:
@@ -137,7 +135,7 @@ class RelativeFactorizedPosition(nn.Module):
         d_in: int,
         d_out: int,
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
+        activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
         dim_feedforward: int | None = None,
     ):
         super().__init__()
