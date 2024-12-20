@@ -1,13 +1,9 @@
-# Config for training a basic ViT using MJEPA on CIFAR-10.
-# NOTE: Set environment variable TORCH_COMPILE=0 to disable torch.compile. This is helpful for debugging
-# since compilation takes time. However, it does yield a substantial throughput improvement.
+# Config for training a basic ViT fully supervised on CIFAR-10.
+# See 'mjepa.yaml' for explanation of the config.
 fit:
-  # Leverage tensor cores for matmul
   float32_matmul_precision: medium
 
   trainer:
-    # Train on GPU 1 in BF16 mixed precision for 50k steps, validating every 10 epochs.
-    # Sanity validation steps are recommended to trigger torch.compile of the model in inference mode.
     accelerator: gpu
     devices: [1]
     precision: "bf16-mixed"
@@ -18,7 +14,6 @@ fit:
     default_root_dir: /mnt/flash/mit-ub
 
     callbacks:
-      # Save the best model based on validation loss and most recent model
       - class_path: pytorch_lightning.callbacks.ModelCheckpoint
         init_args:
           filename: "epoch={epoch}-step={step}-loss={val/loss:.4f}"
@@ -27,7 +22,6 @@ fit:
           mode: min
           save_last: true
 
-      # Log learning rate and momentum
       - class_path: pytorch_lightning.callbacks.LearningRateMonitor
         init_args:
           log_momentum: true
@@ -39,19 +33,29 @@ fit:
         project: mit-ub
 
   model:
-    # Use the MJEPA task with a linear probe
     class_path: mit_ub.tasks.ClassificationTask
     init_args:
-      backbone: "convvit-cifar10"
+      backbone_config:
+        class_path: mit_ub.model.ViTConfig
+        init_args:
+          in_channels: 3
+          dim: 384
+          dim_feedforward: 1536
+          patch_size: [4, 4]
+          depth: 12
+          nhead: 12
+          activation: "relu2"
+          gate_activation: null
+          bias: false
+          dropout: 0.1
+          stochastic_depth: 0.1
+          layer_scale: 0.1 
+          qk_norm: false
+
       num_classes: 10
       checkpoint: /mnt/flash/mitub/mit-ub/9uc0cf7k/checkpoints/last.ckpt
-
-      # Partial checkpoints are supported. In non-strict mode we ignore missing keys, unexpected keys, and
-      # weights of mismatched shapes. The training pipeline reports the % of weights successfully loaded and
-      # the names of unloaded layers.
       strict_checkpoint: false
 
-      # Use AdamW optimizer with 8-bit precision, and a reciplrocal square root learning rate schedule
       optimizer_init:
         class_path: bitsandbytes.optim.AdamW8bit
         init_args:
