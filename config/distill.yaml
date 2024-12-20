@@ -5,7 +5,7 @@ fit:
 
   trainer:
     accelerator: gpu
-    devices: [2]
+    devices: [1]
     precision: "bf16-mixed"
     max_steps: 50000
     num_sanity_val_steps: 2
@@ -14,7 +14,6 @@ fit:
     default_root_dir: /mnt/flash/mit-ub
 
     callbacks:
-      # Save the best model based on validation loss and most recent model
       - class_path: pytorch_lightning.callbacks.ModelCheckpoint
         init_args:
           filename: "epoch={epoch}-step={step}-loss={val/loss:.4f}"
@@ -23,7 +22,6 @@ fit:
           mode: min
           save_last: true
 
-      # Log learning rate and momentum
       - class_path: pytorch_lightning.callbacks.LearningRateMonitor
         init_args:
           log_momentum: true
@@ -33,9 +31,9 @@ fit:
       init_args:
         save_dir: ${fit.trainer.default_root_dir}
         project: mit-ub
+        name: distillation-convnext
 
   model:
-    # Use the MJEPA task with a linear probe
     class_path: mit_ub.tasks.DistillationWithClassification
     init_args:
 
@@ -72,16 +70,14 @@ fit:
           layer_scale: 0.1
           qk_norm: false
 
+      distillation_config:
+        mixup_prob: 0.0
+        use_noise: false
+
       teacher_checkpoint: /mnt/flash/mit-ub/mit-ub/uueyg9ip/checkpoints/last.ckpt
 
       num_classes: 10
 
-      # Partial checkpoints are supported. In non-strict mode we ignore missing keys, unexpected keys, and
-      # weights of mismatched shapes. The training pipeline reports the % of weights successfully loaded and
-      # the names of unloaded layers.
-      strict_checkpoint: false
-
-      # Use AdamW optimizer with 8-bit precision, and a reciplrocal square root learning rate schedule
       optimizer_init:
         class_path: bitsandbytes.optim.AdamW8bit
         init_args:
@@ -112,7 +108,6 @@ fit:
       num_workers: 12
       pin_memory: true
 
-      # A minimal set of augmentations are used
       train_transforms:
         class_path: torchvision.transforms.v2.Compose
         init_args:
@@ -125,13 +120,40 @@ fit:
               init_args:
                 p: 0.5
 
+            - class_path: torchvision.transforms.v2.RandomApply
+              init_args:
+                p: 0.25
+                transforms:
+                  - class_path: mit_ub.data.RandomRotation
+                    init_args:
+                      degrees: 45
+
             - class_path: torchvision.transforms.v2.ColorJitter
               init_args:
                 brightness: 0.2
                 contrast: 0.2
                 saturation: 0.2
 
-            - class_path: torchvision.transforms.v2.ToTensor
+            - class_path: torchvision.transforms.v2.RandomGrayscale
+              init_args:
+                p: 0.1
+
+            - class_path: torchvision.transforms.v2.ToImage
+            
+            - class_path: torchvision.transforms.v2.ToDtype
+              init_args:
+                scale: true
+                dtype:
+                  class_path: torch.float32
 
       val_transforms:
-        class_path: torchvision.transforms.v2.ToTensor
+        class_path: torchvision.transforms.v2.Compose
+        init_args:
+          transforms:
+            - class_path: torchvision.transforms.v2.ToImage
+            
+            - class_path: torchvision.transforms.v2.ToDtype
+              init_args:
+                scale: true
+                dtype:
+                  class_path: torch.float32

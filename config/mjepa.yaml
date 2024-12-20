@@ -37,6 +37,7 @@ fit:
       init_args:
         save_dir: ${fit.trainer.default_root_dir}
         project: mit-ub
+        name: mjepa
 
   model:
     # Use the MJEPA task with a linear probe
@@ -58,7 +59,7 @@ fit:
           bias: false
           dropout: 0.1
           stochastic_depth: 0.1
-          layer_scale: 0.1
+          layer_scale: 0.1 # Layer scale can stabilize early training
           qk_norm: false
 
       num_classes: 10
@@ -131,7 +132,6 @@ fit:
       num_workers: 24
       pin_memory: true
 
-      # A minimal set of augmentations are used
       train_transforms:
         class_path: torchvision.transforms.v2.Compose
         init_args:
@@ -144,13 +144,40 @@ fit:
               init_args:
                 p: 0.5
 
+            - class_path: torchvision.transforms.v2.RandomApply
+              init_args:
+                p: 0.25
+                transforms:
+                  - class_path: mit_ub.data.RandomRotation
+                    init_args:
+                      degrees: 45
+
             - class_path: torchvision.transforms.v2.ColorJitter
               init_args:
                 brightness: 0.2
                 contrast: 0.2
                 saturation: 0.2
 
-            - class_path: torchvision.transforms.v2.ToTensor
+            - class_path: torchvision.transforms.v2.RandomGrayscale
+              init_args:
+                p: 0.1
+
+            - class_path: torchvision.transforms.v2.ToImage
+            
+            - class_path: torchvision.transforms.v2.ToDtype
+              init_args:
+                scale: true
+                dtype:
+                  class_path: torch.float32
 
       val_transforms:
-        class_path: torchvision.transforms.v2.ToTensor
+        class_path: torchvision.transforms.v2.Compose
+        init_args:
+          transforms:
+            - class_path: torchvision.transforms.v2.ToImage
+            
+            - class_path: torchvision.transforms.v2.ToDtype
+              init_args:
+                scale: true
+                dtype:
+                  class_path: torch.float32

@@ -12,9 +12,10 @@ from deep_helpers.structs import State
 from deep_helpers.tasks import Task
 from torch import Tensor
 
+from ..data.noise import RandomNoise
 from ..model import AnyModelConfig
 from ..model.helpers import grid_to_tokens
-from .jepa import mixup
+from .jepa import apply_noise_batched, mixup
 
 
 @dataclass
@@ -25,6 +26,7 @@ class DistillationConfig:
     Args:
         mixup_alpha: Alpha parameter for the Beta distribution used to sample the mixup weight.
         mixup_prob: Probability of applying mixup to the input and target.
+        use_noise: If True, apply noise to the input.
         noise_scale: Scale of the noise to apply to the input.
         noise_clip: If True, clip the noise to the range [0, 1].
         salt_pepper_prob: Proportion of salt and pepper noise to apply to the input.
@@ -32,6 +34,7 @@ class DistillationConfig:
 
     mixup_alpha: float = 1.0
     mixup_prob: float = 0.2
+    use_noise: bool = True
     noise_scale: float = 0.2
     noise_clip: bool = True
     salt_pepper_prob: float | Tuple[float, float] = (0.01, 0.05)
@@ -93,6 +96,12 @@ class Distillation(Task):
         for p in self.teacher_backbone.parameters():
             p.requires_grad = False
 
+        self.random_noise = RandomNoise(
+            self.config.noise_scale,
+            self.config.salt_pepper_prob,
+            self.config.noise_clip,
+        )
+
         self.save_hyperparameters()
 
     def load_teacher_checkpoint(self, teacher_checkpoint: Path) -> nn.Module:
@@ -128,6 +137,9 @@ class Distillation(Task):
             # generate ground truth with forward pass of teacher backbone
             self.teacher_backbone.eval()
             target: Tensor = self.teacher_backbone(x, reshape=False)
+
+            if self.training and self.config.use_noise:
+                x = apply_noise_batched(self.random_noise, x)
 
             # apply mixup
             if self.training and self.config.mixup_prob > 0:

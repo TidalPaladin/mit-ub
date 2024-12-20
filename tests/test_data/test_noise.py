@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from mit_ub.data.augment import RandomNoise, multiplicative_noise, salt_pepper_noise, uniform_noise
+from mit_ub.data.noise import RandomNoise, multiplicative_noise, salt_pepper_noise, uniform_noise
 
 
 @pytest.mark.parametrize(

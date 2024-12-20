@@ -15,7 +15,7 @@ from torch.distributed import ReduceOp, all_reduce
 from torch.distributed import barrier as dist_barrier
 from torch.optim.optimizer import Optimizer
 
-from ..data.augment import RandomNoise
+from ..data.noise import RandomNoise
 from ..model import AdaptiveViT, AdaptiveViTConfig, ViT, ViTConfig, compile_is_disabled
 from ..model.layers.layer_scale import LayerScale
 from ..model.layers.pos_enc import RelativeFactorizedPosition
@@ -141,6 +141,7 @@ class JEPAConfig:
         predictor_depth: Depth of the predictor network.
         mixup_alpha: Alpha parameter for the Beta distribution used to sample the mixup weight.
         mixup_prob: Probability of applying mixup to the input and target.
+        use_noise: If True, apply noise to the input.
         noise_scale: Scale of the noise to apply to the input.
         noise_clip: If True, clip the noise to the range [0, 1].
         salt_pepper_prob: Proportion of salt and pepper noise to apply to the input.
@@ -158,6 +159,7 @@ class JEPAConfig:
     predictor_depth: int = 4
     mixup_alpha: float = 1.0
     mixup_prob: float = 0.2
+    use_noise: bool = True
     noise_scale: float = 0.2
     noise_clip: bool = True
     salt_pepper_prob: float | Tuple[float, float] = (0.01, 0.05)
@@ -421,7 +423,8 @@ class JEPA(Task):
             full_target: Tensor = self.teacher_backbone(x, reshape=False)
 
             # apply random noise
-            x = apply_noise_batched(self.random_noise, x)
+            if self.training and self.jepa_config.use_noise:
+                x = apply_noise_batched(self.random_noise, x)
 
             # apply mixup, not overwriting full_target
             if self.training and self.jepa_config.mixup_prob > 0:
