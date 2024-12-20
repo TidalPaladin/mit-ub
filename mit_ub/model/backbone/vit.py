@@ -1,4 +1,3 @@
-from copy import copy
 from dataclasses import dataclass, field
 from typing import Any, Dict, Self, Sequence, cast
 
@@ -6,13 +5,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from ...tokens import apply_mask, create_mask
-from ..activations import (
-    ACTIVATIONS,
-    DEFAULT_MLP_ACTIVATION_STR,
-    DEFAULT_MLP_GATE_ACTIVATION_STR,
-    Activation,
-    get_activation,
-)
+from ..activations import DEFAULT_MLP_ACTIVATION_STR, DEFAULT_MLP_GATE_ACTIVATION_STR, Activation
 from ..config import ModelConfig
 from ..layers.transformer import TransformerDecoderLayer, TransformerEncoderLayer
 from ..stem import PatchEmbed2d, PatchEmbed3d
@@ -39,48 +32,6 @@ class ViTConfig(ModelConfig):
     moe_layers: Sequence[int] = field(default_factory=list)
     num_experts: int | None = None
     num_slots: int | None = None
-
-    def __post_init__(self) -> None:
-        activation = get_activation(self.activation)
-        gate_activation = get_activation(self.gate_activation) if self.gate_activation is not None else None
-        patch_size = tuple(self.patch_size) if isinstance(self.patch_size, Sequence) else self.patch_size
-        object.__setattr__(self, "patch_size", patch_size)
-        object.__setattr__(self, "activation", activation)
-        object.__setattr__(self, "gate_activation", gate_activation)
-
-    def _prepare_for_save(self) -> Self:
-        # Convert activation and gate_activation to strings.
-        # First try using the name of the activation function. If that isnt in ACTIVATIONS,
-        # traverse the dict to find the key.
-        save_config = copy(self)
-
-        # Convert activation functions to strings
-        for key in ["activation", "gate_activation"]:
-            fn = getattr(save_config, key)
-            if fn is None:
-                continue
-
-            # Try using function name directly
-            replacement = None
-            if fn.__name__ in ACTIVATIONS:
-                replacement = fn.__name__
-            else:
-                # Search through ACTIVATIONS dict
-                for name, func in ACTIVATIONS.items():
-                    if func == fn:
-                        replacement = name
-                        break
-
-            if replacement is not None:
-                object.__setattr__(save_config, key, replacement)
-                assert isinstance(getattr(save_config, key), str)
-            else:
-                raise ValueError(f"Activation function {fn} not found in ACTIVATIONS")
-
-        # Convert patch_size to a list (for YAML)
-        object.__setattr__(save_config, "patch_size", list(save_config.patch_size))
-
-        return save_config
 
     def instantiate(self) -> "ViT":
         return ViT(self)

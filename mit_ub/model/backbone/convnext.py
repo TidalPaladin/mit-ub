@@ -4,7 +4,7 @@ from typing import List, Sequence, cast
 import torch.nn as nn
 from torch import Tensor
 
-from ..activations import DEFAULT_MLP_ACTIVATION_STR, DEFAULT_MLP_GATE_ACTIVATION_STR, Activation, get_activation
+from ..activations import DEFAULT_MLP_ACTIVATION_STR, DEFAULT_MLP_GATE_ACTIVATION_STR, Activation
 from ..config import ModelConfig
 from ..helpers import Dims2D, grid_to_tokens, tokens_to_grid
 from ..layers.convnext import ConvNextBlock
@@ -25,17 +25,6 @@ class ConvNextConfig(ModelConfig):
     layer_scale: float | None = None
     stochastic_depth: float = 0.0
     up_depths: Sequence[int] = field(default_factory=lambda: [])
-
-    def __post_init__(self) -> None:
-        if len(self.dims_feedforward) != len(self.dims):
-            raise ValueError(
-                f"Number of dims feedforward {len(self.dims_feedforward)} must match number of dims {len(self.dims)}"
-            )
-
-        activation = get_activation(self.activation)
-        gate_activation = get_activation(self.gate_activation) if self.gate_activation else None
-        object.__setattr__(self, "activation", activation)
-        object.__setattr__(self, "gate_activation", gate_activation)
 
     def instantiate(self) -> "ConvNext":
         return ConvNext(self)

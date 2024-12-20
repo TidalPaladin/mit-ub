@@ -1,8 +1,71 @@
+import json
+from dataclasses import replace
+
 import pytest
 import torch
+import torch.nn.functional as F
+import yaml
 
 from mit_ub.model import ConvNext
+from mit_ub.model.activations import relu2
 from mit_ub.model.backbone.convnext import ConvNextConfig
+
+
+@pytest.fixture
+def config():
+    config = ConvNextConfig(
+        in_channels=3,
+        depths=(2, 2, 2),
+        dims=(32, 48, 64),
+        dims_feedforward=(128, 192, 256),
+        activation="relu2",
+        gate_activation=None,
+    )
+    return config
+
+
+class TestConvNextConfig:
+
+    def test_convert_activations(self, config):
+        config = replace(config, activation="relu2", gate_activation="silu")
+        assert config.activation == relu2
+        assert config.gate_activation == F.silu
+
+    @pytest.mark.parametrize("ext", [".json", ".yaml", ".yml"])
+    def test_from_file(self, tmp_path, ext):
+        config = {
+            "in_channels": 3,
+            "depths": [2, 2, 2],
+            "dims": [32, 48, 64],
+            "dims_feedforward": [128, 192, 256],
+            "activation": "relu2",
+            "gate_activation": "silu",
+        }
+
+        path = tmp_path / f"config{ext}"
+        with open(path, "w") as f:
+            if ext == ".json":
+                json.dump(config, f)
+            else:
+                yaml.dump(config, f)
+
+        config = ConvNextConfig.from_file(path)
+        assert config.in_channels == 3
+        assert config.depths == (2, 2, 2)
+        assert config.dims == (32, 48, 64)
+        assert config.dims_feedforward == (128, 192, 256)
+
+    @pytest.mark.parametrize("ext", [".json", ".yaml", ".yml"])
+    def test_save(self, config, tmp_path, ext):
+        path = tmp_path / f"config{ext}"
+        config.save(path)
+
+        loaded = ConvNextConfig.from_file(path)
+        assert config == loaded
+
+    def test_instantiate(self, config):
+        model = config.instantiate()
+        assert isinstance(model, ConvNext)
 
 
 class TestConvNext:

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, Self, Tuple, cast
+from typing import Any, Dict, Self, Sequence, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -39,7 +39,7 @@ def resize_mask(
 
 @dataclass(frozen=True)
 class AdaptiveViTConfig(ViTConfig):
-    target_shape: Tuple[int, int] | Tuple[int, int, int] | None = None
+    target_shape: Sequence[int] | None = None
     layer_scale_adaptive: float | None = 1e-4
     share_layers: bool = False
 
@@ -47,14 +47,6 @@ class AdaptiveViTConfig(ViTConfig):
         super().__post_init__()
         if self.target_shape is None:
             raise ValueError("`target_shape` must be provided")
-        else:
-            object.__setattr__(self, "target_shape", tuple(self.target_shape))
-
-    def _prepare_for_save(self) -> Self:
-        save_config = super()._prepare_for_save()
-        assert isinstance(save_config, AdaptiveViTConfig)
-        object.__setattr__(save_config, "target_shape", list(save_config.target_shape))  # type: ignore
-        return cast(Self, save_config)
 
     def instantiate(self) -> "AdaptiveViT":
         return AdaptiveViT(self)
