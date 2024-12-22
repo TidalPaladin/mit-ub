@@ -33,6 +33,7 @@ def attention_forward(
     pre_norm_b: Tensor | None = None,
     kv_norm: bool = False,
     training: bool = False,
+    mask: Tensor | None = None,
     # fmt: on
 ) -> Tensor:
     """
@@ -61,12 +62,14 @@ def attention_forward(
         kv_norm: Whether to normalize the key and value tensors in non-packed QKV mode. This should
             probably be ``True`` when using encoder-decoder attention on an unnormalized KV.
         training: Training or inference mode
+        mask: Attention mask
 
     Shapes:
         q, k, v: :math:`(B, L, D)`, or :math:`(B, L, 3*D)` when packed QKV tensor
         w_q, w_k, w_v, w_out: :math:`(D, D)`, or :math:`(3*D, D)` when packed QKV tensor
         b_q, b_k, b_v, b_out: :math:`(D,)`, or :math:`(3*D,)` when packed QKV tensor
         norm_w, norm_b: :math:`(head_dim,)`
+        mask: :math:`(B, Lq, Lk)`
 
     Returns:
         Output tensor of shape :math:`(B, L, D)`
@@ -113,7 +116,7 @@ def attention_forward(
     # SDPA
     scale = 1.0 if norm_w is not None else None
     o = F.scaled_dot_product_attention(
-        q, k, v, attn_mask=None, dropout_p=dropout if training else 0.0, is_causal=False, scale=scale
+        q, k, v, attn_mask=mask, dropout_p=dropout if training else 0.0, is_causal=False, scale=scale
     )
 
     # output projection
@@ -306,7 +309,7 @@ class MultiHeadAttention(nn.Module):
             f"kv_norm={self.kv_norm}"
         )
 
-    def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
+    def forward(self, q: Tensor, k: Tensor, v: Tensor, mask: Tensor | None = None) -> Tensor:
         # Self attention
         if q is k and k is v:
             assert self.w_in is not None
@@ -337,5 +340,6 @@ class MultiHeadAttention(nn.Module):
             pre_norm_b=self.b_pre_norm,
             kv_norm=self.kv_norm,
             training=self.training,
+            mask=mask,
             # fmt: on
         )

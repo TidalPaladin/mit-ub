@@ -4,10 +4,8 @@ import torch
 from torch import Tensor
 from torchvision.transforms.v2 import Compose, RandomApply, RandomChoice, Transform
 
-from mit_ub.model.helpers import compile_is_disabled
 
-
-@torch.compile(fullgraph=True, disable=compile_is_disabled())
+# @torch.compile(fullgraph=True, disable=compile_is_disabled())
 def uniform_noise(x: Tensor, min: float = -0.2, max: float = 0.2, clip: bool = True) -> Tensor:
     """Apply uniform noise to tensor with same shape as input.
 
@@ -27,7 +25,7 @@ def uniform_noise(x: Tensor, min: float = -0.2, max: float = 0.2, clip: bool = T
     return result
 
 
-@torch.compile(fullgraph=True, disable=compile_is_disabled())
+# @torch.compile(fullgraph=True, disable=compile_is_disabled())
 def salt_pepper_noise(x: Tensor, prob: float | Tuple[float, float] = (0.01, 0.05)) -> Tensor:
     """Apply salt and pepper noise to tensor with same shape as input.
 
@@ -49,7 +47,7 @@ def salt_pepper_noise(x: Tensor, prob: float | Tuple[float, float] = (0.01, 0.05
     return torch.where(mask, value, x)
 
 
-@torch.compile(fullgraph=True, disable=compile_is_disabled())
+# @torch.compile(fullgraph=True, disable=compile_is_disabled())
 def multiplicative_noise(x: Tensor, scale: float = 0.2, clip: bool = True) -> Tensor:
     """Apply multiplicative noise to tensor with same shape as input.
 

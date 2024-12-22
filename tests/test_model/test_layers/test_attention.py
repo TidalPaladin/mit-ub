@@ -30,7 +30,6 @@ class TestMultiHeadAttention:
         q = torch.randn(B, L, D)
         k = torch.randn(B, L, D)
         v = torch.randn(B, L, D)
-        nn.MultiheadAttention
 
         baseline_out = F.multi_head_attention_forward(
             # fmt: off
@@ -355,3 +354,33 @@ class TestMultiHeadAttention:
         src = MultiHeadAttention(d1, h1, hkv1, norm=norm1, qk_norm=qk1)
         dst = MultiHeadAttention(d2, h2, hkv2, norm=norm2, qk_norm=qk2)
         dst.copy_parameters(src)
+
+    def test_mask(self):
+        B, Lq, Lk, D = 2, 8, 6, 32
+        nhead = 2
+        torch.random.manual_seed(0)
+
+        model = MultiHeadAttention(
+            D,
+            nhead,
+            nhead,
+            dropout=0.0,
+            bias=False,
+            kdim=D,
+            vdim=D,
+        )
+        model.eval()
+
+        q = torch.randn(B, Lq, D)
+        k = torch.randn(B, Lk, D)
+        v = torch.randn(B, Lk, D)
+
+        # Set the first value token to a high value but not nan or inf
+        mask = torch.full((B, Lq, Lk), True, dtype=torch.bool)
+        v[:, 0, :] = 1000
+        mask[:, :, 0] = False
+
+        out1 = model(q, k, v, mask)
+        out2 = model(q, k, v)
+        assert out1.max() < 100
+        assert out2.max() > 100

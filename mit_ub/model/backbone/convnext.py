@@ -35,6 +35,11 @@ class ConvNextConfig(ModelConfig):
             return list(reversed(self.dims))[len(self.up_depths) - 1]
         return self.dims[-1]
 
+    @property
+    def nhead(self) -> int:
+        # Largest multiple of 16 that divides dim
+        return max(n for n in range(16, self.dim + 1, 16) if self.dim % n == 0)
+
 
 class ConvNext(nn.Module):
     def __init__(self, config: ConvNextConfig):
@@ -107,7 +112,9 @@ class ConvNext(nn.Module):
             ]
         )
 
-    def forward(self, x: Tensor) -> Tensor:
+        self.embedding_norm = nn.LayerNorm(self.config.dim)
+
+    def forward(self, x: Tensor, reshape: bool = True) -> Tensor:
         # Patch embed stem
         x = self.stem(x)
         size = cast(Dims2D, x.shape[2:])
@@ -156,8 +163,11 @@ class ConvNext(nn.Module):
             x = x + y
             levels[-(i + 1)] = x
 
+        x = self.embedding_norm(x)
+
         # Convert back to grid
-        x = tokens_to_grid(x, size)
+        if reshape:
+            x = tokens_to_grid(x, size)
         return x
 
     @classmethod

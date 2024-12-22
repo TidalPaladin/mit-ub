@@ -5,30 +5,10 @@ import pytest
 import pytorch_lightning as pl
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from torch.multiprocessing import spawn  # type: ignore
 from torch.testing import assert_close
 
-from mit_ub.tasks.jepa import JEPA, JEPAConfig, average_pairwise_cosine_similarity
-
-
-@pytest.mark.parametrize(
-    "batch, tokens",
-    [
-        (10, 128),
-        (1, 128),
-        (10, 1),
-        (1, 1),
-    ],
-)
-def test_average_pairwise_cosine_similarity(batch, tokens):
-    B, L, D = batch, tokens, 32
-    torch.manual_seed(0)
-    x = torch.randn(B, L, D)
-
-    actual = average_pairwise_cosine_similarity(x, 1, 2)
-    expected = F.cosine_similarity(x.view(B, L, 1, D), x.view(B, 1, L, D), dim=-1).mean(dim=(1, 2))
-    assert_close(expected, actual)
+from mit_ub.tasks.jepa import JEPA, JEPAConfig
 
 
 def run_ema_sync(rank, world_size, backbone, optimizer_init):
@@ -71,8 +51,7 @@ class TestJEPA:
     @pytest.fixture
     def task(self, optimizer_init, backbone):
         config = JEPAConfig()
-        config.context_scale = 1
-        config.target_scale = 1
+        config.scale = 1
         return JEPA(backbone, optimizer_init=optimizer_init, jepa_config=config)
 
     @pytest.mark.parametrize(

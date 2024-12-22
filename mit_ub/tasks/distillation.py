@@ -12,6 +12,7 @@ from deep_helpers.structs import State
 from deep_helpers.tasks import Task
 from torch import Tensor
 
+from ..data.mixup import mixup, sample_mixup_parameters
 from ..data.noise import RandomNoise
 from ..model import AnyModelConfig
 from ..model.helpers import grid_to_tokens
@@ -143,7 +144,13 @@ class Distillation(Task):
 
             # apply mixup
             if self.training and self.config.mixup_prob > 0:
-                x, target = mixup(x, target, self.config.mixup_alpha, self.config.mixup_prob)
+                mixup_weight = sample_mixup_parameters(
+                    x.shape[0], self.config.mixup_prob, self.config.mixup_alpha, device=x.device
+                )
+                x = mixup(x, mixup_weight)
+                target = mixup(target, mixup_weight)
+            else:
+                mixup_weight = None
 
         pred_dict = self(x)
         pred: Tensor = pred_dict["distill_pred"]
@@ -162,6 +169,7 @@ class Distillation(Task):
             "pred": pred,
             "pred_proj": pred_proj,
             "target": target,
+            "mixup_weight": mixup_weight,
         }
         return output
 

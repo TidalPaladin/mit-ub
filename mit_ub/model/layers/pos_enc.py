@@ -139,7 +139,7 @@ class RelativeFactorizedPosition(nn.Module):
         dim_feedforward: int | None = None,
     ):
         super().__init__()
-        self._dim_feedforward = dim_feedforward or 2 * d_out
+        self._dim_feedforward = dim_feedforward or int(4 * d_out)
         self.dropout = dropout
         self.activation = activation
         self.w_in = nn.Parameter(torch.empty(self.dim_feedforward, d_in))
@@ -152,8 +152,7 @@ class RelativeFactorizedPosition(nn.Module):
 
     def reset_parameters(self) -> None:
         for weight in (self.w_in, self.w_out):
-            # nn.init.xavier_uniform_(weight)
-            nn.init.trunc_normal_(weight, std=0.02)
+            nn.init.xavier_uniform_(weight)
 
         for bias in (self.b_in, self.b_out, self.b_norm):
             if bias is not None:

@@ -15,13 +15,33 @@ class TestMultiHeadAttentionPool:
         ],
     )
     @pytest.mark.parametrize("num_queries", [1, 2])
-    def test_forward(self, device, num_queries):
+    @pytest.mark.parametrize("qk_norm", [False, True])
+    def test_forward(self, device, num_queries, qk_norm):
         torch.random.manual_seed(0)
         B, L, D = 2, 8, 32
         q = torch.randn(B, L, D).to(device)
-        layer = MultiHeadAttentionPool(D, 2, num_queries).to(device)
+        layer = MultiHeadAttentionPool(D, 2, num_queries, qk_norm=qk_norm).to(device)
         y = layer(q)
         assert y.shape == (B, num_queries, D)
+
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    @pytest.mark.parametrize("num_queries", [1, 2])
+    @pytest.mark.parametrize("qk_norm", [False, True])
+    def test_backward(self, device, num_queries, qk_norm):
+        torch.random.manual_seed(0)
+        B, L, D = 2, 8, 32
+        q = torch.randn(B, L, D, requires_grad=True).to(device)
+        layer = MultiHeadAttentionPool(D, 2, num_queries, qk_norm=qk_norm).to(device)
+        y = layer(q)
+        y.sum().backward()
+        for param in layer.parameters():
+            assert param.grad is not None
 
     def test_reset_parameters(self, mocker):
         torch.random.manual_seed(0)

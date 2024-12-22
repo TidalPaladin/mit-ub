@@ -1,4 +1,5 @@
 from copy import copy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
 
@@ -8,12 +9,155 @@ import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.structs import State
 from deep_helpers.tasks import Task
-from einops.layers.torch import Rearrange
+from einops import rearrange
 from torch import Tensor
 
+from ..data import is_mixed, mixup, mixup_dense_label, sample_mixup_parameters
 from ..model import AdaptiveViTConfig, AnyModelConfig, ViTConfig
+from ..model.layers.pool import PoolType, get_global_pooling_layer
 from .distillation import DistillationConfig, DistillationWithProbe
 from .jepa import JEPAConfig, JEPAWithProbe
+
+
+def is_valid_categorical_label(label: Tensor) -> Tensor:
+    return label >= 0
+
+
+def is_valid_binary_label(label: Tensor) -> Tensor:
+    return label == 0 | label == 1
+
+
+def categorical_loss(
+    logits: Tensor,
+    label: Tensor,
+    num_classes: int,
+    mixup_weight: Tensor | None = None,
+) -> Tensor:
+    # Filter valid labels
+    mask = is_valid_categorical_label(label)
+    if not mask.any():
+        return logits.new_zeros(1)
+
+    # Apply mixup to labels if needed
+    if mixup_weight is not None:
+        label = mixup_dense_label(label, mixup_weight, num_classes=num_classes)
+
+    return F.cross_entropy(logits[mask], label[mask])
+
+
+def binary_loss(
+    logits: Tensor,
+    label: Tensor,
+    mixup_weight: Tensor | None = None,
+) -> Tensor:
+    # Filter valid labels
+    mask = is_valid_binary_label(label)
+    if not mask.any():
+        return logits.new_zeros(1)
+
+    # Apply mixup to labels if needed
+    if mixup_weight is not None:
+        label = mixup(label, mixup_weight)
+
+    return F.binary_cross_entropy_with_logits(logits[mask], label[mask])
+
+
+def step_classification_from_features(
+    features: Tensor,
+    label: Tensor,
+    probe: nn.Module,
+    config: "ClassificationConfig",
+    mixup_weight: Tensor | None = None,
+    metrics: tm.MetricCollection | None = None,
+) -> Dict[str, Tensor]:
+    # Forward pass
+    N = features.shape[0]
+    pred_logits = probe(features).view(N, -1)
+    assert pred_logits.requires_grad or not probe.training
+
+    # compute loss
+    if config.is_binary:
+        loss = binary_loss(pred_logits, label, mixup_weight)
+    else:
+        loss = categorical_loss(pred_logits, label, config.num_classes, mixup_weight)
+
+    # logits -> predictions
+    with torch.no_grad():
+        if config.is_binary:
+            pred = pred_logits.sigmoid()
+        else:
+            pred = pred_logits.argmax(dim=1)
+
+    # log metrics
+    with torch.no_grad():
+        if metrics is not None:
+            # Filter valid labels without mixup for metric computation
+            mask = is_valid_binary_label(label) if config.is_binary else is_valid_categorical_label(label)
+            mask = mask & ~is_mixed(mixup_weight) if mixup_weight is not None else mask
+            if mask.any():
+                _pred = pred[mask]
+                _y = label[mask]
+                for name, metric in metrics.items():
+                    if name in ("acc", "auroc"):
+                        metric.update(_pred, _y)
+
+    return {
+        "loss": loss,
+        "pred_logits": pred_logits,
+        "pred": pred,
+    }
+
+
+def create_metrics(config: "ClassificationConfig") -> tm.MetricCollection:
+    if config.is_binary:
+        metrics = tm.MetricCollection(
+            {
+                "acc": tm.Accuracy(task="binary"),
+                "auroc": tm.AUROC(task="binary"),
+            }
+        )
+    else:
+        metrics = tm.MetricCollection(
+            {
+                "acc": tm.Accuracy(task="multiclass", num_classes=config.num_classes),
+            }
+        )
+    return metrics
+
+
+@dataclass
+class ClassificationConfig:
+    """
+    Configuration for classification related hyperparameters.
+
+    Args:
+        num_classes: Number of classes.
+        mixup_alpha: Alpha parameter for the Beta distribution used to sample the mixup weight.
+        mixup_prob: Probability of applying mixup to the input and target.
+        freeze_backbone: If True, the backbone is frozen during training.
+        pool_type: Type of pooling to use.
+    """
+
+    num_classes: int
+    mixup_alpha: float = 1.0
+    mixup_prob: float = 0.2
+    freeze_backbone: bool = False
+    # TODO: jsonargparse can't handle the strenum it seems
+    pool_type: str | PoolType = PoolType.ATTENTION
+
+    def __post_init__(self) -> None:
+        if self.num_classes <= 0:
+            raise ValueError("num_classes must be positive")
+        if not 0 < self.mixup_alpha:
+            raise ValueError("mixup_alpha must be positive")
+        if not 0 <= self.mixup_prob <= 1:
+            raise ValueError("mixup_prob must be in the range [0, 1]")
+        if not isinstance(self.pool_type, PoolType):
+            self.pool_type = PoolType(self.pool_type)
+
+    @property
+    def is_binary(self) -> bool:
+        return self.num_classes == 2
 
 
 class ClassificationTask(Task):
@@ -38,7 +182,7 @@ class ClassificationTask(Task):
     def __init__(
         self,
         backbone_config: AnyModelConfig,
-        num_classes: int,
+        classification_config: ClassificationConfig,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -62,59 +206,80 @@ class ClassificationTask(Task):
             log_train_metrics_on_epoch,
             parameter_groups,
         )
-        self.num_classes = num_classes
+        self.config = classification_config
 
         self.backbone = backbone_config.instantiate()
+        if self.config.freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+
         dim = self.backbone.config.dim
+
         self.classification_head = nn.Sequential(
-            nn.AdaptiveAvgPool2d((1, 1)),
-            Rearrange("b c () () -> b c"),
             nn.LayerNorm(dim),
-            nn.Dropout(0.1),
-            nn.Linear(dim, num_classes),
+            get_global_pooling_layer(
+                cast(PoolType, self.config.pool_type),
+                dim,
+                num_heads=self.backbone.config.nhead,
+                dropout=self.backbone.config.dropout,
+            ),
+            nn.LayerNorm(dim),
+            nn.Dropout(self.backbone.config.dropout),
+            nn.Linear(dim, self.config.num_classes if not self.config.is_binary else 1),
         )
         nn.init.zeros_(self.classification_head[-1].bias)
         nn.init.trunc_normal_(self.classification_head[-1].weight, std=0.02)
-        self.criterion = nn.CrossEntropyLoss()
         self.save_hyperparameters()
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
-        return tm.MetricCollection(
-            {
-                "acc": tm.Accuracy(task="multiclass", num_classes=self.num_classes),
-            }
-        )
+        return create_metrics(self.config)
 
     def forward(self, x: Tensor) -> Dict[str, Tensor]:
-        x = self.backbone(x)
+        with torch.set_grad_enabled(not self.config.freeze_backbone):
+            x = self.backbone(x, reshape=False)
         cls = self.classification_head(x)
         return {"pred": cls.view(-1, 1)}
 
     def step(
         self, batch: Any, batch_idx: int, state: State, metrics: Optional[tm.MetricCollection] = None
     ) -> Dict[str, Any]:
+        # get inputs
         x = batch["img"]
         y = batch["label"].long()
         N = y.shape[0]
 
-        # forward pass
-        pred_logits = self(x)["pred"].view(N, self.num_classes)
+        # mixup input
+        if self.training and self.config.mixup_prob > 0:
+            mixup_weight = sample_mixup_parameters(N, self.config.mixup_prob, self.config.mixup_alpha, device=x.device)
+            x = mixup(x, mixup_weight)
+        else:
+            mixup_weight = None
 
-        # compute loss
-        loss = cast(Tensor, (self.criterion(pred_logits, y)))
+        # forward backbone
+        with torch.set_grad_enabled(not self.config.freeze_backbone and self.training):
+            features = self.backbone(x)
 
-        with torch.no_grad():
-            pred = pred_logits.argmax(dim=1)
+        # reshape features if needed to sequence style
+        if features.ndim > 3 or features.shape[-1] != self.backbone.config.dim:
+            features = rearrange(features, "b c ... -> b (...) c")
 
-        # log metrics
-        with torch.no_grad():
-            if metrics is not None:
-                metrics.update(pred, y)
+        # step from features
+        output = step_classification_from_features(
+            features,
+            y,
+            self.classification_head,
+            self.config,
+            mixup_weight,
+            metrics,
+        )
 
         output = {
             "log": {
-                "loss_classification": loss,
+                "loss_classification": output["loss"],
             },
+            "pred_logits": output["pred_logits"],
+            "pred": output["pred"],
+            "mixup_weight": mixup_weight,
         }
 
         return output
@@ -124,7 +289,7 @@ class JEPAWithClassification(JEPAWithProbe):
     def __init__(
         self,
         backbone_config: ViTConfig | AdaptiveViTConfig,
-        num_classes: int,
+        classification_config: ClassificationConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
@@ -137,7 +302,7 @@ class JEPAWithClassification(JEPAWithProbe):
         log_train_metrics_on_epoch: bool = False,
         parameter_groups: List[Dict[str, Any]] = [],
     ):
-        self.num_classes = num_classes
+        self.classification_config = classification_config
         super().__init__(
             backbone_config,
             jepa_config,
@@ -157,12 +322,20 @@ class JEPAWithClassification(JEPAWithProbe):
         dim = self.backbone.config.dim
         return nn.Sequential(
             nn.LayerNorm(dim),
-            nn.Linear(dim, self.num_classes),
+            get_global_pooling_layer(
+                cast(PoolType, self.classification_config.pool_type),
+                dim,
+                num_heads=self.backbone.config.nhead,
+                dropout=self.backbone.config.dropout,
+            ),
+            nn.LayerNorm(dim),
+            nn.Dropout(self.backbone.config.dropout),
+            nn.Linear(dim, self.classification_config.num_classes),
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
         metrics = super().create_metrics(*args, **kwargs)
-        metrics.add_metrics({"acc": tm.Accuracy(task="multiclass", num_classes=self.num_classes)})
+        metrics.add_metrics(dict(create_metrics(self.classification_config)))  # type: ignore
         return metrics
 
     @torch.no_grad()
@@ -173,34 +346,24 @@ class JEPAWithClassification(JEPAWithProbe):
     def step_linear_probe(
         self, batch: Dict[str, Any], output: Dict[str, Any], metrics: tm.MetricCollection | None
     ) -> Dict[str, Any]:
-        # Forward pass of linear probe using target features
+        # Get inputs
         features = self.get_probe_features_from_output(output)
-
-        assert self.linear_probe is not None
+        mixup_weight = output.get("mixup_weight", None)
         N = features.shape[0]
-        linprobe_logits = self.linear_probe(features.mean(1).view(N, -1)).view(N, -1)
-        assert linprobe_logits.requires_grad or not self.training
+        y = self.create_gt(batch).view(N)
 
-        # Build ground truth and compute loss
-        linprobe_gt = self.create_gt(batch).view(N)
-        mask = linprobe_gt != -1
-        linprobe_loss = F.cross_entropy(linprobe_logits[mask], linprobe_gt[mask].long())
-        if not mask.any():
-            linprobe_loss = torch.zeros_like(linprobe_loss)
-
-        # Logits -> probs
-        with torch.no_grad():
-            linprobe_probs = torch.sigmoid(linprobe_logits)
-
-        # Compute metrics
-        with torch.no_grad():
-            if mask.any():
-                for name, metric in (metrics or {}).items():
-                    if "acc" in name and linprobe_gt.numel():
-                        metric.update(linprobe_probs[mask], linprobe_gt[mask])
+        # step from features
+        probe_output = step_classification_from_features(
+            features,
+            y,
+            self.linear_probe,
+            self.classification_config,
+            mixup_weight,
+            metrics,
+        )
 
         output = copy(output)
-        output["log"]["loss_linprobe"] = linprobe_loss
+        output["log"]["loss_linprobe"] = probe_output["loss"]
         return output
 
 
@@ -210,7 +373,7 @@ class DistillationWithClassification(DistillationWithProbe):
         backbone_config: AnyModelConfig,
         teacher_config: AnyModelConfig,
         teacher_checkpoint: Path,
-        num_classes: int,
+        classification_config: ClassificationConfig,
         distillation_config: DistillationConfig = DistillationConfig(),
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
@@ -223,7 +386,7 @@ class DistillationWithClassification(DistillationWithProbe):
         log_train_metrics_on_epoch: bool = False,
         parameter_groups: List[Dict[str, Any]] = [],
     ):
-        self.num_classes = num_classes
+        self.classification_config = classification_config
         super().__init__(
             backbone_config,
             teacher_config,
@@ -245,12 +408,20 @@ class DistillationWithClassification(DistillationWithProbe):
         dim = self.backbone.config.dim
         return nn.Sequential(
             nn.LayerNorm(dim),
-            nn.Linear(dim, self.num_classes),
+            get_global_pooling_layer(
+                cast(PoolType, self.classification_config.pool_type),
+                dim,
+                num_heads=self.backbone.config.nhead,
+                dropout=self.backbone.config.dropout,
+            ),
+            nn.LayerNorm(dim),
+            nn.Dropout(self.backbone.config.dropout),
+            nn.Linear(dim, self.classification_config.num_classes),
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
         metrics = super().create_metrics(*args, **kwargs)
-        metrics.add_metrics({"acc": tm.Accuracy(task="multiclass", num_classes=self.num_classes)})
+        metrics.add_metrics(dict(create_metrics(self.classification_config)))  # type: ignore
         return metrics
 
     @torch.no_grad()
@@ -261,32 +432,22 @@ class DistillationWithClassification(DistillationWithProbe):
     def step_linear_probe(
         self, batch: Dict[str, Any], output: Dict[str, Any], metrics: tm.MetricCollection | None
     ) -> Dict[str, Any]:
-        # Forward pass of linear probe using target features
+        # Get inputs
         features = self.get_probe_features_from_output(output)
-
-        assert self.linear_probe is not None
+        mixup_weight = output.get("mixup_weight", None)
         N = features.shape[0]
-        linprobe_logits = self.linear_probe(features.mean(1).view(N, -1)).view(N, -1)
-        assert linprobe_logits.requires_grad or not self.training
+        y = self.create_gt(batch).view(N)
 
-        # Build ground truth and compute loss
-        linprobe_gt = self.create_gt(batch).view(N)
-        mask = linprobe_gt != -1
-        linprobe_loss = F.cross_entropy(linprobe_logits[mask], linprobe_gt[mask].long())
-        if not mask.any():
-            linprobe_loss = torch.zeros_like(linprobe_loss)
-
-        # Logits -> probs
-        with torch.no_grad():
-            linprobe_probs = torch.sigmoid(linprobe_logits)
-
-        # Compute metrics
-        with torch.no_grad():
-            if mask.any():
-                for name, metric in (metrics or {}).items():
-                    if "acc" in name and linprobe_gt.numel():
-                        metric.update(linprobe_probs[mask], linprobe_gt[mask])
+        # step from features
+        probe_output = step_classification_from_features(
+            features,
+            y,
+            self.linear_probe,
+            self.classification_config,
+            mixup_weight,
+            metrics,
+        )
 
         output = copy(output)
-        output["log"]["loss_linprobe"] = linprobe_loss
+        output["log"]["loss_linprobe"] = probe_output["loss"]
         return output
