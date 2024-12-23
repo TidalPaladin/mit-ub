@@ -28,7 +28,7 @@ class TestAdaptiveTokenizer2d:
         with torch.autocast(device_type=device, dtype=torch.float16):
             q, kv = layer(x)
         assert q.shape == (B, math.prod(token_size), D)
-        assert kv.shape == (B, math.prod(layer.tokenized_size(x.shape[2:])), D)
+        assert kv.shape == (B, math.prod(layer.tokenized_size(x.shape[2:])), D)  # type: ignore
 
     @pytest.mark.parametrize(
         "device",
@@ -92,7 +92,7 @@ class TestAdaptiveTokenizer2d:
     def test_extra_repr(self):
         layer = AdaptiveTokenizer2d(3, 64, (4, 4), (8, 8))
         result = str(layer)
-        exp = "AdaptiveTokenizer2d(\n  in=3, embed=64, patch_size=(4, 4), target_shape=(8, 8)\n  (pos_enc): RelativeFactorizedPosition(in=2, hidden=128, out=64, dropout=0.0, act=silu)\n)"
+        exp = "AdaptiveTokenizer2d(\n  in=3, embed=64, patch_size=(4, 4), target_shape=(8, 8)\n  (pos_enc): RelativeFactorizedPosition(in=2, hidden=256, out=64, dropout=0.0, act=relu2)\n)"
         assert result == exp
 
 
@@ -116,7 +116,7 @@ class TestAdaptiveTokenizer3d:
         with torch.autocast(device_type=device, dtype=torch.float16):
             q, kv = layer(x)
         assert q.shape == (B, math.prod(token_size), D)
-        assert kv.shape == (B, math.prod(layer.tokenized_size(x.shape[2:])), D)
+        assert kv.shape == (B, math.prod(layer.tokenized_size(x.shape[2:])), D)  # type: ignore
 
     @pytest.mark.parametrize(
         "device",
@@ -180,5 +180,5 @@ class TestAdaptiveTokenizer3d:
     def test_extra_repr(self):
         layer = AdaptiveTokenizer3d(3, 64, (4, 4, 4), (8, 8, 8))
         result = str(layer)
-        exp = "AdaptiveTokenizer3d(\n  in=3, embed=64, patch_size=(4, 4, 4), target_shape=(8, 8, 8)\n  (pos_enc): RelativeFactorizedPosition(in=3, hidden=128, out=64, dropout=0.0, act=silu)\n)"
+        exp = "AdaptiveTokenizer3d(\n  in=3, embed=64, patch_size=(4, 4, 4), target_shape=(8, 8, 8)\n  (pos_enc): RelativeFactorizedPosition(in=3, hidden=256, out=64, dropout=0.0, act=relu2)\n)"
         assert result == exp

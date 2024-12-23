@@ -1,5 +1,10 @@
+import math
 import os
-from typing import Iterable, Literal, Sized, Tuple, TypeVar, cast, overload
+from typing import Iterable, Literal, Sequence, Sized, Tuple, TypeVar, cast, overload
+
+import torch
+from einops import rearrange
+from torch import Tensor
 
 
 T = TypeVar("T")
@@ -63,3 +68,44 @@ def to_tuple(x: T | Iterable[T], length: int) -> Tuple[T, ...]:
         return result
     else:
         return cast(Tuple[T, ...], (x,) * length)
+
+
+@torch.compile(fullgraph=True, disable=compile_is_disabled())
+def tokens_to_grid(x: Tensor, size: Sequence[int]) -> Tensor:
+    r"""Convert a channel-last flat token sequence to a channel-first spatial grid.
+
+    Args:
+        x: The token sequence to convert to a grid.
+        size: The size of the grid to convert to.
+
+    Returns:
+        The grid of tokens.
+
+    Raises:
+        ValueError: If the token length does not match the grid size.
+    """
+    _, L, _ = x.shape
+    if L != math.prod(size):
+        raise ValueError(f"Token length {L} does not match grid size {size}")
+
+    if len(size) == 1:
+        return rearrange(x, "b l c -> b c l")
+    elif len(size) == 2:
+        return rearrange(x, "b (h w) c -> b c h w", h=size[0], w=size[1])
+    elif len(size) == 3:
+        return rearrange(x, "b (d h w) c -> b c d h w", d=size[0], h=size[1], w=size[2])
+    else:
+        raise ValueError(f"Invalid size: {size}")
+
+
+@torch.compile(fullgraph=True, disable=compile_is_disabled())
+def grid_to_tokens(x: Tensor) -> Tensor:
+    r"""Convert a channel-first spatial grid to a channel-last flat token sequence.
+
+    Args:
+        x: The grid to convert to a token sequence.
+
+    Returns:
+        The token sequence.
+    """
+    return rearrange(x, "b c ... -> b (...) c")

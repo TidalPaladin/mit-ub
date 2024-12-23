@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Final, Iterator, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -15,58 +15,27 @@ from torch.distributed import ReduceOp, all_reduce
 from torch.distributed import barrier as dist_barrier
 from torch.optim.optimizer import Optimizer
 
-from ..data.augment import RandomNoise
-from ..model import BACKBONES, AdaptiveViT, ViT, compile_is_disabled
-from ..model.layer_scale import LayerScale
-from ..model.pos_enc import RelativeFactorizedPosition
-from ..model.transformer import TransformerDecoderLayer
-from ..tokens import apply_mask, create_mask
+from ..data.mixup import mixup, sample_mixup_parameters
+from ..data.noise import RandomNoise
+from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, ExampleSimilarity, TokenSimilarity
+from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
+from ..model import AdaptiveViT, AdaptiveViTConfig, ViT, ViTConfig
+from ..model.layers.layer_scale import LayerScale
+from ..model.layers.pos_enc import RelativeFactorizedPosition
+from ..model.layers.transformer import TransformerDecoderLayer
+from ..tokens import apply_mask, create_mask, generate_non_overlapping_mask, mask_is_ragged
 
 
-EPS: Final = 1e-8
-
-
-@torch.compile(fullgraph=True, disable=compile_is_disabled())
-def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: int, eps: float = EPS) -> Tensor:
-    r"""Compute the average pairwise cosine similarity without manifesting the full pairwise matrix.
-
-    To avoid quadratic memory usage we compute average cosine similarity as the squared norm of the mean vector.
-
-    Args:
-        x: The input tensor.
-        pairwise_dim: The dimension over which to compute the average pairwise cosine similarity.
-        embed_dim: The dimension to normalize the vectors to before computing the cosine similarity.
-        eps: A small constant to avoid division by zero.
+@torch.no_grad()
+def apply_noise_batched(transform: RandomNoise, x: Tensor) -> Tensor:
+    r"""Applies noise to a batch of images such that each image in the batch is
+    independently transformed. This is an alternative to `self.random_noise` which
+    applies the same noise to all images in the batch.
     """
-    N = x.shape[pairwise_dim]
-    x = F.normalize(x, dim=embed_dim, eps=eps)
-    y = x.mean(pairwise_dim, keepdim=True).norm(dim=embed_dim, keepdim=True).pow(2).squeeze(embed_dim, pairwise_dim)
-    y.sub(1 / N).mul(N / max(N - 1, 1))
-    return y
-
-
-def iterate_layer_scales(module: nn.Module) -> Iterator[Tensor]:
-    r"""Iterate over all layer scales in a module."""
-    assert isinstance(module, nn.Module)
-    for m in module.modules():
-        if isinstance(m, LayerScale):
-            yield m.gamma.detach()
-
-
-class MaxLayerScale(tm.MaxMetric):
-    r"""Track the maximum absolute value of layer scale across all layers."""
-
-    def update(self, module: nn.Module) -> None:
-        max_scales = torch.tensor([t.abs().max() for t in iterate_layer_scales(module)])
-        super().update(max_scales.max())
-
-
-class MeanLayerScale(tm.MeanMetric):
-    r"""Track the mean absolute value of layer scale across all layers."""
-
-    def update(self, module: nn.Module) -> None:
-        for t in iterate_layer_scales(module):
-            super().update(t.abs().mean())
+    x = x.clone()
+    for i in range(x.shape[0]):
+        x[i] = transform(x[i])
+    return x
 
 
 @dataclass
@@ -76,11 +45,9 @@ class JEPAConfig:
 
     Args:
         context_ratio: Ratio of the input to sample as context.
-        context_scale: Integer scale at which to sample contiguous blocks of context tokens.
-            Increasing this ensures more adjacent tokens appear together in the context.
         target_ratio: Ratio of the input to sample as a prediction target.
-        target_scale: Integer scale at which to sample contiguous blocks of target tokens.
-            Increasing this ensures more adjacent tokens appear together in the target.
+        scale: Integer scale at which to sample contiguous blocks of context tokens.
+            Increasing this ensures more adjacent tokens appear together in the context.
         context_subsample_ratio: Sampling ratio for encoded context just before passing
             it to the predictor.
         ema_alpha: Smoothing factor for EMA updates.
@@ -88,6 +55,7 @@ class JEPAConfig:
         predictor_depth: Depth of the predictor network.
         mixup_alpha: Alpha parameter for the Beta distribution used to sample the mixup weight.
         mixup_prob: Probability of applying mixup to the input and target.
+        use_noise: If True, apply noise to the input.
         noise_scale: Scale of the noise to apply to the input.
         noise_clip: If True, clip the noise to the range [0, 1].
         salt_pepper_prob: Proportion of salt and pepper noise to apply to the input.
@@ -96,15 +64,15 @@ class JEPAConfig:
     """
 
     context_ratio: float = 0.5
-    context_scale: int = 4
     target_ratio: float = 0.25
-    target_scale: int = 2
+    scale: int = 4
     context_subsample_ratio: float = 0.5
     ema_alpha: float = 0.95
     momentum_schedule: bool = False
     predictor_depth: int = 4
     mixup_alpha: float = 1.0
     mixup_prob: float = 0.2
+    use_noise: bool = True
     noise_scale: float = 0.2
     noise_clip: bool = True
     salt_pepper_prob: float | Tuple[float, float] = (0.01, 0.05)
@@ -156,7 +124,7 @@ class JEPA(Task):
 
     def __init__(
         self,
-        backbone: str,
+        backbone_config: ViTConfig | AdaptiveViTConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
@@ -184,30 +152,29 @@ class JEPA(Task):
         self.jepa_config = jepa_config
 
         # Backbone and EMA weights
-        self.backbone = cast(ViT | AdaptiveViT, self.prepare_backbone(backbone))
-        self.ema_backbone = deepcopy(self.backbone)
-        for p in self.ema_backbone.parameters():
+        backbone = backbone_config.instantiate()
+        assert isinstance(backbone, (ViT, AdaptiveViT))
+        self.backbone = backbone
+        self.teacher_backbone = deepcopy(self.backbone)
+        for p in self.teacher_backbone.parameters():
             p.requires_grad = False
 
         # Position encoding / initialization for prediction queries.
         self.pos_enc = RelativeFactorizedPosition(
             len(self.backbone.stem.patch_size),
-            self.backbone.dim,
+            self.backbone.config.dim,
             dropout=0.1,
         )
 
         # Projections for the input context and output predictions
-        self.jepa_norm = nn.LayerNorm(self.backbone.dim)
-        self.jepa_out_proj = nn.Linear(self.backbone.dim, self.backbone.dim)
+        self.jepa_norm = nn.LayerNorm(self.backbone.config.dim)
+        self.jepa_out_proj = nn.Linear(self.backbone.config.dim, self.backbone.config.dim)
         nn.init.xavier_uniform_(self.jepa_out_proj.weight)
         nn.init.zeros_(self.jepa_out_proj.bias)
 
         # JEPA predictor
         self.jepa_predictor = nn.ModuleList(
-            [
-                self.backbone.create_decoder_layer(i, stochastic_depth=0.0)
-                for i in range(self.jepa_config.predictor_depth)
-            ]
+            [self.backbone.create_decoder_layer(i) for i in range(self.jepa_config.predictor_depth)]
         )
         self.save_hyperparameters()
 
@@ -221,17 +188,13 @@ class JEPA(Task):
     def on_task_checkpoint_loaded(self, path: Path, state_dict: Dict[str, Any]) -> None:
         self.backbone.on_load_checkpoint(state_dict)
 
-    def prepare_backbone(self, name: str) -> nn.Module:
-        backbone = BACKBONES.get(name).instantiate_with_metadata().fn
-        assert isinstance(backbone, nn.Module)
-        return backbone
-
     def create_metrics(self, state: State) -> tm.MetricCollection:
         r"""Gets a MetricCollection for a given state"""
         metrics = tm.MetricCollection(
             {
-                "example_sim": tm.MeanMetric(),
-                "token_sim": tm.MeanMetric(),
+                "example_sim": ExampleSimilarity(self.backbone.config.dim),
+                "micro_token_sim": TokenSimilarity(self.backbone.config.dim),
+                "macro_token_sim": AveragePairwiseCosineSimilarity(self.backbone.config.dim),
             }
         )
         has_layer_scale = any(isinstance(layer, LayerScale) for layer in self.backbone.modules())
@@ -290,7 +253,7 @@ class JEPA(Task):
     def update_ema(self) -> None:
         """Update the Exponential Moving Average (EMA) of the backbone parameters."""
         momentum = self.get_ema_momentum()
-        for ema_param, param in zip(self.ema_backbone.parameters(), self.backbone.parameters()):
+        for ema_param, param in zip(self.teacher_backbone.parameters(), self.backbone.parameters()):
             ema_param.lerp_(param, 1 - momentum)
         self.synchronize_ema_weights()
 
@@ -304,7 +267,7 @@ class JEPA(Task):
         in Distributed Data Parallel (DDP) training.
         """
         if self.trainer.world_size > 1:
-            for ema_param in self.ema_backbone.parameters():
+            for ema_param in self.teacher_backbone.parameters():
                 # There seems to be sporadic deadlocks in DDP, so we use barriers to keep things synchronized
                 dist_barrier()
                 all_reduce(ema_param.data, op=ReduceOp.SUM)
@@ -344,55 +307,6 @@ class JEPA(Task):
         )
         return list(updates)
 
-    @torch.no_grad()
-    def mixup(self, x: Tensor, target: Tensor) -> Tuple[Tensor, Tensor]:
-        r"""Implements MixUp on inputs and teacher network outputs.
-
-        At a high level, this involves linearly combining two inputs and their
-        corresponding targets in a random manner.
-
-        Args:
-            x: The input tensor.
-            target: The target tensor.
-
-        Returns:
-            A tuple containing the mixed input and target.
-        """
-        # Generate mixup weight
-        N = x.shape[0]
-        dist = torch.distributions.Beta(self.jepa_config.mixup_alpha, self.jepa_config.mixup_alpha)
-        lam = dist.sample(torch.Size((N,))).to(x.device)
-
-        # Generate mask of mixup samples
-        mixup_mask = torch.rand_like(lam) < self.jepa_config.mixup_prob
-
-        def right_broadcast(inp: Tensor, proto: Tensor) -> Tensor:
-            return inp.view(-1, *(1,) * len(proto.shape[1:]))
-
-        # Apply mixup to input and target
-        x = torch.where(
-            right_broadcast(mixup_mask, x),
-            x.roll(1, 0).lerp_(x, right_broadcast(lam, x)),
-            x,
-        )
-        target = torch.where(
-            right_broadcast(mixup_mask, target),
-            target.roll(1, 0).lerp_(target, right_broadcast(lam.type_as(target), target)),
-            target,
-        )
-        return x, target
-
-    @torch.no_grad()
-    def apply_noise_batched(self, x: Tensor) -> Tensor:
-        r"""Applies noise to a batch of images such that each image in the batch is
-        independently transformed. This is an alternative to `self.random_noise` which
-        applies the same noise to all images in the batch.
-        """
-        x = x.clone()
-        for i in range(x.shape[0]):
-            x[i] = self.random_noise(x[i])
-        return x
-
     def step(
         self,
         batch: Any,
@@ -410,23 +324,36 @@ class JEPA(Task):
         if self.jepa_config.weight_decay_final is not None:
             self.update_weight_decay()
 
-        # generate context and target masks
-        target_mask = self.backbone.create_mask(x, self.jepa_config.target_ratio, self.jepa_config.target_scale)
-        context_mask = self.backbone.create_mask(x, self.jepa_config.context_ratio, self.jepa_config.context_scale)
+        # generate context mask - will always be non-ragged
+        context_mask = self.backbone.create_mask(x, self.jepa_config.context_ratio, self.jepa_config.scale)
+        assert not mask_is_ragged(context_mask), "Context mask is ragged"
+
+        # generate target mask - select non-ragged target mask from locations not in context mask
+        target_mask = generate_non_overlapping_mask(
+            context_mask, self.jepa_config.context_ratio, self.jepa_config.target_ratio
+        )
+        assert not mask_is_ragged(target_mask), "Target mask is ragged"
+        assert not (context_mask & target_mask).any(), "Context and target masks overlap"
 
         # generate ground truth with forward pass of ema backbone on unmasked image
         with torch.no_grad():
-            self.ema_backbone.eval()
-            full_target: Tensor = self.ema_backbone(x, reshape=False)
+            self.teacher_backbone.eval()
+            full_target: Tensor = self.teacher_backbone(x, reshape=False)
 
             # apply random noise
-            x = self.apply_noise_batched(x)
+            if self.training and self.jepa_config.use_noise:
+                x = apply_noise_batched(self.random_noise, x)
 
             # apply mixup, not overwriting full_target
             if self.training and self.jepa_config.mixup_prob > 0:
-                x, full_target_mixed = self.mixup(x, full_target)
-                target = apply_mask(target_mask, full_target_mixed, fill_value=None)
+                mixup_weight = sample_mixup_parameters(
+                    x.shape[0], self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, device=x.device
+                )
+                x = mixup(x, mixup_weight)
+                full_target = mixup(full_target, mixup_weight)
+                target = apply_mask(target_mask, full_target, fill_value=None)
             else:
+                mixup_weight = None
                 target = apply_mask(target_mask, full_target, fill_value=None)
 
         # generate predictions by encoding the context and then running the encoded context
@@ -442,10 +369,9 @@ class JEPA(Task):
         # Compute metrics
         if metrics is not None:
             with torch.no_grad():
-                example_sim = average_pairwise_cosine_similarity(full_target.mean(1), 0, 1)
-                metrics["example_sim"].update(example_sim)
-                token_sim = average_pairwise_cosine_similarity(full_target, 1, 2)
-                metrics["token_sim"].update(token_sim)
+                metrics["example_sim"].update(full_target)
+                metrics["micro_token_sim"].update(pred)
+                metrics["macro_token_sim"].update(full_target)
 
                 if "layer_scale_mean" in metrics:
                     metrics["layer_scale_mean"].update(self.backbone)
@@ -459,6 +385,7 @@ class JEPA(Task):
             "jepa_pred": pred,
             "target": target,
             "full_target": full_target,
+            "mixup_weight": mixup_weight,
         }
         return output
 
@@ -473,7 +400,7 @@ class JEPA(Task):
 class JEPAWithProbe(JEPA, ABC):
     def __init__(
         self,
-        backbone: str,
+        backbone_config: ViTConfig | AdaptiveViTConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
@@ -487,7 +414,7 @@ class JEPAWithProbe(JEPA, ABC):
         parameter_groups: List[Dict[str, Any]] = [],
     ):
         super().__init__(
-            backbone,
+            backbone_config,
             jepa_config,
             optimizer_init,
             lr_scheduler_init,

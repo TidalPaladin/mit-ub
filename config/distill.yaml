@@ -1,0 +1,171 @@
+# Config for distilling a MJEPA trained ViT into a ConvNext model.
+# See 'mjepa.yaml' for explanation of the config.
+fit:
+  float32_matmul_precision: medium
+
+  trainer:
+    accelerator: gpu
+    devices: [0]
+    precision: "bf16-mixed"
+    max_steps: 50000
+    num_sanity_val_steps: 2
+    check_val_every_n_epoch: 10
+
+    default_root_dir: /mnt/flash/mit-ub
+
+    callbacks:
+      - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+        init_args:
+          filename: "epoch={epoch}-step={step}-loss={val/loss:.4f}"
+          monitor: "val/loss"
+          auto_insert_metric_name: false
+          mode: min
+          save_last: true
+
+      - class_path: pytorch_lightning.callbacks.LearningRateMonitor
+        init_args:
+          log_momentum: true
+
+    logger: 
+      class_path: pytorch_lightning.loggers.wandb.WandbLogger
+      init_args:
+        save_dir: ${fit.trainer.default_root_dir}
+        project: mit-ub
+        name: distillation-convnext
+
+  model:
+    class_path: mit_ub.tasks.DistillationWithClassification
+    init_args:
+
+      backbone_config:
+        class_path: mit_ub.model.ConvNextConfig
+        init_args:
+          in_channels: 3
+          depths: [3, 9, 3]
+          up_depths: [3, 3]
+          dims: [128, 384, 512]
+          dims_feedforward: [512, 1536, 2048]
+          patch_size: 2
+          activation: "relu2"
+          gate_activation: null
+          bias: true
+          dropout: 0.1
+          stochastic_depth: 0.1
+          kernel_size: 3
+
+      teacher_config:
+        class_path: mit_ub.model.ViTConfig
+        init_args:
+          in_channels: 3
+          dim: 384
+          dim_feedforward: 1536
+          patch_size: [4, 4]
+          depth: 18
+          nhead: 12
+          activation: "relu2"
+          gate_activation: null
+          bias: false
+          dropout: 0.1
+          stochastic_depth: 0.1
+          layer_scale: 0.1
+          qk_norm: false
+
+      #distillation_config:
+      #  ...
+
+      classification_config:
+        num_classes: 10
+        pool_type: attention
+
+      teacher_checkpoint: /mnt/flash/mit-ub/mit-ub/33xplzdj/checkpoints/last.ckpt
+
+      optimizer_init:
+        class_path: bitsandbytes.optim.AdamW8bit
+        init_args:
+          lr: 0.0001
+          weight_decay: 0.05
+          betas: [0.85, 0.999]
+      lr_interval: "step"
+      lr_scheduler_init:
+        class_path: deep_helpers.optim.ReciprocalSquareRootLR
+        init_args:
+          warmup_steps: 5000
+          cooldown_steps: 25000
+          total_steps: ${fit.trainer.max_steps}
+          timescale: 10000
+          initial_lr: 0.00002
+          initial_momentum: 0.95
+
+      parameter_groups:
+        - params:
+            - "bias"
+            - "LayerNorm"
+          weight_decay: 0.0
+          lr: 0.0005
+        - params:
+            - "classification_head"
+          weight_decay: 1.0
+
+  data:
+    class_path: mit_ub.data.CIFAR10DataModule
+    init_args:
+      root: /mnt/data/cifar10/cifar-10-batches-py
+      batch_size: 512
+      num_workers: 12
+      pin_memory: true
+
+      train_transforms:
+        class_path: torchvision.transforms.v2.Compose
+        init_args:
+          transforms:
+            - class_path: torchvision.transforms.v2.RandomHorizontalFlip
+              init_args:
+                p: 0.5
+
+            - class_path: torchvision.transforms.v2.RandomVerticalFlip
+              init_args:
+                p: 0.5
+
+            - class_path: torchvision.transforms.v2.RandomResizedCrop
+              init_args:
+                size: [32, 32]
+                scale: [0.5, 1.0]
+                ratio: [0.75, 1.33]
+
+            - class_path: torchvision.transforms.v2.RandomApply
+              init_args:
+                p: 0.25
+                transforms:
+                  - class_path: mit_ub.data.RandomRotation
+                    init_args:
+                      degrees: 45
+
+            - class_path: torchvision.transforms.v2.ColorJitter
+              init_args:
+                brightness: 0.2
+                contrast: 0.2
+                saturation: 0.2
+
+            - class_path: torchvision.transforms.v2.RandomGrayscale
+              init_args:
+                p: 0.1
+
+            - class_path: torchvision.transforms.v2.ToImage
+            
+            - class_path: torchvision.transforms.v2.ToDtype
+              init_args:
+                scale: true
+                dtype:
+                  class_path: torch.float32
+
+      val_transforms:
+        class_path: torchvision.transforms.v2.Compose
+        init_args:
+          transforms:
+            - class_path: torchvision.transforms.v2.ToImage
+            
+            - class_path: torchvision.transforms.v2.ToDtype
+              init_args:
+                scale: true
+                dtype:
+                  class_path: torch.float32

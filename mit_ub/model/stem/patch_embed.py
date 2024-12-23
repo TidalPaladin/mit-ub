@@ -1,6 +1,6 @@
 import math
 from abc import ABC, abstractmethod
-from typing import Callable, Generic, Sequence, Tuple, TypeVar
+from typing import Generic, Sequence, Tuple, TypeVar
 
 import torch
 import torch.nn as nn
@@ -8,8 +8,13 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
+from ..activations import Activation
 from ..helpers import Dims2D, Dims3D, compile_backend, compile_is_disabled, to_tuple
-from ..pos_enc import DEFAULT_POS_ENC_ACTIVATION, RelativeFactorizedPosition, relative_factorized_position_forward
+from ..layers.pos_enc import (
+    DEFAULT_POS_ENC_ACTIVATION,
+    RelativeFactorizedPosition,
+    relative_factorized_position_forward,
+)
 
 
 T = TypeVar("T", bound=Tuple[int, ...])
@@ -70,7 +75,7 @@ def patch_embed_forward(
     w_pos_norm: Tensor | None,
     b_pos_norm: Tensor | None,
     dropout: float = 0.0,
-    activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
+    activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
     eps: float = 1e-5,
     training: bool = False,
 ) -> Tensor:
@@ -108,7 +113,7 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Dims2D]):
         embed_dim: int,
         patch_size: int | Dims2D,
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
+        activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
     ):
         super().__init__()
         self._patch_size = to_tuple(patch_size, 2)
@@ -174,7 +179,7 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Dims3D]):
         embed_dim: int,
         patch_size: int | Dims3D,
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
+        activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
     ):
         super().__init__()
         self._patch_size = to_tuple(patch_size, 3)

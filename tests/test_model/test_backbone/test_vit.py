@@ -1,0 +1,160 @@
+import json
+from dataclasses import replace
+from typing import Any, cast
+
+import pytest
+import torch
+import torch.nn.functional as F
+import yaml
+from torch.testing import assert_close
+
+from mit_ub.model.activations import relu2
+from mit_ub.model.backbone import ViT, ViTConfig
+from mit_ub.tokens import create_mask
+
+
+@pytest.fixture
+def config():
+    config = ViTConfig(
+        in_channels=3,
+        dim=128,
+        dim_feedforward=256,
+        patch_size=(16, 16),
+        depth=3,
+        nhead=128 // 16,
+    )
+    return config
+
+
+class TestViTConfig:
+
+    def test_convert_activations(self, config):
+        config = replace(config, activation="relu2", gate_activation="silu")
+        assert config.activation == relu2
+        assert config.gate_activation == F.silu
+
+    @pytest.mark.parametrize("ext", [".json", ".yaml", ".yml"])
+    def test_from_file(self, tmp_path, ext):
+        config = {
+            "in_channels": 3,
+            "dim": 128,
+            "dim_feedforward": 256,
+            "patch_size": [16, 16],
+            "depth": 3,
+            "nhead": 128 // 16,
+            "activation": "relu2",
+            "gate_activation": "silu",
+        }
+
+        path = tmp_path / f"config{ext}"
+        with open(path, "w") as f:
+            if ext == ".json":
+                json.dump(config, f)
+            else:
+                yaml.dump(config, f)
+
+        config = ViTConfig.from_file(path)
+        assert config.in_channels == 3
+        assert config.dim == 128
+
+    @pytest.mark.parametrize("ext", [".json", ".yaml", ".yml"])
+    def test_save(self, config, tmp_path, ext):
+        path = tmp_path / f"config{ext}"
+        config.save(path)
+
+        loaded = ViTConfig.from_file(path)
+        assert config == loaded
+
+    def test_instantiate(self, config):
+        model = config.instantiate()
+        assert isinstance(model, ViT)
+
+
+class TestViT:
+
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_forward(self, config, device, dtype):
+        x = torch.randn(1, 3, 224, 224, device=device)
+        model = ViT(config).to(device)
+        with torch.autocast(device_type=device, dtype=dtype, enabled=True):
+            out = model(x)
+        assert out.shape[:2] == (1, 128)
+
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_backward(self, config, device, dtype):
+        x = torch.randn(1, 3, 224, 224, device=device, requires_grad=True)
+        model = ViT(config).to(device)
+
+        with torch.autocast(device_type=device, dtype=dtype):
+            out = model(x)
+            out = out.sum()
+        out.sum().backward()
+        for name, param in model.named_parameters():
+            assert param.grad is not None, f"{name} has no gradient"
+            assert not param.grad.isnan().any(), f"{name} has nan gradient"
+
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    def test_token_mask(self, config, device):
+        torch.random.manual_seed(0)
+        B, C, H, W = 1, 3, 224, 224
+        D, patch_size, depth = 128, (16, 16), 3
+
+        model = ViT(config).to(device)
+
+        x = torch.randn(B, C, H, W, device=device)
+        mask = model.create_mask(x, unmasked_ratio=0.25, scale=1)
+        with torch.autocast(device_type=device, dtype=torch.float16):
+            out1 = model(x, reshape=False)
+            out2 = model(x, mask=mask, reshape=False)
+        assert out1.shape != out2.shape
+
+    def test_forward_deterministic(self, config):
+        x = torch.randn(1, 3, 224, 224)
+        config = replace(config, stochastic_depth=0.1, dropout=0.1)
+        model = ViT(config)
+
+        model.train()
+        with torch.autocast(device_type="cpu", dtype=torch.float16):
+            out1 = model(x)
+            out2 = model(x)
+        assert not torch.allclose(out1, out2)
+
+        model.eval()
+        with torch.autocast(device_type="cpu", dtype=torch.float16):
+            out1 = model(x)
+            out2 = model(x)
+        assert torch.allclose(out1, out2)
+
+    def test_trivial_token_mask(self, config):
+        torch.random.manual_seed(0)
+        B, C, H, W = 1, 3, 224, 224
+        model = ViT(config)
+        model.eval()
+
+        mask_size = model.stem.tokenized_size(cast(Any, (H, W)))
+        mask = create_mask(mask_size, batch_size=B, mask_ratio=0.25, scale=1)
+        mask = torch.ones_like(mask).bool()
+        x = torch.randn(B, C, H, W)
+        out1 = model(x, reshape=False)
+        out2 = model(x, mask=mask, reshape=False)
+        assert_close(out1, out2)

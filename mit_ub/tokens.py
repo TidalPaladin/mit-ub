@@ -165,3 +165,43 @@ def create_mask(
     # update mask based on chosen locations
     mask[batch_idx.flatten(), token_idx.flatten()] = False
     return mask
+
+
+def generate_non_overlapping_mask(mask1: Tensor, p1: float, p2: float) -> Tensor:
+    """Generates a second mask that does not overlap with the first mask.
+
+    Args:
+        mask1: First mask tensor of shape (B, L) where B is batch size and L is sequence length
+        p1: Ratio of tokens masked in first mask, must be in range (0,1)
+        p2: Ratio of tokens to mask in second mask, must be in range (0,1)
+
+    Shapes:
+        mask1 - :math:`(B, L)` where :math:`B` is batch size and :math:`L` is sequence length
+        Output - :math:`(B, L)` with same shape as input mask
+
+    Raises:
+        ValueError: If p1 + p2 > 1, indicating masks cannot be non-overlapping
+
+    Returns:
+        Second mask tensor with same shape as input, with True indicating masked tokens
+    """
+    B, L = mask1.shape
+    n = int(L * p1)
+    m = int(L * p2)
+    if n + m > L:
+        raise ValueError("Cannot satisfy non-overlap constraint.")
+
+    # Generate random values in the shape of the mask
+    x = torch.rand(B, L)
+
+    # Fill values in the first mask with a high value
+    x[mask1] = 2.0
+
+    # Sort the values and take the top m values
+    idx = x.argsort(dim=1)[:, :m]
+
+    # Create the second mask
+    mask2 = torch.zeros_like(mask1)
+    rows = torch.arange(B).unsqueeze_(-1)
+    mask2[rows, idx] = True
+    return mask2

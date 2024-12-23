@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from torch.testing import assert_close
 
-from mit_ub.tokens import apply_mask, create_mask, mask_is_ragged, unapply_mask
+from mit_ub.tokens import apply_mask, create_mask, generate_non_overlapping_mask, mask_is_ragged, unapply_mask
 
 
 @pytest.mark.parametrize(
@@ -123,3 +123,36 @@ class TestCreateMask:
         batch_size = 2
         mask = create_mask(size, ratio, batch_size, scale=scale, device=torch.device("cuda"))
         assert mask.device.type == "cuda"
+
+
+def test_generate_non_overlapping_mask_no_overlap():
+    B, L = 5, 10
+    p1, p2 = 0.3, 0.2
+    # Create an initial mask1 with exactly n= int(L*p1) True values per row
+    mask1 = torch.zeros((B, L), dtype=torch.bool)
+    n = int(L * p1)
+    for i in range(B):
+        idx = torch.randperm(L)[:n]
+        mask1[i, idx] = True
+
+    mask2 = generate_non_overlapping_mask(mask1, p1, p2)
+    assert mask1.shape == mask2.shape
+    # Ensure no overlap
+    assert not torch.logical_and(mask1, mask2).any()
+    # Ensure mask2 has correct number of True values
+    m = int(L * p2)
+    assert torch.all(mask2.sum(-1) == m)
+
+
+def test_generate_non_overlapping_mask_invalid_ratio():
+    B, L = 5, 10
+    p1, p2 = 0.7, 0.4  # n + m = 7 + 4 > 10
+    mask1 = torch.zeros((B, L), dtype=torch.bool)
+    # Fill mask1 with int(L * p1) Trues
+    n = int(L * p1)
+    for i in range(B):
+        idx = torch.randperm(L)[:n]
+        mask1[i, idx] = True
+    # Should raise ValueError
+    with pytest.raises(ValueError):
+        _ = generate_non_overlapping_mask(mask1, p1, p2)

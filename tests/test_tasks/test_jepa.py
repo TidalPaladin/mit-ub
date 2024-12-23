@@ -5,30 +5,10 @@ import pytest
 import pytorch_lightning as pl
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from torch.multiprocessing import spawn  # type: ignore
 from torch.testing import assert_close
 
-from mit_ub.tasks.jepa import JEPA, JEPAConfig, average_pairwise_cosine_similarity
-
-
-@pytest.mark.parametrize(
-    "batch, tokens",
-    [
-        (10, 128),
-        (1, 128),
-        (10, 1),
-        (1, 1),
-    ],
-)
-def test_average_pairwise_cosine_similarity(batch, tokens):
-    B, L, D = batch, tokens, 32
-    torch.manual_seed(0)
-    x = torch.randn(B, L, D)
-
-    actual = average_pairwise_cosine_similarity(x, 1, 2)
-    expected = F.cosine_similarity(x.view(B, L, 1, D), x.view(B, 1, L, D), dim=-1).mean(dim=(1, 2))
-    assert_close(expected, actual)
+from mit_ub.tasks.jepa import JEPA, JEPAConfig
 
 
 def run_ema_sync(rank, world_size, backbone, optimizer_init):
@@ -48,7 +28,7 @@ def run_ema_sync(rank, world_size, backbone, optimizer_init):
 
         # Set EMA weights to the rank
         with torch.no_grad():
-            for param in task.ema_backbone.parameters():
+            for param in task.teacher_backbone.parameters():
                 param.fill_(rank)
 
         # Synchronize EMA weights
@@ -56,7 +36,7 @@ def run_ema_sync(rank, world_size, backbone, optimizer_init):
 
         # EMA weights are averaged
         expected = torch.tensor(sum(range(world_size)) / world_size)
-        for param in task.ema_backbone.parameters():
+        for param in task.teacher_backbone.parameters():
             assert_close(param.data, expected.expand_as(param.data))
 
     # Clean up the process group
@@ -71,8 +51,7 @@ class TestJEPA:
     @pytest.fixture
     def task(self, optimizer_init, backbone):
         config = JEPAConfig()
-        config.context_scale = 1
-        config.target_scale = 1
+        config.scale = 1
         return JEPA(backbone, optimizer_init=optimizer_init, jepa_config=config)
 
     @pytest.mark.parametrize(
@@ -140,7 +119,7 @@ class TestJEPA:
 
         with torch.no_grad():
             # Set EMA backbone weights to current
-            for param in task.ema_backbone.parameters():
+            for param in task.teacher_backbone.parameters():
                 param.fill_(current)
 
             # Set backbone weights to new
@@ -150,22 +129,20 @@ class TestJEPA:
         # Update EMA
         task.update_ema()
         expected = torch.tensor(expected)
-        for param in task.ema_backbone.parameters():
+        for param in task.teacher_backbone.parameters():
             assert_close(param.data, expected.expand_as(param.data))
 
     @pytest.mark.parametrize("world_size", [1, 2])
-    def test_synchronize_ema_weights(self, mocker, optimizer_init, world_size):
+    def test_synchronize_ema_weights(self, vit_dummy, mocker, optimizer_init, world_size):
         if not dist.is_available():
             pytest.skip("Distributed training is not available")
 
-        # NOTE: We must use a backbone that is globally registered as to be accessible by all processes.
-        # We choose vit-cifar10 since it is small.
         if world_size > 1:
-            spawn(run_ema_sync, args=(world_size, "vit-cifar10", optimizer_init), nprocs=world_size, join=True)
+            spawn(run_ema_sync, args=(world_size, vit_dummy, optimizer_init), nprocs=world_size, join=True)
 
         else:
             torch.random.manual_seed(0)
-            task = JEPA("vit-cifar10", optimizer_init=optimizer_init)
+            task = JEPA(vit_dummy, optimizer_init=optimizer_init)
             trainer = mocker.MagicMock(spec_set=pl.Trainer)
             trainer.world_size = world_size
             task.trainer = trainer
@@ -173,10 +150,10 @@ class TestJEPA:
             # No update will be made
             expected = torch.tensor(1.0)
             with torch.no_grad():
-                for param in task.ema_backbone.parameters():
+                for param in task.teacher_backbone.parameters():
                     param.fill_(expected)
             task.synchronize_ema_weights()
-            for param in task.ema_backbone.parameters():
+            for param in task.teacher_backbone.parameters():
                 assert_close(param.data, expected.expand_as(param.data))
 
     def test_update_weight_decay(self, mocker, task):

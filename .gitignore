@@ -171,3 +171,9 @@ tmp*
 *.run.xml
 *.nav
 *.bcf
+
+# Only keep sample configs
+config/
+!config/mjepa.yaml
+!config/distill.yaml
+!config/supervised.yaml

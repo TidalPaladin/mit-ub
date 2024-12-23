@@ -1,6 +1,6 @@
 import math
 from enum import StrEnum
-from typing import Callable, Sequence, Tuple, cast
+from typing import Sequence, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -8,8 +8,13 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
+from ..activations import Activation
 from ..helpers import compile_backend, compile_is_disabled, to_tuple
-from ..pos_enc import DEFAULT_POS_ENC_ACTIVATION, RelativeFactorizedPosition, relative_factorized_position_forward
+from ..layers.pos_enc import (
+    DEFAULT_POS_ENC_ACTIVATION,
+    RelativeFactorizedPosition,
+    relative_factorized_position_forward,
+)
 from .patch_embed import PatchEmbed, _init_patch_embed
 
 
@@ -43,7 +48,7 @@ def adaptive_patch_embed_forward(
     w_pos_norm: Tensor | None,
     b_pos_norm: Tensor | None,
     dropout: float = 0.0,
-    activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
+    activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
     eps: float = 1e-5,
     training: bool = False,
 ) -> Tuple[Tensor, Tensor]:
@@ -96,7 +101,7 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         patch_size: int | Tuple[int, int],
         target_shape: Tuple[int, int],
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
+        activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
         pool_type: PoolType = PoolType.MAX,
     ):
         super().__init__()
@@ -183,7 +188,7 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         patch_size: int | Tuple[int, int, int],
         target_shape: Tuple[int, int, int],
         dropout: float = 0.0,
-        activation: Callable[[Tensor], Tensor] = DEFAULT_POS_ENC_ACTIVATION,
+        activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
         pool_type: PoolType = PoolType.MAX,
     ):
         super().__init__()
