@@ -87,7 +87,7 @@ class TestPatchEmbed2d:
     def test_extra_repr(self):
         layer = PatchEmbed2d(3, 64, (4, 4))
         result = str(layer)
-        exp = "PatchEmbed2d(\n  in=3, embed=64, patch_size=(4, 4)\n  (pos_enc): RelativeFactorizedPosition(in=2, hidden=128, out=64, dropout=0.0, act=relu2)\n)"
+        exp = "PatchEmbed2d(\n  in=3, embed=64, patch_size=(4, 4)\n  (pos_enc): RelativeFactorizedPosition(in=2, hidden=256, out=64, dropout=0.0, act=relu2)\n)"
         assert result == exp
 
 
@@ -142,5 +142,5 @@ class TestPatchEmbed3d:
     def test_extra_repr(self):
         layer = PatchEmbed3d(3, 64, (4, 4, 4))
         result = str(layer)
-        exp = "PatchEmbed3d(\n  in=3, embed=64, patch_size=(4, 4, 4)\n  (pos_enc): RelativeFactorizedPosition(in=3, hidden=128, out=64, dropout=0.0, act=relu2)\n)"
+        exp = "PatchEmbed3d(\n  in=3, embed=64, patch_size=(4, 4, 4)\n  (pos_enc): RelativeFactorizedPosition(in=3, hidden=256, out=64, dropout=0.0, act=relu2)\n)"
         assert result == exp
