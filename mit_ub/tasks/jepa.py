@@ -174,10 +174,7 @@ class JEPA(Task):
 
         # JEPA predictor
         self.jepa_predictor = nn.ModuleList(
-            [
-                self.backbone.create_decoder_layer(i)
-                for i in range(self.jepa_config.predictor_depth)
-            ]
+            [self.backbone.create_decoder_layer(i) for i in range(self.jepa_config.predictor_depth)]
         )
         self.save_hyperparameters()
 
