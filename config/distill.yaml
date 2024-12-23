@@ -5,7 +5,7 @@ fit:
 
   trainer:
     accelerator: gpu
-    devices: [1]
+    devices: [0]
     precision: "bf16-mixed"
     max_steps: 50000
     num_sanity_val_steps: 2
@@ -41,14 +41,14 @@ fit:
         class_path: mit_ub.model.ConvNextConfig
         init_args:
           in_channels: 3
-          depths: [3, 5, 3]
-          up_depths: [3, 5]
-          dims: [96, 192, 384]
-          dims_feedforward: [384, 768, 1536]
+          depths: [3, 9, 3]
+          up_depths: [3, 3]
+          dims: [128, 384, 512]
+          dims_feedforward: [512, 1536, 2048]
           patch_size: 2
           activation: "relu2"
           gate_activation: null
-          bias: false
+          bias: true
           dropout: 0.1
           stochastic_depth: 0.1
           kernel_size: 3
@@ -60,7 +60,7 @@ fit:
           dim: 384
           dim_feedforward: 1536
           patch_size: [4, 4]
-          depth: 12
+          depth: 18
           nhead: 12
           activation: "relu2"
           gate_activation: null
@@ -70,13 +70,14 @@ fit:
           layer_scale: 0.1
           qk_norm: false
 
-      distillation_config:
-        mixup_prob: 0.0
-        use_noise: false
+      #distillation_config:
+      #  ...
 
-      teacher_checkpoint: /mnt/flash/mit-ub/mit-ub/uueyg9ip/checkpoints/last.ckpt
+      classification_config:
+        num_classes: 10
+        pool_type: attention
 
-      num_classes: 10
+      teacher_checkpoint: /mnt/flash/mit-ub/mit-ub/33xplzdj/checkpoints/last.ckpt
 
       optimizer_init:
         class_path: bitsandbytes.optim.AdamW8bit
@@ -96,6 +97,11 @@ fit:
           initial_momentum: 0.95
 
       parameter_groups:
+        - params:
+            - "bias"
+            - "LayerNorm"
+          weight_decay: 0.0
+          lr: 0.0005
         - params:
             - "classification_head"
           weight_decay: 1.0
@@ -119,6 +125,12 @@ fit:
             - class_path: torchvision.transforms.v2.RandomVerticalFlip
               init_args:
                 p: 0.5
+
+            - class_path: torchvision.transforms.v2.RandomResizedCrop
+              init_args:
+                size: [32, 32]
+                scale: [0.5, 1.0]
+                ratio: [0.75, 1.33]
 
             - class_path: torchvision.transforms.v2.RandomApply
               init_args:

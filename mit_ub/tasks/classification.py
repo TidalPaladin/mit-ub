@@ -143,7 +143,7 @@ class ClassificationConfig:
     mixup_prob: float = 0.2
     freeze_backbone: bool = False
     # TODO: jsonargparse can't handle the strenum it seems
-    pool_type: str | PoolType = PoolType.ATTENTION
+    pool_type: str | PoolType = "attention"
 
     def __post_init__(self) -> None:
         if self.num_classes <= 0:

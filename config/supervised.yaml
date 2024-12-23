@@ -5,7 +5,7 @@ fit:
 
   trainer:
     accelerator: gpu
-    devices: [1]
+    devices: [0]
     precision: "bf16-mixed"
     max_steps: 50000
     num_sanity_val_steps: 2
@@ -31,6 +31,7 @@ fit:
       init_args:
         save_dir: ${fit.trainer.default_root_dir}
         project: mit-ub
+        name: supervised
 
   model:
     class_path: mit_ub.tasks.ClassificationTask
@@ -42,7 +43,7 @@ fit:
           dim: 384
           dim_feedforward: 1536
           patch_size: [4, 4]
-          depth: 12
+          depth: 18
           nhead: 12
           activation: "relu2"
           gate_activation: null
@@ -52,8 +53,11 @@ fit:
           layer_scale: 0.1 
           qk_norm: false
 
-      num_classes: 10
-      checkpoint: /mnt/flash/mitub/mit-ub/9uc0cf7k/checkpoints/last.ckpt
+      classification_config:
+        num_classes: 10
+        pool_type: attention
+
+      checkpoint: /mnt/flash/mit-ub/mit-ub/33xplzdj/checkpoints/last.ckpt
       strict_checkpoint: false
 
       optimizer_init:
@@ -75,6 +79,13 @@ fit:
 
       parameter_groups:
         - params:
+            - "bias"
+            - "LayerNorm"
+            - "LayerScale"
+            - "RelativeFactorizedPosition"
+          weight_decay: 0.0
+          lr: 0.0005
+        - params:
             - "classification_head"
           weight_decay: 1.0
 
@@ -82,7 +93,7 @@ fit:
     class_path: mit_ub.data.CIFAR10DataModule
     init_args:
       root: /mnt/data/cifar10/cifar-10-batches-py
-      batch_size: 128
+      batch_size: 512
       num_workers: 24
       pin_memory: true
 
@@ -97,6 +108,12 @@ fit:
             - class_path: torchvision.transforms.v2.RandomVerticalFlip
               init_args:
                 p: 0.5
+
+            - class_path: torchvision.transforms.v2.RandomResizedCrop
+              init_args:
+                size: [32, 32]
+                scale: [0.5, 1.0]
+                ratio: [0.75, 1.33]
 
             - class_path: torchvision.transforms.v2.RandomApply
               init_args:
@@ -123,6 +140,16 @@ fit:
                 scale: true
                 dtype:
                   class_path: torch.float32
+
+            - class_path: torchvision.transforms.v2.RandomApply
+              init_args:
+                p: 0.25
+                transforms:
+                  - class_path: mit_ub.data.RandomNoise
+                    init_args:
+                      scale: 0.2
+                      salt_pepper_prob: [0.01, 0.05]
+                      clip: true
 
       val_transforms:
         class_path: torchvision.transforms.v2.Compose
