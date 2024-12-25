@@ -51,6 +51,7 @@ def mixup(x: Tensor, weight: Tensor) -> Tensor:
     Returns:
         ``x.lerp(x.roll(1, 0), weight)``
     """
+    x = x.float()
     return x.lerp(x.roll(1, 0), _right_broadcast(weight, x))
 
 

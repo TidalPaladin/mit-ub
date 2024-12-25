@@ -24,7 +24,7 @@ def is_valid_categorical_label(label: Tensor) -> Tensor:
 
 
 def is_valid_binary_label(label: Tensor) -> Tensor:
-    return label == 0 | label == 1
+    return (label == 0).logical_or_(label == 1)
 
 
 def categorical_loss(
@@ -59,7 +59,7 @@ def binary_loss(
     if mixup_weight is not None:
         label = mixup(label, mixup_weight)
 
-    return F.binary_cross_entropy_with_logits(logits[mask], label[mask])
+    return F.binary_cross_entropy_with_logits(logits[mask].flatten(), label[mask].flatten().float())
 
 
 def step_classification_from_features(
@@ -99,7 +99,7 @@ def step_classification_from_features(
                 _y = label[mask]
                 for name, metric in metrics.items():
                     if name in ("acc", "auroc"):
-                        metric.update(_pred, _y)
+                        metric.update(_pred.view_as(_y), _y)
 
     return {
         "loss": loss,
@@ -136,6 +136,7 @@ class ClassificationConfig:
         mixup_prob: Probability of applying mixup to the input and target.
         freeze_backbone: If True, the backbone is frozen during training.
         pool_type: Type of pooling to use.
+        label_key: Key in the batch dictionary that contains the label.
     """
 
     num_classes: int
@@ -144,6 +145,7 @@ class ClassificationConfig:
     freeze_backbone: bool = False
     # TODO: jsonargparse can't handle the strenum it seems
     pool_type: str | PoolType = "attention"
+    label_key: str = "label"
 
     def __post_init__(self) -> None:
         if self.num_classes <= 0:
@@ -245,7 +247,7 @@ class ClassificationTask(Task):
     ) -> Dict[str, Any]:
         # get inputs
         x = batch["img"]
-        y = batch["label"].long()
+        y = batch[self.config.label_key].long()
         N = y.shape[0]
 
         # mixup input
@@ -330,7 +332,7 @@ class JEPAWithClassification(JEPAWithProbe):
             ),
             nn.LayerNorm(dim),
             nn.Dropout(self.backbone.config.dropout),
-            nn.Linear(dim, self.classification_config.num_classes),
+            nn.Linear(dim, self.classification_config.num_classes if not self.classification_config.is_binary else 1),
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
@@ -340,7 +342,7 @@ class JEPAWithClassification(JEPAWithProbe):
 
     @torch.no_grad()
     def create_gt(self, batch: Dict[str, Any]) -> Tensor:
-        y = batch["label"].long()
+        y = batch[self.classification_config.label_key].long()
         return y
 
     def step_linear_probe(
@@ -416,7 +418,7 @@ class DistillationWithClassification(DistillationWithProbe):
             ),
             nn.LayerNorm(dim),
             nn.Dropout(self.backbone.config.dropout),
-            nn.Linear(dim, self.classification_config.num_classes),
+            nn.Linear(dim, self.classification_config.num_classes if not self.classification_config.is_binary else 1),
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
@@ -426,7 +428,7 @@ class DistillationWithClassification(DistillationWithProbe):
 
     @torch.no_grad()
     def create_gt(self, batch: Dict[str, Any]) -> Tensor:
-        y = batch["label"].long()
+        y = batch[self.classification_config.label_key].long()
         return y
 
     def step_linear_probe(
