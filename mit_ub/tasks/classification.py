@@ -1,7 +1,7 @@
 from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, Sequence, cast
 
 import torch
 import torch.nn as nn
@@ -62,6 +62,31 @@ def binary_loss(
     return F.binary_cross_entropy_with_logits(logits[mask].flatten(), label[mask].flatten().float())
 
 
+@torch.no_grad()
+def update_metrics(
+    metrics: tm.MetricCollection,
+    pred: Tensor,
+    label: Tensor,
+    loss: Tensor,
+    mixup_weight: Tensor | None,
+    is_binary: bool,
+    metric_names: Sequence[str] = ("acc", "auroc"),
+) -> None:
+    # Filter valid labels without mixup for metric computation
+    mask = is_valid_binary_label(label) if is_binary else is_valid_categorical_label(label)
+    mask = mask & ~is_mixed(mixup_weight) if mixup_weight is not None else mask
+    if not mask.any():
+        return
+
+    _pred = pred[mask]
+    _y = label[mask]
+    for name, metric in metrics.items():
+        if name.endswith("_loss"):
+            metric.update(loss)
+        elif name in metric_names:
+            metric.update(_pred.view_as(_y), _y)
+
+
 def step_classification_from_features(
     features: Tensor,
     label: Tensor,
@@ -69,6 +94,7 @@ def step_classification_from_features(
     config: "ClassificationConfig",
     mixup_weight: Tensor | None = None,
     metrics: tm.MetricCollection | None = None,
+    metric_names: Sequence[str] = ("acc", "auroc"),
 ) -> Dict[str, Tensor]:
     # Forward pass
     N = features.shape[0]
@@ -89,17 +115,8 @@ def step_classification_from_features(
             pred = pred_logits.argmax(dim=1)
 
     # log metrics
-    with torch.no_grad():
-        if metrics is not None:
-            # Filter valid labels without mixup for metric computation
-            mask = is_valid_binary_label(label) if config.is_binary else is_valid_categorical_label(label)
-            mask = mask & ~is_mixed(mixup_weight) if mixup_weight is not None else mask
-            if mask.any():
-                _pred = pred[mask]
-                _y = label[mask]
-                for name, metric in metrics.items():
-                    if name in ("acc", "auroc"):
-                        metric.update(_pred.view_as(_y), _y)
+    if metrics is not None:
+        update_metrics(metrics, pred, label, loss, mixup_weight, config.is_binary, metric_names)
 
     return {
         "loss": loss,
@@ -114,12 +131,14 @@ def create_metrics(config: "ClassificationConfig") -> tm.MetricCollection:
             {
                 "acc": tm.Accuracy(task="binary"),
                 "auroc": tm.AUROC(task="binary"),
+                "bce_loss": tm.MeanMetric(),
             }
         )
     else:
         metrics = tm.MetricCollection(
             {
                 "acc": tm.Accuracy(task="multiclass", num_classes=config.num_classes),
+                "ce_loss": tm.MeanMetric(),
             }
         )
     return metrics

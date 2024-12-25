@@ -20,7 +20,7 @@ from ..data.noise import RandomNoise
 from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, ExampleSimilarity, TokenSimilarity
 from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
 from ..model import AdaptiveViT, AdaptiveViTConfig, ViT, ViTConfig
-from ..model.layers.layer_scale import LayerScale
+from ..model.layers.layer_scale import has_layer_scale
 from ..model.layers.pos_enc import RelativeFactorizedPosition
 from ..model.layers.transformer import TransformerDecoderLayer
 from ..tokens import apply_mask, create_mask, generate_non_overlapping_mask, mask_is_ragged
@@ -195,10 +195,10 @@ class JEPA(Task):
                 "example_sim": ExampleSimilarity(self.backbone.config.dim),
                 "micro_token_sim": TokenSimilarity(self.backbone.config.dim),
                 "macro_token_sim": AveragePairwiseCosineSimilarity(self.backbone.config.dim),
+                "jepa_loss": tm.MeanMetric(),
             }
         )
-        has_layer_scale = any(isinstance(layer, LayerScale) for layer in self.backbone.modules())
-        if has_layer_scale and state.mode == Mode.TRAIN:
+        if has_layer_scale(self.backbone) and state.mode == Mode.TRAIN:
             metrics["layer_scale_max"] = MaxLayerScale()
             metrics["layer_scale_mean"] = MeanLayerScale()
 
@@ -369,6 +369,7 @@ class JEPA(Task):
         # Compute metrics
         if metrics is not None:
             with torch.no_grad():
+                metrics["jepa_loss"].update(loss)
                 metrics["example_sim"].update(full_target)
                 metrics["micro_token_sim"].update(pred)
                 metrics["macro_token_sim"].update(full_target)

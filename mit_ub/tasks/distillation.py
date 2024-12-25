@@ -8,14 +8,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.helpers import load_checkpoint
-from deep_helpers.structs import State
+from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
 from torch import Tensor
 
 from ..data.mixup import mixup, sample_mixup_parameters
 from ..data.noise import RandomNoise
+from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
 from ..model import AnyModelConfig
 from ..model.helpers import grid_to_tokens
+from ..model.layers import has_layer_scale
 from .jepa import apply_noise_batched, mixup
 
 
@@ -116,7 +118,13 @@ class Distillation(Task):
 
     def create_metrics(self, state: State) -> tm.MetricCollection:
         r"""Gets a MetricCollection for a given state"""
-        return tm.MetricCollection({})
+        metrics = tm.MetricCollection({"distill_loss": tm.MeanMetric()})
+
+        if has_layer_scale(self.backbone) and state.mode == Mode.TRAIN:
+            metrics["layer_scale_max"] = MaxLayerScale()
+            metrics["layer_scale_mean"] = MeanLayerScale()
+
+        return metrics
 
     def forward(self, x: Tensor) -> Dict[str, Tensor]:
         pred = self.backbone(x)
@@ -161,6 +169,10 @@ class Distillation(Task):
             pred_proj.shape == target.shape
         ), f"Prediction shape {pred_proj.shape} does not match target shape {target.shape}"
         loss = F.smooth_l1_loss(pred_proj, target)
+
+        if metrics is not None:
+            with torch.no_grad():
+                metrics["distill_loss"].update(loss)
 
         output = {
             "log": {
