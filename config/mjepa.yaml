@@ -9,7 +9,7 @@ fit:
     # Train on GPU 1 in BF16 mixed precision for 50k steps, validating every 10 epochs.
     # Sanity validation steps are recommended to trigger torch.compile of the model in inference mode.
     accelerator: gpu
-    devices: [2]
+    devices: [1]
     precision: "bf16-mixed"
     max_steps: 100000
     num_sanity_val_steps: 2

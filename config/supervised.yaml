@@ -57,8 +57,7 @@ fit:
         num_classes: 10
         pool_type: attention
 
-      #checkpoint: /mnt/flash/mit-ub/mit-ub/33xplzdj/checkpoints/last.ckpt
-      checkpoint: /mnt/flash/mit-ub/mit-ub/fx75lm1t/checkpoints/last.ckpt
+      checkpoint: /mnt/flash/mit-ub/mit-ub/33xplzdj/checkpoints/last.ckpt
       strict_checkpoint: false
 
       optimizer_init:
