@@ -9,7 +9,7 @@ from torchvision.ops import StochasticDepth
 from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
 from ..helpers import Dims2D, compile_backend, compile_is_disabled, grid_to_tokens, to_tuple, tokens_to_grid
 from ..layers.layer_scale import LayerScale
-from ..layers.mlp import MLP, mlp_forward
+from ..layers.mlp import MLP, NormType, mlp_forward
 
 
 @torch.compile(
@@ -41,6 +41,7 @@ def convnext_block_forward_2d(
     b_norm: Tensor | None = None,
     eps: float = 1e-5,
     training: bool = False,
+    norm_type: NormType = NormType.LAYER_NORM,
 ) -> Tensor:
     # Depthwise convolution
     y = tokens_to_grid(x, size)
@@ -49,7 +50,21 @@ def convnext_block_forward_2d(
 
     # LayerNorm, MLP
     y = mlp_forward(
-        y, w1, w2, b1, b2, w_gate, b_gate, dropout, activation, gate_activation, w_norm, b_norm, eps, training
+        y,
+        w1,
+        w2,
+        b1,
+        b2,
+        w_gate,
+        b_gate,
+        dropout,
+        activation,
+        gate_activation,
+        w_norm,
+        b_norm,
+        eps,
+        training,
+        norm_type,
     )
     return y
 
@@ -67,6 +82,7 @@ class ConvNextBlock(nn.Module):
         bias: bool = True,
         layer_scale: float | None = None,
         stochastic_depth: float = 0.0,
+        norm_type: NormType = NormType.LAYER_NORM,
     ):
         super().__init__()
         _kernel_size = to_tuple(kernel_size, 2)
@@ -83,6 +99,7 @@ class ConvNextBlock(nn.Module):
             gate_activation=gate_activation,
             bias=bias,
             norm=True,
+            norm_type=norm_type,
         )
         self.layer_scale = LayerScale(dim, layer_scale) if layer_scale else nn.Identity()
         self.stochastic_depth = StochasticDepth(stochastic_depth, mode="row")
@@ -119,5 +136,6 @@ class ConvNextBlock(nn.Module):
             self.mlp.w_norm,
             self.mlp.b_norm,
             training=self.training,
+            norm_type=self.mlp.norm_type,
         )
         return x + self.stochastic_depth(self.layer_scale(y))

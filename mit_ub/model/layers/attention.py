@@ -6,6 +6,7 @@ from einops import rearrange
 from torch import Tensor, nn
 
 from ..helpers import compile_backend, compile_is_disabled
+from .mlp import NormType
 
 
 @torch.compile(
@@ -34,6 +35,7 @@ def attention_forward(
     kv_norm: bool = False,
     training: bool = False,
     mask: Tensor | None = None,
+    norm_type: NormType = NormType.LAYER_NORM,
     # fmt: on
 ) -> Tensor:
     """
@@ -63,6 +65,7 @@ def attention_forward(
             probably be ``True`` when using encoder-decoder attention on an unnormalized KV.
         training: Training or inference mode
         mask: Attention mask
+        norm_type: Type of pre-normalization to apply.
 
     Shapes:
         q, k, v: :math:`(B, L, D)`, or :math:`(B, L, 3*D)` when packed QKV tensor
@@ -79,10 +82,18 @@ def attention_forward(
 
     # Pre-normalization
     if pre_norm_w is not None:
-        q = F.layer_norm(q, q.shape[-1:], weight=pre_norm_w, bias=pre_norm_b, eps=eps)
-        if not is_packed and kv_norm:
-            k = F.layer_norm(k, k.shape[-1:], weight=pre_norm_w, bias=pre_norm_b, eps=eps)  # type: ignore[arg-type]
-            v = F.layer_norm(v, v.shape[-1:], weight=pre_norm_w, bias=pre_norm_b, eps=eps)  # type: ignore[arg-type]
+        if norm_type == NormType.LAYER_NORM:
+            q = F.layer_norm(q, q.shape[-1:], weight=pre_norm_w, bias=pre_norm_b, eps=eps)
+            if not is_packed and kv_norm:
+                k = F.layer_norm(k, k.shape[-1:], weight=pre_norm_w, bias=pre_norm_b, eps=eps)  # type: ignore[arg-type]
+                v = F.layer_norm(v, v.shape[-1:], weight=pre_norm_w, bias=pre_norm_b, eps=eps)  # type: ignore[arg-type]
+        elif norm_type == NormType.RMS_NORM:
+            q = F.rms_norm(q, q.shape[-1:], weight=pre_norm_w, eps=eps)
+            if not is_packed and kv_norm:
+                k = F.rms_norm(k, k.shape[-1:], weight=pre_norm_w, eps=eps)  # type: ignore[arg-type]
+                v = F.rms_norm(v, v.shape[-1:], weight=pre_norm_w, eps=eps)  # type: ignore[arg-type]
+        else:
+            raise ValueError(f"Unknown norm type: {norm_type}")
 
     # Packed QKV projection
     if is_packed:
@@ -141,6 +152,7 @@ class MultiHeadAttention(nn.Module):
         bias: bool = True,
         norm: bool = False,
         kv_norm: bool = False,
+        norm_type: NormType = NormType.LAYER_NORM,
     ):
         super().__init__()
         self._embed_dim = embed_dim
@@ -148,6 +160,7 @@ class MultiHeadAttention(nn.Module):
         self._num_kv_heads = num_kv_heads
         self.dropout = dropout
         self.kv_norm = kv_norm
+        self.norm_type = norm_type
 
         # Register optional parameters
         for prefix in ("w", "b"):
@@ -158,7 +171,10 @@ class MultiHeadAttention(nn.Module):
         # Fused pre-norm
         if norm:
             self.w_pre_norm = nn.Parameter(torch.empty(embed_dim))
-            self.b_pre_norm = nn.Parameter(torch.empty(embed_dim))
+            if norm_type == NormType.RMS_NORM:
+                self.b_pre_norm = nn.Parameter(torch.empty(embed_dim))
+            else:
+                self.register_parameter("b_pre_norm", None)
 
         # Packed QKV projection
         if kdim is None and vdim is None:
@@ -250,7 +266,8 @@ class MultiHeadAttention(nn.Module):
         # Norm and projection
         if embed_compatible and self.w_pre_norm is not None and src.w_pre_norm is not None:
             self.w_pre_norm.data = src.w_pre_norm.data
-            self.b_pre_norm.data = src.b_pre_norm.data
+            if self.b_pre_norm is not None and src.b_pre_norm is not None:
+                self.b_pre_norm.data = src.b_pre_norm.data
         if attn_compatible and self.w_norm is not None and src.w_norm is not None:
             self.w_norm.data = src.w_norm.data
             self.b_norm.data = src.b_norm.data
@@ -306,7 +323,8 @@ class MultiHeadAttention(nn.Module):
             f"norm={self.norm}, "
             f"qk_norm={self.qk_norm}, "
             f"bias={self.bias}, "
-            f"kv_norm={self.kv_norm}"
+            f"kv_norm={self.kv_norm}, "
+            f"norm_type={self.norm_type}"
         )
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor, mask: Tensor | None = None) -> Tensor:
@@ -341,5 +359,6 @@ class MultiHeadAttention(nn.Module):
             kv_norm=self.kv_norm,
             training=self.training,
             mask=mask,
+            norm_type=self.norm_type,
             # fmt: on
         )

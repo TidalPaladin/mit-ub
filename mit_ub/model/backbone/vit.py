@@ -7,6 +7,7 @@ from torch import Tensor
 from ...tokens import apply_mask, create_mask
 from ..activations import DEFAULT_MLP_ACTIVATION_STR, DEFAULT_MLP_GATE_ACTIVATION_STR, Activation
 from ..config import ModelConfig
+from ..layers.mlp import NormType
 from ..layers.transformer import TransformerDecoderLayer, TransformerEncoderLayer
 from ..stem import PatchEmbed2d, PatchEmbed3d
 from .convnext import tokens_to_grid
@@ -28,6 +29,7 @@ class ViTConfig(ModelConfig):
     num_kv_heads: int | None = None
     qk_norm: bool = False
     layer_scale: float | None = None
+    norm_type: NormType = cast(NormType, "layernorm")
 
     moe_layers: Sequence[int] = field(default_factory=list)
     num_experts: int | None = None
@@ -50,7 +52,9 @@ class ViT(nn.Module):
 
         # Transformer blocks
         self.blocks = nn.ModuleList([self.create_encoder_layer(i) for i in range(config.depth)])
-        self.embedding_norm = nn.LayerNorm(config.dim)
+        self.embedding_norm = (
+            nn.LayerNorm(config.dim) if config.norm_type == NormType.LAYER_NORM else nn.RMSNorm(config.dim)
+        )
 
     @property
     def config(self) -> ViTConfig:
@@ -85,6 +89,7 @@ class ViT(nn.Module):
             layer_scale=self.config.layer_scale,
             stochastic_depth=self.config.stochastic_depth,
             bias=self.config.bias,
+            norm_type=self.config.norm_type,
         )
         _kwargs.update(kwargs)
         return TransformerEncoderLayer(**_kwargs)
@@ -121,6 +126,7 @@ class ViT(nn.Module):
             layer_scale=self.config.layer_scale,
             stochastic_depth=self.config.stochastic_depth,
             bias=self.config.bias,
+            norm_type=self.config.norm_type,
         )
         _kwargs.update(kwargs)
         layer = TransformerDecoderLayer(**_kwargs)

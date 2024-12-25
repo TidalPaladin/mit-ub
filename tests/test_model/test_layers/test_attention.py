@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.testing import assert_close
 
+from mit_ub.model.layers import NormType
 from mit_ub.model.layers.attention import MultiHeadAttention
 
 
@@ -61,6 +62,7 @@ class TestMultiHeadAttention:
         ],
     )
     @pytest.mark.parametrize("norm", [False, True])
+    @pytest.mark.parametrize("norm_type", [NormType.LAYER_NORM, NormType.RMS_NORM])
     @pytest.mark.parametrize(
         "num_heads,num_kv_heads,Lq,Lk,Dq,Dk",
         [
@@ -71,7 +73,7 @@ class TestMultiHeadAttention:
             (32, 8, 32, 32, 128, 64),
         ],
     )
-    def test_forward(self, device, norm, num_heads, num_kv_heads, Lq, Lk, Dq, Dk):
+    def test_forward(self, device, norm, norm_type, num_heads, num_kv_heads, Lq, Lk, Dq, Dk):
         model = MultiHeadAttention(
             Dq,
             num_heads,
@@ -80,6 +82,7 @@ class TestMultiHeadAttention:
             kdim=Dk if Dk != Dq or Lk != Lq else None,
             vdim=Dk if Dk != Dq or Lk != Lq else None,
             dropout=0.1,
+            norm_type=norm_type,
         ).to(device)
 
         B = 2
@@ -301,7 +304,7 @@ class TestMultiHeadAttention:
         result = str(layer)
         assert (
             result
-            == "MultiHeadAttention(dim=32, heads=8, kv_heads=8, head_dim=4, kv_dim=32, dropout=0.0, norm=False, qk_norm=False, bias=True, kv_norm=False)"
+            == "MultiHeadAttention(dim=32, heads=8, kv_heads=8, head_dim=4, kv_dim=32, dropout=0.0, norm=False, qk_norm=False, bias=True, kv_norm=False, norm_type=layernorm)"
         )
 
     def test_copy_parameters_self(self):

@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.testing import assert_close
 
+from mit_ub.model.layers import NormType
 from mit_ub.model.layers.transformer import (
     TransformerConvDecoderLayer,
     TransformerConvEncoderLayer,
@@ -30,12 +31,13 @@ class TestTransformerEncoderLayer:
             pytest.param(F.silu, F.sigmoid, id="sigsilu"),
         ],
     )
-    def test_forward(self, device, activation, gate_activation):
+    @pytest.mark.parametrize("norm_type", [NormType.LAYER_NORM, NormType.RMS_NORM])
+    def test_forward(self, device, activation, gate_activation, norm_type):
         B, L, D = 1, 128, 128
         x = torch.randn(B, L, D, device=device)
         nhead = D // 16
         layer = TransformerEncoderLayer(
-            D, nhead, D, activation=activation, gate_activation=gate_activation, layer_scale=1e-5
+            D, nhead, D, activation=activation, gate_activation=gate_activation, layer_scale=1e-5, norm_type=norm_type
         ).to(device)
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(x)
@@ -157,14 +159,15 @@ class TestTransformerDecoderLayer:
             pytest.param(F.silu, F.sigmoid, id="sigsilu"),
         ],
     )
-    def test_forward(self, device, activation, gate_activation):
+    @pytest.mark.parametrize("norm_type", [NormType.LAYER_NORM, NormType.RMS_NORM])
+    def test_forward(self, device, activation, gate_activation, norm_type):
         B, Lq, Dq = 1, 64, 128
         B, Lk, Dk = 1, 128, 32
         q = torch.randn(B, Lq, Dq, device=device)
         k = torch.randn(B, Lk, Dk, device=device)
         nhead = Dq // 16
         layer = TransformerDecoderLayer(
-            Dq, nhead, Dk, activation=activation, gate_activation=gate_activation, layer_scale=1e-5
+            Dq, nhead, Dk, activation=activation, gate_activation=gate_activation, layer_scale=1e-5, norm_type=norm_type
         ).to(device)
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(q, k)
@@ -297,12 +300,13 @@ class TestTransformerConvEncoderLayer:
             pytest.param(F.silu, F.sigmoid, id="sigsilu"),
         ],
     )
-    def test_forward(self, device, activation, gate_activation):
+    @pytest.mark.parametrize("norm_type", [NormType.LAYER_NORM, NormType.RMS_NORM])
+    def test_forward(self, device, activation, gate_activation, norm_type):
         B, L, D = 1, 128, 128
         x = torch.randn(B, L, D, device=device)
         nhead = D // 16
         layer = TransformerConvEncoderLayer(
-            D, nhead, D, activation=activation, gate_activation=gate_activation, layer_scale=1e-5
+            D, nhead, D, activation=activation, gate_activation=gate_activation, layer_scale=1e-5, norm_type=norm_type
         ).to(device)
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(x, (16, 8))
@@ -376,14 +380,15 @@ class TestTransformerConvDecoderLayer:
             pytest.param(F.silu, F.sigmoid, id="sigsilu"),
         ],
     )
-    def test_forward(self, device, activation, gate_activation):
+    @pytest.mark.parametrize("norm_type", [NormType.LAYER_NORM, NormType.RMS_NORM])
+    def test_forward(self, device, activation, gate_activation, norm_type):
         B, Lq, Dq = 1, 64, 128
         B, Lk, Dk = 1, 128, 32
         q = torch.randn(B, Lq, Dq, device=device)
         k = torch.randn(B, Lk, Dk, device=device)
         nhead = Dq // 16
         layer = TransformerConvDecoderLayer(
-            Dq, nhead, Dk, activation=activation, gate_activation=gate_activation, layer_scale=1e-5
+            Dq, nhead, Dk, activation=activation, gate_activation=gate_activation, layer_scale=1e-5, norm_type=norm_type
         ).to(device)
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(q, k, (8, 8))

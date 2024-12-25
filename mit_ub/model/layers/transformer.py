@@ -9,7 +9,7 @@ from ..helpers import Dims2D
 from .attention import MultiHeadAttention
 from .convnext import ConvNextBlock
 from .layer_scale import LayerScale
-from .mlp import MLP
+from .mlp import MLP, NormType
 from .soft_moe import SoftMoE
 
 
@@ -30,6 +30,7 @@ class TransformerEncoderLayer(nn.Module):
         num_slots: int | None = None,
         stochastic_depth: float = 0.0,
         bias: bool = True,
+        norm_type: NormType = NormType.LAYER_NORM,
     ):
         super().__init__()
         self.nhead = nhead
@@ -43,6 +44,7 @@ class TransformerEncoderLayer(nn.Module):
             qk_norm=qk_norm,
             bias=bias,
             norm=True,
+            norm_type=norm_type,
         )
 
         if num_experts is not None and num_slots is not None:
@@ -58,6 +60,7 @@ class TransformerEncoderLayer(nn.Module):
                 bias=bias,
                 qk_norm=qk_norm,
                 norm=True,
+                norm_type=norm_type,
             )
         elif num_experts is None and num_slots is None:
             self.mlp = MLP(
@@ -69,6 +72,7 @@ class TransformerEncoderLayer(nn.Module):
                 gate_activation,
                 bias=bias,
                 norm=True,
+                norm_type=norm_type,
             )
         else:
             raise ValueError("num_experts and num_slots must be both set or both None")
@@ -115,6 +119,7 @@ class TransformerDecoderLayer(nn.Module):
         bias: bool = True,
         self_attn: bool = True,
         kv_norm: bool = False,
+        norm_type: NormType = NormType.LAYER_NORM,
     ):
         super().__init__()
         d_kv = d_kv or d_model
@@ -130,6 +135,7 @@ class TransformerDecoderLayer(nn.Module):
                 qk_norm=qk_norm,
                 bias=bias,
                 norm=True,
+                norm_type=norm_type,
             )
         else:
             self.register_module("self_attn", None)
@@ -145,6 +151,7 @@ class TransformerDecoderLayer(nn.Module):
             bias=bias,
             norm=True,
             kv_norm=kv_norm,
+            norm_type=norm_type,
         )
 
         if num_experts is not None and num_slots is not None:
@@ -160,6 +167,7 @@ class TransformerDecoderLayer(nn.Module):
                 bias=bias,
                 qk_norm=qk_norm,
                 norm=True,
+                norm_type=norm_type,
             )
         elif num_experts is None and num_slots is None:
             self.mlp = MLP(
@@ -171,6 +179,7 @@ class TransformerDecoderLayer(nn.Module):
                 gate_activation,
                 bias=bias,
                 norm=True,
+                norm_type=norm_type,
             )
         else:
             raise ValueError("num_experts and num_slots must be both set or both None")
@@ -223,6 +232,7 @@ class TransformerConvEncoderLayer(TransformerEncoderLayer):
         num_slots: int | None = None,
         stochastic_depth: float = 0.0,
         bias: bool = True,
+        norm_type: NormType = NormType.LAYER_NORM,
         kernel_size: int | Dims2D = 7,
     ):
         super().__init__(
@@ -239,6 +249,7 @@ class TransformerConvEncoderLayer(TransformerEncoderLayer):
             num_slots,
             stochastic_depth,
             bias,
+            norm_type,
         )
         self.conv = ConvNextBlock(
             d_model,
@@ -276,6 +287,7 @@ class TransformerConvDecoderLayer(TransformerDecoderLayer):
         bias: bool = True,
         self_attn: bool = True,
         kv_norm: bool = False,
+        norm_type: NormType = NormType.LAYER_NORM,
         kernel_size: int | Dims2D = 7,
     ):
         super().__init__(
@@ -295,6 +307,7 @@ class TransformerConvDecoderLayer(TransformerDecoderLayer):
             bias,
             self_attn,
             kv_norm,
+            norm_type,
         )
         self.conv = ConvNextBlock(
             d_model,

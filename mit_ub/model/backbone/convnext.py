@@ -8,6 +8,7 @@ from ..activations import DEFAULT_MLP_ACTIVATION_STR, DEFAULT_MLP_GATE_ACTIVATIO
 from ..config import ModelConfig
 from ..helpers import Dims2D, grid_to_tokens, tokens_to_grid
 from ..layers.convnext import ConvNextBlock
+from ..layers.mlp import NormType
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class ConvNextConfig(ModelConfig):
     layer_scale: float | None = None
     stochastic_depth: float = 0.0
     up_depths: Sequence[int] = field(default_factory=lambda: [])
+    norm_type: NormType = cast(NormType, "layernorm")
 
     def instantiate(self) -> "ConvNext":
         return ConvNext(self)
@@ -68,6 +70,7 @@ class ConvNext(nn.Module):
                             bias=self.config.bias,
                             layer_scale=self.config.layer_scale,
                             stochastic_depth=self.config.stochastic_depth,
+                            norm_type=self.config.norm_type,
                         )
                         for _ in range(self.config.depths[i])
                     ]
@@ -98,6 +101,7 @@ class ConvNext(nn.Module):
                             bias=self.config.bias,
                             layer_scale=self.config.layer_scale,
                             stochastic_depth=self.config.stochastic_depth,
+                            norm_type=self.config.norm_type,
                         )
                         for _ in range(self.config.up_depths[i])
                     ]
@@ -112,7 +116,11 @@ class ConvNext(nn.Module):
             ]
         )
 
-        self.embedding_norm = nn.LayerNorm(self.config.dim)
+        self.embedding_norm = (
+            nn.LayerNorm(self.config.dim)
+            if self.config.norm_type == NormType.LAYER_NORM
+            else nn.RMSNorm(self.config.dim)
+        )
 
     def forward(self, x: Tensor, reshape: bool = True) -> Tensor:
         # Patch embed stem
