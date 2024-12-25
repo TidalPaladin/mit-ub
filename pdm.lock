@@ -5,7 +5,7 @@
 groups = ["default", "docs", "quality", "test", "train"]
 strategy = ["cross_platform", "inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:183bc3810ff19472b82ccb347d5d258f3d9d957f7e6d4f91a7d6de1ee5f27d23"
+content_hash = "sha256:8287430c9308f9c01be5e554bb0ba40d8026a32620151bc29bd2cd0630521298"
 
 [[metadata.targets]]
 requires_python = ">=3.11,<3.12"
@@ -1567,6 +1567,22 @@ dependencies = [
 files = [
     {file = "pytorch-lightning-2.4.0.tar.gz", hash = "sha256:6aa897fd9d6dfa7b7b49f37c2f04e13592861831d08deae584dfda423fdb71c8"},
     {file = "pytorch_lightning-2.4.0-py3-none-any.whl", hash = "sha256:9ac7935229ac022ef06994c928217ed37f525ac6700f7d4fc57009624570e655"},
+]
+
+[[package]]
+name = "pytorch-optimizer"
+version = "3.3.2"
+requires_python = ">=3.8"
+summary = "optimizer & lr scheduler & objective function collections in PyTorch"
+groups = ["train"]
+dependencies = [
+    "numpy<=1.24.4; python_version < \"3.9\"",
+    "numpy>1.24.4; python_version >= \"3.9\"",
+    "torch>=1.10; python_version >= \"3.8\"",
+]
+files = [
+    {file = "pytorch_optimizer-3.3.2-py3-none-any.whl", hash = "sha256:8bc424ad50ca5eda9d2893f59ff4e94a3846cc030a09eb3cb2d86ab37a591992"},
+    {file = "pytorch_optimizer-3.3.2.tar.gz", hash = "sha256:0f0d5e5d92d884c65d0034a0b337ac6e6fea855f3f384c7fdb462da8bca04eb2"},
 ]
 
 [[package]]

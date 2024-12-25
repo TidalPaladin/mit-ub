@@ -9,7 +9,7 @@ fit:
     # Train on GPU 1 in BF16 mixed precision for 50k steps, validating every 10 epochs.
     # Sanity validation steps are recommended to trigger torch.compile of the model in inference mode.
     accelerator: gpu
-    devices: [1]
+    devices: [2]
     precision: "bf16-mixed"
     max_steps: 100000
     num_sanity_val_steps: 2
@@ -37,7 +37,7 @@ fit:
       init_args:
         save_dir: ${fit.trainer.default_root_dir}
         project: mit-ub
-        name: mjepa
+        name: mjepa-soap-cifar100
 
   model:
     # Use the MJEPA task with a linear probe
@@ -64,7 +64,7 @@ fit:
 
       # Configure the probe head
       classification_config:
-        num_classes: 10
+        num_classes: 100
         pool_type: attention # Use multi-head attention pooling followed by linear projection to output logits
 
       #checkpoint: ...
@@ -108,7 +108,7 @@ fit:
       # The reciprocal square root scheduler is an "infinite" schedule in that the schedule can be resumed from
       # an existing checkpoint.
       optimizer_init:
-        class_path: bitsandbytes.optim.AdamW8bit
+        class_path: pytorch_optimizer.SOAP
         init_args:
           lr: 0.0005
           weight_decay: 0.05
@@ -145,9 +145,9 @@ fit:
           weight_decay: 1.0
 
   data:
-    class_path: mit_ub.data.CIFAR10DataModule
+    class_path: mit_ub.data.CIFAR100DataModule
     init_args:
-      root: /mnt/data/cifar10/cifar-10-batches-py
+      root: /mnt/data/cifar100/cifar-100-batches-py
       batch_size: 512
       num_workers: 24 # Recommended setting is (num cpu cores) / (num gpus)
       pin_memory: true
