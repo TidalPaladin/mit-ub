@@ -31,7 +31,7 @@ fit:
       init_args:
         save_dir: ${fit.trainer.default_root_dir}
         project: mit-ub
-        name: supervised-cifar100
+        name: supervised
 
   model:
     class_path: mit_ub.tasks.ClassificationTask
@@ -54,7 +54,7 @@ fit:
           qk_norm: false
 
       classification_config:
-        num_classes: 100
+        num_classes: 10
         pool_type: attention
 
       #checkpoint: /mnt/flash/mit-ub/mit-ub/33xplzdj/checkpoints/last.ckpt
@@ -91,9 +91,9 @@ fit:
           weight_decay: 1.0
 
   data:
-    class_path: mit_ub.data.CIFAR100DataModule
+    class_path: mit_ub.data.CIFAR10DataModule
     init_args:
-      root: /mnt/data/cifar100/cifar-100-batches-py
+      root: /mnt/data/cifar10/cifar-10-batches-py
       batch_size: 512
       num_workers: 24
       pin_memory: true
