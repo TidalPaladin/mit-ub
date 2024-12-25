@@ -1,8 +1,22 @@
 import pytest
 import torch
+import torch.nn as nn
 from torch.testing import assert_close
 
-from mit_ub.model.layers.layer_scale import LayerScale
+from mit_ub.model.layers.layer_scale import LayerScale, has_layer_scale
+
+
+@pytest.mark.parametrize(
+    "module, expected",
+    [
+        (nn.Linear(10, 10), False),
+        (LayerScale(10), True),
+        (nn.Sequential(nn.Linear(10, 10), LayerScale(10)), True),
+        (nn.Sequential(nn.Linear(10, 10), nn.Linear(10, 10)), False),
+    ],
+)
+def test_has_layer_scale(module: nn.Module, expected: bool):
+    assert has_layer_scale(module) == expected
 
 
 class TestLayerScale:

@@ -5,9 +5,11 @@ import pytest
 import pytorch_lightning as pl
 import torch
 import torch.distributed as dist
+from deep_helpers.structs import Mode, State
 from torch.multiprocessing import spawn  # type: ignore
 from torch.testing import assert_close
 
+from mit_ub.model.layers import has_layer_scale
 from mit_ub.tasks.jepa import JEPA, JEPAConfig
 
 
@@ -53,6 +55,25 @@ class TestJEPA:
         config = JEPAConfig()
         config.scale = 1
         return JEPA(backbone, optimizer_init=optimizer_init, jepa_config=config)
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            State(Mode.TRAIN),
+            State(Mode.VAL),
+            State(Mode.VAL, sanity_checking=True),
+            State(Mode.TEST),
+        ],
+    )
+    def test_create_metrics(self, task, state):
+        metrics = task.create_metrics(state)
+        base_keys = {"example_sim", "micro_token_sim", "macro_token_sim", "jepa_loss"}
+        train_keys = {"layer_scale_mean", "layer_scale_max"} if has_layer_scale(task.backbone) else set()
+
+        if state.mode == Mode.TRAIN:
+            assert set(metrics.keys()) == base_keys | train_keys
+        else:
+            assert set(metrics.keys()) == base_keys
 
     @pytest.mark.parametrize(
         "momentum_schedule,max_steps,current_step,ema_alpha,expected",

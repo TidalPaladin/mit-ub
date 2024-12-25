@@ -1,6 +1,6 @@
 from .attention import MultiHeadAttention, attention_forward
 from .convnext import ConvNextBlock, convnext_block_forward_2d
-from .layer_scale import LayerScale
+from .layer_scale import LayerScale, has_layer_scale
 from .mlp import MLP, mlp_forward
 from .pool import AveragePool, MaxPool, MultiHeadAttentionPool
 from .pos_enc import RelativeFactorizedPosition, relative_factorized_position_forward
@@ -19,6 +19,7 @@ __all__ = [
     "ConvNextBlock",
     "convnext_block_forward_2d",
     "LayerScale",
+    "has_layer_scale",
     "MLP",
     "mlp_forward",
     "RelativeFactorizedPosition",

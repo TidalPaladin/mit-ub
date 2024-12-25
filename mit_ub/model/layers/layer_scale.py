@@ -5,6 +5,13 @@ from torch import Tensor
 from ..helpers import compile_is_disabled
 
 
+def has_layer_scale(module: nn.Module) -> bool:
+    r"""Checks if a module is a LayerScale layer or contains a LayerScale layer"""
+    if isinstance(module, LayerScale):
+        return True
+    return any(isinstance(layer, LayerScale) for layer in module.modules())
+
+
 @torch.compile(fullgraph=True, disable=compile_is_disabled())
 def layer_scale(x: Tensor, gamma: Tensor, inplace: bool = False) -> Tensor:
     return x.mul_(gamma) if inplace else x * gamma
