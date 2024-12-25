@@ -108,7 +108,7 @@ fit:
       # The reciprocal square root scheduler is an "infinite" schedule in that the schedule can be resumed from
       # an existing checkpoint.
       optimizer_init:
-        class_path: bitsandbytes.optim.AdamW8bit
+        class_path: pytorch_optimizer.SOAP
         init_args:
           lr: 0.0005
           weight_decay: 0.05

@@ -31,6 +31,7 @@ train = [
   "bitsandbytes>=0.44.1",
   "jsonargparse[signatures]",
   "deep-helpers @ git+https://github.com/TidalPaladin/deep-helpers.git",
+  "pytorch-optimizer",
 ]
 [tool.autoflake]
 remove-all-unused-imports = true
