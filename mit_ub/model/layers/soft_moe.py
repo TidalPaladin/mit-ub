@@ -8,7 +8,7 @@ from torch import Tensor
 
 from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
 from ..helpers import compile_backend
-from .mlp import mlp_forward
+from .mlp import NormType, mlp_forward
 
 
 @torch.compile(
@@ -127,6 +127,7 @@ def forward_experts(
     b_gate: Tensor | None = None,
     gate_activation: Activation | None = DEFAULT_MLP_GATE_ACTIVATION,
     training: bool = False,
+    norm_type: NormType = NormType.LAYER_NORM,
 ) -> Tensor:
     """Perform forward pass through experts.
 
@@ -142,6 +143,7 @@ def forward_experts(
         b_gate: Gate bias vectors for each expert (optional).
         gate_activation: Gate activation function (optional).
         training: State of the training flag.
+        norm_type: Type of normalization to apply.
     Returns:
         Output tensor after passing through experts.
 
@@ -181,6 +183,7 @@ def forward_experts(
             activation,
             gate_activation,
             training=training,
+            norm_type=norm_type,
         )
         output.append(o_i)
     return torch.cat(output, dim=1)
@@ -208,13 +211,21 @@ def soft_moe_forward(
     pre_norm_b: Tensor | None = None,
     eps: float = 1e-5,
     training: bool = False,
+    norm_type: NormType = NormType.LAYER_NORM,
 ) -> Tensor:
     if pre_norm_w is not None:
-        x = F.layer_norm(x, x.shape[-1:], pre_norm_w, pre_norm_b, eps)
+        if norm_type == NormType.LAYER_NORM:
+            x = F.layer_norm(x, x.shape[-1:], pre_norm_w, pre_norm_b, eps)
+        elif norm_type == NormType.RMS_NORM:
+            x = F.rms_norm(x, x.shape[-1:], pre_norm_w, eps)
+        else:
+            raise ValueError(f"Unknown norm type: {norm_type}")
 
     nhead = slot_query.shape[0]
     y = dispatch(x, slot_query, w_dispatch_k, w_dispatch_v, nhead, dropout, norm_w, norm_b, eps, training)
-    y = forward_experts(y, w_in, b_in, w_out, b_out, activation, dropout, w_gate, b_gate, gate_activation, training)
+    y = forward_experts(
+        y, w_in, b_in, w_out, b_out, activation, dropout, w_gate, b_gate, gate_activation, training, norm_type
+    )
     y = combine(x, slot_key, y, w_combine_q, nhead, dropout, norm_w, norm_b, eps, training)
     return y
 
@@ -266,11 +277,13 @@ class SoftMoE(nn.Module):
         bias: bool = True,
         qk_norm: bool = False,
         norm: bool = False,
+        norm_type: NormType = NormType.LAYER_NORM,
     ):
         super().__init__()
         self.dropout = dropout
         self.activation = activation
         self.gate_activation = gate_activation
+        self.norm_type = norm_type
 
         if num_slots < num_experts:
             raise ValueError("num_slots must be greater than or equal to num_experts")
@@ -284,7 +297,10 @@ class SoftMoE(nn.Module):
 
         if norm:
             self.w_pre_norm = nn.Parameter(torch.empty(dim))
-            self.b_pre_norm = nn.Parameter(torch.empty(dim))
+            if norm_type == NormType.LAYER_NORM:
+                self.b_pre_norm = nn.Parameter(torch.empty(dim))
+            else:
+                self.register_parameter("b_pre_norm", None)
 
         # Dispatch
         self.slot_query = nn.Parameter(torch.empty(nhead, num_slots, dim // nhead))
@@ -376,7 +392,8 @@ class SoftMoE(nn.Module):
             f"gate_act={self.gate_activation.__name__ if self.gate_activation is not None else None}, "
             f"bias={self.bias}, "
             f"norm={self.norm}, "
-            f"qk_norm={self.qk_norm}"
+            f"qk_norm={self.qk_norm}, "
+            f"norm_type={self.norm_type}"
         )
 
     def forward(self, x: Tensor) -> Tensor:
@@ -401,4 +418,5 @@ class SoftMoE(nn.Module):
             self.w_pre_norm,
             self.b_pre_norm,
             training=self.training,
+            norm_type=self.norm_type,
         )

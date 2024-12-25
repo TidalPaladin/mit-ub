@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.testing import assert_close
 
-from mit_ub.model.layers.mlp import MLP, mlp_forward
+from mit_ub.model.layers.mlp import MLP, NormType, mlp_forward
 
 
 @pytest.mark.parametrize("dropout", [0.0, 0.1])
@@ -52,11 +52,14 @@ class TestMLP:
     @pytest.mark.parametrize("bias", [False, True])
     @pytest.mark.parametrize("dropout", [0.0, 0.1])
     @pytest.mark.parametrize("norm", [False, True])
-    def test_forward(self, device, gate_activation, bias, dropout, norm):
+    @pytest.mark.parametrize("norm_type", [NormType.LAYER_NORM, NormType.RMS_NORM])
+    def test_forward(self, device, gate_activation, bias, dropout, norm, norm_type):
         torch.random.manual_seed(0)
         B, L, D = 2, 8, 32
         x = torch.randn(B, L, D).to(device)
-        layer = MLP(D, 2 * D, D, gate_activation=gate_activation, bias=bias, dropout=dropout, norm=norm).to(device)
+        layer = MLP(
+            D, 2 * D, D, gate_activation=gate_activation, bias=bias, dropout=dropout, norm=norm, norm_type=norm_type
+        ).to(device)
         y = layer(x.clone())
         assert y.shape == x.shape
         assert not y.isnan().any()
@@ -139,4 +142,7 @@ class TestMLP:
     def test_extra_repr(self):
         layer = MLP(32, 64, 32)
         result = str(layer)
-        assert result == "MLP(in=32, hidden=64, out=32, dropout=0.0, act=relu2, gate_act=None, bias=True, norm=False)"
+        assert (
+            result
+            == "MLP(in=32, hidden=64, out=32, dropout=0.0, act=relu2, gate_act=None, bias=True, norm=False, norm_type=layernorm)"
+        )

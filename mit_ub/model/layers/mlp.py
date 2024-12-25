@@ -1,3 +1,5 @@
+from enum import StrEnum
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,6 +7,11 @@ from torch import Tensor
 
 from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
 from ..helpers import compile_backend, compile_is_disabled
+
+
+class NormType(StrEnum):
+    LAYER_NORM = "layernorm"
+    RMS_NORM = "rmsnorm"
 
 
 @torch.compile(
@@ -33,9 +40,15 @@ def mlp_forward(
     b_norm: Tensor | None = None,
     eps: float = 1e-5,
     training: bool = False,
+    norm_type: NormType = NormType.LAYER_NORM,
 ) -> Tensor:
     if w_norm is not None:
-        x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
+        if norm_type == NormType.LAYER_NORM:
+            x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
+        elif norm_type == NormType.RMS_NORM:
+            x = F.rms_norm(x, x.shape[-1:], weight=w_norm, eps=eps)
+        else:
+            raise ValueError(f"Unknown norm type: {norm_type}")
 
     y = F.linear(x, w1, b1)
     y = activation(y)
@@ -64,7 +77,8 @@ class MLP(nn.Module):
         activation: Activation function to apply after the first linear layer.
         gate_activation: Activation function for the gating mechanism, or ``None`` for no gating.
         bias: Whether to use bias in the linear layers.
-        norm: Whether to apply layer normalization to the input.
+        norm: Whether to apply normalization to the input.
+        norm_type: Type of pre-normalization to apply.
 
     Basic MLP:
         >>> mlp = MLP(10, 20, 10))
@@ -83,11 +97,13 @@ class MLP(nn.Module):
         gate_activation: Activation | None = DEFAULT_MLP_GATE_ACTIVATION,
         bias: bool = True,
         norm: bool = False,
+        norm_type: NormType = NormType.LAYER_NORM,
     ):
         super().__init__()
         self.dropout = dropout
         self.activation = activation
         self.gate_activation = gate_activation
+        self.norm_type = norm_type
 
         # Register optional parameters
         for prefix in ("w_", "b_"):
@@ -99,7 +115,10 @@ class MLP(nn.Module):
 
         if norm:
             self.w_norm = nn.Parameter(torch.empty(in_features))
-            self.b_norm = nn.Parameter(torch.empty(in_features))
+            if norm_type == NormType.RMS_NORM:
+                self.b_norm = nn.Parameter(torch.empty(in_features))
+            else:
+                self.register_parameter("b_norm", None)
 
         if bias:
             self.b_in = nn.Parameter(torch.empty(hidden_features))
@@ -151,7 +170,8 @@ class MLP(nn.Module):
             f"act={self.activation.__name__}, "
             f"gate_act={self.gate_activation.__name__ if self.gate_activation is not None else None}, "
             f"bias={self.bias}, "
-            f"norm={self.norm}"
+            f"norm={self.norm}, "
+            f"norm_type={self.norm_type}"
         )
 
     def forward(self, x: Tensor) -> Tensor:
@@ -169,4 +189,5 @@ class MLP(nn.Module):
             self.w_norm,
             self.b_norm,
             training=self.training,
+            norm_type=self.norm_type,
         )

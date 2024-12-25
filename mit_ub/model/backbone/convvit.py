@@ -86,6 +86,7 @@ class ConvViT(AdaptiveViT):
             bias=self.config.bias,
             kernel_size=self.config.kernel_size,
             self_attn=False,
+            norm_type=self.config.norm_type,
         )
         _kwargs.update(kwargs)
         layer = TransformerConvDecoderLayer(**_kwargs)

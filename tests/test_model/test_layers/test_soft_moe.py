@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from torch.testing import assert_close
 
-from mit_ub.model.layers.mlp import mlp_forward
+from mit_ub.model.layers.mlp import NormType, mlp_forward
 from mit_ub.model.layers.soft_moe import SoftMoE, forward_experts
 
 
@@ -46,14 +46,15 @@ class TestSoftMoE:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
-    def test_forward(self, device):
+    @pytest.mark.parametrize("norm_type", [NormType.LAYER_NORM, NormType.RMS_NORM])
+    def test_forward(self, device, norm_type):
         B, L, D = 1, 128, 128
         nhead = D // 32
         num_experts = 4
         num_slots = L // 2
 
         x = torch.randn(B, L, D, device=device)
-        layer = SoftMoE(D, D, num_experts, num_slots, nhead=nhead).to(device)
+        layer = SoftMoE(D, D, num_experts, num_slots, nhead=nhead, norm_type=norm_type).to(device)
 
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(x)
@@ -151,5 +152,5 @@ class TestSoftMoE:
         result = str(layer)
         assert (
             result
-            == "SoftMoE(in=32, hidden=64, out=32, experts=4, slots=16, nhead=8, dropout=0.0, act=relu2, gate_act=None, bias=True, norm=False, qk_norm=False)"
+            == "SoftMoE(in=32, hidden=64, out=32, experts=4, slots=16, nhead=8, dropout=0.0, act=relu2, gate_act=None, bias=True, norm=False, qk_norm=False, norm_type=layernorm)"
         )
