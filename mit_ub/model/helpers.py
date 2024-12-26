@@ -139,5 +139,4 @@ def set_checkpointing(module: nn.Module, checkpoint: bool) -> Set[str]:
         if isinstance(child, Checkpointable):
             child.checkpoint = checkpoint
             names.add(name)
-    print(names)
     return names
