@@ -1,10 +1,11 @@
 import torch
 from torch import Tensor
 
-from ..helpers import compile_is_disabled
+
+# NOTE: Do not attempt to torch.compile these methods. Since they change the shape of the input
+# and have diverging train/inference behaviors, torch.compile has all kinds of issues.
 
 
-@torch.compile(fullgraph=True, disable=compile_is_disabled())
 def stochastic_depth_indices(x: Tensor, p: float) -> Tensor:
     r"""Generates a tensor of batch indices to retain when applying stochastic depth"""
     B = x.shape[0]
@@ -13,13 +14,11 @@ def stochastic_depth_indices(x: Tensor, p: float) -> Tensor:
     return indices
 
 
-@torch.compile(fullgraph=True, disable=compile_is_disabled())
 def apply_stochastic_depth(x: Tensor, indices: Tensor, training: bool = True) -> Tensor:
     y = x[indices] if training and x.shape[0] > indices.shape[0] else x
     return y
 
 
-@torch.compile(fullgraph=True, disable=compile_is_disabled())
 def unapply_stochastic_depth(x: Tensor, indices: Tensor, size: int, training: bool = True) -> Tensor:
     if training and x.shape[0] < size:
         result = x.new_zeros(size, *x.shape[1:])

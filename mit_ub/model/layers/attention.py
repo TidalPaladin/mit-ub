@@ -40,7 +40,6 @@ def attention_forward(
     mask: Tensor | None = None,
     norm_type: NormType = NormType.LAYER_NORM,
     w_layer_scale: Tensor | None = None,
-    stochastic_depth: float = 0.0,
     # fmt: on
 ) -> Tensor:
     """
@@ -72,7 +71,6 @@ def attention_forward(
         mask: Attention mask
         norm_type: Type of pre-normalization to apply.
         w_layer_scale: Optional layer scale weight
-        stochastic_depth: Dropout probability for stochastic depth
 
     Shapes:
         q, k, v: :math:`(B, L, D)`, or :math:`(B, L, 3*D)` when packed QKV tensor
@@ -85,17 +83,9 @@ def attention_forward(
     Returns:
         Output tensor of shape :math:`(B, L, D)`
     """
-    B = q.shape[0]
+    q.shape[0]
     is_packed = k is None and v is None and w_k is None and w_v is None and b_k is None and b_v is None
     head_dim = q.shape[-1] // num_heads
-
-    # Apply stochastic depth
-    indices = stochastic_depth_indices(q, stochastic_depth)
-    q = apply_stochastic_depth(q, indices, training)
-    if not is_packed:
-        assert k is not None and v is not None
-        k = apply_stochastic_depth(k, indices, training)
-        v = apply_stochastic_depth(v, indices, training)
 
     # Pre-normalization
     if pre_norm_w is not None:
@@ -155,9 +145,6 @@ def attention_forward(
     # Layer scale
     if w_layer_scale is not None:
         o = o * w_layer_scale
-
-    # Unapply stochastic depth
-    o = unapply_stochastic_depth(o, indices, B, training)
 
     return o
 
@@ -371,14 +358,27 @@ class MultiHeadAttention(nn.Module, Checkpointable):
         )
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor, mask: Tensor | None = None) -> Tensor:
+        B = q.shape[0]
+
+        if self.training and self.stochastic_depth > 0.0:
+            indices = stochastic_depth_indices(q, self.stochastic_depth)
+        else:
+            indices = None
+
+        is_self_attn = q is k and k is v
+        q = apply_stochastic_depth(q, indices, training=self.training) if indices is not None else q
+
         # Self attention
-        if q is k and k is v:
+        if is_self_attn:
             assert self.w_in is not None
             _k = _v = None
         # Cross attention
         else:
             _k = k
             _v = v
+            if indices is not None:
+                _k = apply_stochastic_depth(_k, indices, training=self.training)
+                _v = apply_stochastic_depth(_v, indices, training=self.training)
 
         # Handle selection of packed or unpacked QKV
         w_q = self.w_q if self.w_in is None else self.w_in
@@ -407,14 +407,11 @@ class MultiHeadAttention(nn.Module, Checkpointable):
                 mask,
                 self.norm_type,
                 self.w_layer_scale,
-                self.stochastic_depth,
                 use_reentrant=False,
                 # fmt: on
             )
-            assert isinstance(result, Tensor)
-            return result
         else:
-            return attention_forward(
+            result = attention_forward(
                 # fmt: off
                 q, _k, _v,
                 w_q, w_k, w_v,
@@ -431,6 +428,11 @@ class MultiHeadAttention(nn.Module, Checkpointable):
                 mask,
                 self.norm_type,
                 self.w_layer_scale,
-                self.stochastic_depth,
                 # fmt: on
             )
+        assert isinstance(result, Tensor)
+
+        if indices is not None:
+            result = unapply_stochastic_depth(result, indices, B, training=self.training)
+
+        return result
