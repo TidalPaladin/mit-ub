@@ -160,7 +160,7 @@ class TestAdaptiveViT:
         # Set the adaptive model to process fixed tokens at native resolution.
         # Layer scale at 1e-9 should shut off the contribution of the dynamic tokens.
         # NOTE: Must set target_shape to match the input size for this to work.
-        config = replace(config, layer_scale_adaptive=1e-9, target_shape=(H, W))
+        config = replace(config, layer_scale=1e-9, target_shape=(H, W))
         model = AdaptiveViT(config)
         baseline = ViT(config)
 

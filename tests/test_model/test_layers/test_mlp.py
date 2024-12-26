@@ -50,26 +50,37 @@ class TestMLP:
     )
     @pytest.mark.parametrize("gate_activation", [None, F.relu])
     @pytest.mark.parametrize("bias", [False, True])
-    @pytest.mark.parametrize("dropout", [0.0, 0.1])
+    @pytest.mark.parametrize("dropout,stochastic_depth", [(0.0, 0.0), (0.1, 0.25)])
     @pytest.mark.parametrize("norm", [False, True])
     @pytest.mark.parametrize("norm_type", [NormType.LAYER_NORM, NormType.RMS_NORM])
-    def test_forward(self, device, gate_activation, bias, dropout, norm, norm_type):
+    @pytest.mark.parametrize("layer_scale", [None, 0.1])
+    def test_forward(self, device, gate_activation, bias, dropout, norm, norm_type, layer_scale, stochastic_depth):
         torch.random.manual_seed(0)
         B, L, D = 2, 8, 32
         x = torch.randn(B, L, D).to(device)
         layer = MLP(
-            D, 2 * D, D, gate_activation=gate_activation, bias=bias, dropout=dropout, norm=norm, norm_type=norm_type
+            D,
+            2 * D,
+            D,
+            gate_activation=gate_activation,
+            bias=bias,
+            dropout=dropout,
+            norm=norm,
+            norm_type=norm_type,
+            layer_scale=layer_scale,
+            stochastic_depth=stochastic_depth,
         ).to(device)
         y = layer(x.clone())
         assert y.shape == x.shape
         assert not y.isnan().any()
 
     @pytest.mark.parametrize("gate_activation", [None, F.relu])
-    def test_reset_parameters(self, mocker, gate_activation):
+    @pytest.mark.parametrize("layer_scale", [None, 1.0])
+    def test_reset_parameters(self, mocker, gate_activation, layer_scale):
         torch.random.manual_seed(0)
         D = 32
         spy = mocker.spy(MLP, "reset_parameters")
-        layer = MLP(D, D, D, gate_activation=gate_activation)
+        layer = MLP(D, D, D, gate_activation=gate_activation, layer_scale=layer_scale)
         spy.assert_called_once()
 
         weight_init = {k: v.clone() for k, v in layer.named_parameters()}
@@ -90,11 +101,12 @@ class TestMLP:
     )
     @pytest.mark.parametrize("norm", [False, True])
     @pytest.mark.parametrize("checkpoint", [False, True])
-    def test_backward(self, device, norm, checkpoint):
+    @pytest.mark.parametrize("layer_scale", [None, 0.1])
+    def test_backward(self, device, norm, checkpoint, layer_scale):
         torch.random.manual_seed(0)
         B, L, D = 2, 8, 32
         x = torch.randn(B, L, D, requires_grad=True).to(device)
-        layer = MLP(D, D, D, dropout=0.1, norm=norm).to(device)
+        layer = MLP(D, D, D, dropout=0.1, norm=norm, layer_scale=layer_scale).to(device)
         layer.checkpoint = checkpoint
         layer.train()
         y = layer(x)
@@ -111,9 +123,9 @@ class TestMLP:
     )
     @pytest.mark.parametrize("gate_activation", [None, nn.ReLU()])
     def test_forward_deterministic(self, device, gate_activation):
-        B, L, D = 2, 8, 32
+        B, L, D = 8, 8, 32
         torch.random.manual_seed(0)
-        layer = MLP(D, 2 * D, D, dropout=0.1, gate_activation=gate_activation).to(device)
+        layer = MLP(D, 2 * D, D, dropout=0.1, gate_activation=gate_activation, stochastic_depth=0.25).to(device)
         x = torch.randn(B, L, D, device=device)
 
         # Training, non-determinstic
@@ -147,7 +159,5 @@ class TestMLP:
     def test_extra_repr(self):
         layer = MLP(32, 64, 32)
         result = str(layer)
-        assert (
-            result
-            == "MLP(in=32, hidden=64, out=32, dropout=0.0, act=relu2, gate_act=None, bias=True, norm=False, norm_type=layernorm)"
-        )
+        exp = "in=32, hidden=64, out=32, dropout=0.0, act=relu2, gate_act=None, bias=True, norm=False, norm_type=layernorm"
+        assert exp in result

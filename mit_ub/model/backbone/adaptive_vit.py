@@ -40,7 +40,6 @@ def resize_mask(
 @dataclass(frozen=True)
 class AdaptiveViTConfig(ViTConfig):
     target_shape: Sequence[int] | None = None
-    layer_scale_adaptive: float | None = 1e-4
     share_layers: bool = False
 
     def __post_init__(self) -> None:
@@ -76,12 +75,6 @@ class AdaptiveViT(ViT):
         # We also override the layer scale of the cross attention so that the initialization condition
         # is close to identity.
         self.blocks = nn.ModuleList([self.create_decoder_layer(i, kv_norm=True) for i in range(config.depth)])
-        for block in self.blocks:
-            block.layer_scale_cross = (
-                LayerScale(config.dim, config.layer_scale_adaptive)
-                if config.layer_scale_adaptive is not None
-                else nn.Identity()
-            )
 
         # Blocks updating high res (dynamic) tokens with cross attention to fixed (coarse) tokens
         self.dynamic_blocks = nn.ModuleList(
@@ -102,9 +95,7 @@ class AdaptiveViT(ViT):
 
         # Initialize the dynamic pathway to have low contribution
         self.dynamic_output_scale = (
-            LayerScale(config.dim, config.layer_scale_adaptive)
-            if config.layer_scale_adaptive is not None
-            else nn.Identity()
+            LayerScale(config.dim, config.layer_scale) if config.layer_scale is not None else nn.Identity()
         )
 
         if config.checkpoint:

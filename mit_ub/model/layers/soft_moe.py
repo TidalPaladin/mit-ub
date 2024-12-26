@@ -7,6 +7,7 @@ from torch import Tensor
 from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
 from .attention import MultiHeadAttention
 from .mlp import MLP, NormType
+from .stochastic_depth import apply_stochastic_depth, stochastic_depth_indices, unapply_stochastic_depth
 
 
 class SoftMoE(nn.Module):
@@ -58,12 +59,15 @@ class SoftMoE(nn.Module):
         qk_norm: bool = False,
         norm: bool = False,
         norm_type: NormType = NormType.LAYER_NORM,
+        layer_scale: float | None = None,
+        stochastic_depth: float = 0.0,
     ):
         super().__init__()
         if num_slots < num_experts:
             raise ValueError("num_slots must be greater than or equal to num_experts")
         if not num_slots % num_experts == 0:
             raise ValueError(f"num_slots must be divisible by num_experts, got {num_slots} and {num_experts}")
+        self.stochastic_depth = stochastic_depth
 
         self.dispatch = MultiHeadAttention(
             dim,
@@ -90,6 +94,8 @@ class SoftMoE(nn.Module):
             norm=norm,
             norm_type=norm_type,
             kv_norm=norm,
+            # Layer scale only on the combine step
+            layer_scale=layer_scale,
         )
         self.experts = nn.ModuleList(
             [
@@ -134,6 +140,14 @@ class SoftMoE(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         B, L, D = x.shape
+        if self.stochastic_depth > 0.0 and self.training:
+            indices = stochastic_depth_indices(x, self.stochastic_depth)
+            x = apply_stochastic_depth(x, indices)
+            B_orig = B
+            B = x.shape[0]
+        else:
+            indices = None
+            B_orig = B
 
         # Dispatch (pre-normalized by MHA, residual on slots)
         q = self.slot_query.expand(B, -1, -1)
@@ -153,4 +167,11 @@ class SoftMoE(nn.Module):
         o = o + torch.cat(output, dim=1)
 
         # Combine (pre-normalized by MHA, no residual)
-        return self.combine(x, o, o)
+        o = self.combine(x, o, o)
+
+        # Unapply stochastic depth
+        if self.stochastic_depth > 0.0 and self.training:
+            assert indices is not None
+            o = unapply_stochastic_depth(o, indices, B_orig)
+
+        return o
