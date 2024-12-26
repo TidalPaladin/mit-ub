@@ -106,6 +106,7 @@ filterwarnings = [
 TRITON_DEBUG = "1"
 TORCH_LOGS = "recompiles,dynamic"
 TORCH_COMPILE = "0"
+TORCH_COMPILE_MAX_AUTOTUNE = "0"
 
 [tool.coverage.run]
 omit = [

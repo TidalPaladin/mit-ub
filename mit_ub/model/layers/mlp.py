@@ -53,11 +53,8 @@ def mlp_forward(
 ) -> Tensor:
     # Apply stochastic depth
     B = x.shape[0]
-    if stochastic_depth > 0.0 and training:
-        indices = stochastic_depth_indices(x, stochastic_depth)
-        x = apply_stochastic_depth(x, indices)
-    else:
-        indices = None
+    indices = stochastic_depth_indices(x, stochastic_depth)
+    x = apply_stochastic_depth(x, indices, training)
 
     # Pre-normalization
     if w_norm is not None:
@@ -89,9 +86,7 @@ def mlp_forward(
         y = y * w_layer_scale
 
     # Unapply stochastic depth
-    if stochastic_depth > 0.0 and training:
-        assert indices is not None
-        y = unapply_stochastic_depth(y, indices, B)
+    y = unapply_stochastic_depth(y, indices, B, training)
 
     return y
 
