@@ -49,13 +49,7 @@ def mlp_forward(
     training: bool = False,
     norm_type: NormType = NormType.LAYER_NORM,
     w_layer_scale: Tensor | None = None,
-    stochastic_depth: float = 0.0,
 ) -> Tensor:
-    # Apply stochastic depth
-    B = x.shape[0]
-    indices = stochastic_depth_indices(x, stochastic_depth)
-    x = apply_stochastic_depth(x, indices, training)
-
     # Pre-normalization
     if w_norm is not None:
         if norm_type == NormType.LAYER_NORM:
@@ -84,9 +78,6 @@ def mlp_forward(
     # Layer scale
     if w_layer_scale is not None:
         y = y * w_layer_scale
-
-    # Unapply stochastic depth
-    y = unapply_stochastic_depth(y, indices, B, training)
 
     return y
 
@@ -222,6 +213,13 @@ class MLP(nn.Module, Checkpointable):
         )
 
     def forward(self, x: Tensor) -> Tensor:
+        B = x.shape[0]
+        if self.training and self.stochastic_depth > 0.0:
+            indices = stochastic_depth_indices(x, self.stochastic_depth)
+            x = apply_stochastic_depth(x, indices, training=self.training)
+        else:
+            indices = None
+
         if self.training and self.checkpoint:
             result = checkpoint(
                 mlp_forward,
@@ -241,13 +239,10 @@ class MLP(nn.Module, Checkpointable):
                 self.training,
                 self.norm_type,
                 self.w_layer_scale,
-                self.stochastic_depth,
                 use_reentrant=False,
             )
-            assert isinstance(result, Tensor)
-            return result
         else:
-            return mlp_forward(
+            result = mlp_forward(
                 x,
                 self.w_in,
                 self.w_out,
@@ -264,5 +259,10 @@ class MLP(nn.Module, Checkpointable):
                 self.training,
                 self.norm_type,
                 self.w_layer_scale,
-                self.stochastic_depth,
             )
+        assert isinstance(result, Tensor)
+
+        if indices is not None:
+            result = unapply_stochastic_depth(result, indices, B, training=self.training)
+
+        return result
