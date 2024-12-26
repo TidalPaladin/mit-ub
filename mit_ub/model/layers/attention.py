@@ -90,15 +90,12 @@ def attention_forward(
     head_dim = q.shape[-1] // num_heads
 
     # Apply stochastic depth
-    if stochastic_depth > 0.0 and training:
-        indices = stochastic_depth_indices(q, stochastic_depth)
-        q = apply_stochastic_depth(q, indices)
-        if not is_packed:
-            assert k is not None and v is not None
-            k = apply_stochastic_depth(k, indices)
-            v = apply_stochastic_depth(v, indices)
-    else:
-        indices = None
+    indices = stochastic_depth_indices(q, stochastic_depth)
+    q = apply_stochastic_depth(q, indices, training)
+    if not is_packed:
+        assert k is not None and v is not None
+        k = apply_stochastic_depth(k, indices, training)
+        v = apply_stochastic_depth(v, indices, training)
 
     # Pre-normalization
     if pre_norm_w is not None:
@@ -160,9 +157,7 @@ def attention_forward(
         o = o * w_layer_scale
 
     # Unapply stochastic depth
-    if stochastic_depth > 0.0 and training:
-        assert indices is not None
-        o = unapply_stochastic_depth(o, indices, B)
+    o = unapply_stochastic_depth(o, indices, B, training)
 
     return o
 
