@@ -167,11 +167,13 @@ class TestConvNext:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
+    @pytest.mark.parametrize("checkpoint", [False, True])
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    def test_backward(self, device, dtype, config, exp):
+    def test_backward(self, device, dtype, config, exp, checkpoint):
         torch.random.manual_seed(42)
         B, C, H, W = 1, 1, 256, 256
         x = torch.randn(B, C, H, W, requires_grad=True)
+        config = replace(config, checkpoint=checkpoint)
         model = ConvNext(config)
         with torch.autocast(device_type=device, dtype=dtype, enabled=True):
             out = model(x)

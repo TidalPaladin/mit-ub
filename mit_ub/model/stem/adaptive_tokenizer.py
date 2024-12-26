@@ -9,7 +9,7 @@ from einops import rearrange
 from torch import Tensor
 
 from ..activations import Activation
-from ..helpers import compile_backend, compile_is_disabled, to_tuple
+from ..helpers import compile_backend, compile_is_disabled, max_autotune, to_tuple
 from ..layers.pos_enc import (
     DEFAULT_POS_ENC_ACTIVATION,
     RelativeFactorizedPosition,
@@ -28,7 +28,8 @@ class PoolType(StrEnum):
     backend=compile_backend(),
     disable=compile_is_disabled(),
     options={
-        "max_autotune": True,
+        "max_autotune": max_autotune(),
+        "triton.cudagraph_trees": max_autotune(),
         "shape_padding": True,
     },
 )

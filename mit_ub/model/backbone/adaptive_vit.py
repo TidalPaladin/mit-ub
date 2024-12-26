@@ -7,7 +7,7 @@ from torch import Tensor
 from torch.nn import functional as F
 
 from ...tokens import apply_mask, create_mask, mask_is_ragged, unapply_mask
-from ..helpers import compile_is_disabled
+from ..helpers import compile_is_disabled, set_checkpointing
 from ..layers.layer_scale import LayerScale
 from ..stem import AdaptiveTokenizer2d, AdaptiveTokenizer3d, PoolType
 from .convnext import grid_to_tokens, tokens_to_grid
@@ -106,6 +106,9 @@ class AdaptiveViT(ViT):
             if config.layer_scale_adaptive is not None
             else nn.Identity()
         )
+
+        if config.checkpoint:
+            set_checkpointing(self, config.checkpoint)
 
     @property
     def is_sharing_layers(self) -> bool:

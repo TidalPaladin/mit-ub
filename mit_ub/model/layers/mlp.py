@@ -1,12 +1,17 @@
 from enum import StrEnum
+from typing import Final
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
-from ..helpers import compile_backend, compile_is_disabled
+from ..helpers import Checkpointable, compile_backend, compile_is_disabled, max_autotune
+
+
+NORM_EPS: Final = 1e-5
 
 
 class NormType(StrEnum):
@@ -18,10 +23,10 @@ class NormType(StrEnum):
     fullgraph=True,
     backend=compile_backend(),
     options={
-        "max_autotune": True,
+        "max_autotune": max_autotune(),
         "epilogue_fusion": True,
         "shape_padding": True,
-        "triton.cudagraph_trees": True,
+        "triton.cudagraph_trees": max_autotune(),
     },
     disable=compile_is_disabled(),
 )
@@ -38,7 +43,7 @@ def mlp_forward(
     gate_activation: Activation | None = DEFAULT_MLP_GATE_ACTIVATION,
     w_norm: Tensor | None = None,
     b_norm: Tensor | None = None,
-    eps: float = 1e-5,
+    eps: float = NORM_EPS,
     training: bool = False,
     norm_type: NormType = NormType.LAYER_NORM,
 ) -> Tensor:
@@ -65,7 +70,7 @@ def mlp_forward(
     return y
 
 
-class MLP(nn.Module):
+class MLP(nn.Module, Checkpointable):
     """
     A multi-layer perceptron (MLP) module with optional gating mechanism and dropout.
 
@@ -104,6 +109,7 @@ class MLP(nn.Module):
         self.activation = activation
         self.gate_activation = gate_activation
         self.norm_type = norm_type
+        self.checkpoint = False
 
         # Register optional parameters
         for prefix in ("w_", "b_"):
@@ -175,19 +181,43 @@ class MLP(nn.Module):
         )
 
     def forward(self, x: Tensor) -> Tensor:
-        return mlp_forward(
-            x,
-            self.w_in,
-            self.w_out,
-            self.b_in,
-            self.b_out,
-            self.w_gate,
-            self.b_gate,
-            self.dropout,
-            self.activation,
-            self.gate_activation,
-            self.w_norm,
-            self.b_norm,
-            training=self.training,
-            norm_type=self.norm_type,
-        )
+        if self.training and self.checkpoint:
+            result = checkpoint(
+                mlp_forward,
+                x,
+                self.w_in,
+                self.w_out,
+                self.b_in,
+                self.b_out,
+                self.w_gate,
+                self.b_gate,
+                self.dropout,
+                self.activation,
+                self.gate_activation,
+                self.w_norm,
+                self.b_norm,
+                NORM_EPS,
+                self.training,
+                self.norm_type,
+                use_reentrant=False,
+            )
+            assert isinstance(result, Tensor)
+            return result
+        else:
+            return mlp_forward(
+                x,
+                self.w_in,
+                self.w_out,
+                self.b_in,
+                self.b_out,
+                self.w_gate,
+                self.b_gate,
+                self.dropout,
+                self.activation,
+                self.gate_activation,
+                self.w_norm,
+                self.b_norm,
+                NORM_EPS,
+                self.training,
+                self.norm_type,
+            )

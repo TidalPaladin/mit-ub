@@ -1,8 +1,9 @@
 import math
 import os
-from typing import Iterable, Literal, Sequence, Sized, Tuple, TypeVar, cast, overload
+from typing import Iterable, Literal, Protocol, Sequence, Set, Sized, Tuple, TypeVar, cast, overload, runtime_checkable
 
 import torch
+import torch.nn as nn
 from einops import rearrange
 from torch import Tensor
 
@@ -28,6 +29,14 @@ def compile_backend() -> str:
     Set ``TORCH_COMPILE=0`` to disable ``torch.compile``.
     """
     return os.getenv("TORCH_COMPILE_BACKEND", "inductor")
+
+
+def max_autotune() -> bool:
+    """Gets state of "max_autotune" for ``torch.compile`` from environment variable.
+
+    Set ``TORCH_COMPILE_MAX_AUTOTUNE=0`` to disable "max_autotune" for ``torch.compile``.
+    """
+    return os.getenv("TORCH_COMPILE_MAX_AUTOTUNE", "1").lower() == "1"
 
 
 @overload
@@ -109,3 +118,26 @@ def grid_to_tokens(x: Tensor) -> Tensor:
         The token sequence.
     """
     return rearrange(x, "b c ... -> b (...) c")
+
+
+@runtime_checkable
+class Checkpointable(Protocol):
+    checkpoint: bool
+
+
+def set_checkpointing(module: nn.Module, checkpoint: bool) -> Set[str]:
+    r"""Recursively set checkpointing for all modules in the module hierarchy.
+
+    Returns:
+        Names of child modules that were set to checkpoint.
+    """
+    if isinstance(module, Checkpointable):
+        module.checkpoint = checkpoint
+
+    names = set()
+    for name, child in module.named_modules():
+        if isinstance(child, Checkpointable):
+            child.checkpoint = checkpoint
+            names.add(name)
+    print(names)
+    return names
