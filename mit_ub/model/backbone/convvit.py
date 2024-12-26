@@ -6,7 +6,6 @@ from torch import Tensor
 from torch.nn import functional as F
 
 from ..helpers import Dims2D, set_checkpointing
-from ..layers.layer_scale import LayerScale
 from ..layers.transformer import TransformerConvDecoderLayer, TransformerDecoderLayer
 from .adaptive_vit import AdaptiveViT, AdaptiveViTConfig
 from .convnext import grid_to_tokens, tokens_to_grid
@@ -35,14 +34,6 @@ class ConvViT(AdaptiveViT):
         )
         if config.share_layers:
             self.set_shared_layers()
-
-        # Override the layer scale of the ConvNext mixer
-        for block in self.dynamic_blocks:
-            block.conv.layer_scale = (
-                LayerScale(self.config.dim, config.layer_scale_adaptive)
-                if config.layer_scale_adaptive is not None
-                else nn.Identity()
-            )
 
         if config.checkpoint:
             set_checkpointing(self, config.checkpoint)

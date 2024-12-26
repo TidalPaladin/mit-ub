@@ -9,6 +9,7 @@ from torch.utils.checkpoint import checkpoint
 
 from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
 from ..helpers import Checkpointable, compile_backend, compile_is_disabled, max_autotune
+from .layer_scale import LayerScale
 
 
 NORM_EPS: Final = 1e-5
@@ -46,6 +47,7 @@ def mlp_forward(
     eps: float = NORM_EPS,
     training: bool = False,
     norm_type: NormType = NormType.LAYER_NORM,
+    w_layer_scale: Tensor | None = None,
 ) -> Tensor:
     if w_norm is not None:
         if norm_type == NormType.LAYER_NORM:
@@ -67,6 +69,10 @@ def mlp_forward(
     y = F.dropout(y, p=dropout, training=training, inplace=True)
     y = F.linear(y, w2, b2)
     y = F.dropout(y, p=dropout, training=training, inplace=True)
+
+    if w_layer_scale is not None:
+        y = y * w_layer_scale
+
     return y
 
 
@@ -103,6 +109,7 @@ class MLP(nn.Module, Checkpointable):
         bias: bool = True,
         norm: bool = False,
         norm_type: NormType = NormType.LAYER_NORM,
+        layer_scale: float | None = None,
     ):
         super().__init__()
         self.dropout = dropout
@@ -134,6 +141,11 @@ class MLP(nn.Module, Checkpointable):
             self.w_gate = nn.Parameter(torch.empty(hidden_features, in_features))
             self.b_gate = nn.Parameter(torch.empty(hidden_features)) if bias else None
 
+        if layer_scale is not None:
+            self.layer_scale = LayerScale(out_features, gamma=layer_scale)
+        else:
+            self.register_module("layer_scale", None)
+
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -144,8 +156,13 @@ class MLP(nn.Module, Checkpointable):
                 nn.init.ones_(param)
             elif name.startswith("w_"):
                 nn.init.xavier_uniform_(param)
+            elif name.startswith("layer_scale"):
+                pass
             else:
                 raise ValueError(f"Unsure how to initialize {name}")
+
+        if self.layer_scale is not None:
+            self.layer_scale.reset_parameters()
 
     @property
     def in_features(self) -> int:
@@ -166,6 +183,10 @@ class MLP(nn.Module, Checkpointable):
     @property
     def bias(self) -> bool:
         return self.b_in is not None
+
+    @property
+    def w_layer_scale(self) -> Tensor | None:
+        return self.layer_scale.gamma if self.layer_scale is not None else None
 
     def extra_repr(self) -> str:
         return (
@@ -199,6 +220,7 @@ class MLP(nn.Module, Checkpointable):
                 NORM_EPS,
                 self.training,
                 self.norm_type,
+                self.w_layer_scale,
                 use_reentrant=False,
             )
             assert isinstance(result, Tensor)
@@ -220,4 +242,5 @@ class MLP(nn.Module, Checkpointable):
                 NORM_EPS,
                 self.training,
                 self.norm_type,
+                self.w_layer_scale,
             )

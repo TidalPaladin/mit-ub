@@ -63,6 +63,7 @@ class TestMultiHeadAttention:
     )
     @pytest.mark.parametrize("norm", [False, True])
     @pytest.mark.parametrize("norm_type", [NormType.LAYER_NORM, NormType.RMS_NORM])
+    @pytest.mark.parametrize("layer_scale", [None, 0.1])
     @pytest.mark.parametrize(
         "num_heads,num_kv_heads,Lq,Lk,Dq,Dk",
         [
@@ -73,7 +74,7 @@ class TestMultiHeadAttention:
             (32, 8, 32, 32, 128, 64),
         ],
     )
-    def test_forward(self, device, norm, norm_type, num_heads, num_kv_heads, Lq, Lk, Dq, Dk):
+    def test_forward(self, device, norm, norm_type, num_heads, num_kv_heads, Lq, Lk, Dq, Dk, layer_scale):
         model = MultiHeadAttention(
             Dq,
             num_heads,
@@ -83,6 +84,7 @@ class TestMultiHeadAttention:
             vdim=Dk if Dk != Dq or Lk != Lq else None,
             dropout=0.1,
             norm_type=norm_type,
+            layer_scale=layer_scale,
         ).to(device)
 
         B = 2
@@ -105,6 +107,7 @@ class TestMultiHeadAttention:
     )
     @pytest.mark.parametrize("norm", [False, True])
     @pytest.mark.parametrize("checkpoint", [False, True])
+    @pytest.mark.parametrize("layer_scale", [None, 0.1])
     @pytest.mark.parametrize(
         "num_heads,num_kv_heads,Lq,Lk,Dq,Dk",
         [
@@ -115,7 +118,7 @@ class TestMultiHeadAttention:
             (32, 8, 32, 32, 128, 64),
         ],
     )
-    def test_backward(self, device, norm, checkpoint, num_heads, num_kv_heads, Lq, Lk, Dq, Dk):
+    def test_backward(self, device, norm, checkpoint, layer_scale, num_heads, num_kv_heads, Lq, Lk, Dq, Dk):
         model = MultiHeadAttention(
             Dq,
             num_heads,
@@ -124,6 +127,7 @@ class TestMultiHeadAttention:
             kdim=Dk if Dk != Dq or Lk != Lq else None,
             vdim=Dk if Dk != Dq or Lk != Lq else None,
             dropout=0.1,
+            layer_scale=layer_scale,
         ).to(device)
         model.checkpoint = checkpoint
         model.train()
@@ -151,7 +155,8 @@ class TestMultiHeadAttention:
         ],
     )
     @pytest.mark.parametrize("norm", [False, True])
-    def test_reset_parameters(self, norm, num_heads, num_kv_heads, Dq, Dk):
+    @pytest.mark.parametrize("layer_scale", [None, 1.0])
+    def test_reset_parameters(self, norm, layer_scale, num_heads, num_kv_heads, Dq, Dk):
         model = MultiHeadAttention(
             Dq,
             num_heads,
@@ -159,6 +164,7 @@ class TestMultiHeadAttention:
             qk_norm=norm,
             kdim=Dk if Dk != Dq else None,
             vdim=Dk if Dk != Dq else None,
+            layer_scale=layer_scale,
         )
 
         weights_original = {name: param.clone() for name, param in model.named_parameters()}
@@ -306,10 +312,8 @@ class TestMultiHeadAttention:
     def test_extra_repr(self):
         layer = MultiHeadAttention(32, 8, 8)
         result = str(layer)
-        assert (
-            result
-            == "MultiHeadAttention(dim=32, heads=8, kv_heads=8, head_dim=4, kv_dim=32, dropout=0.0, norm=False, qk_norm=False, bias=True, kv_norm=False, norm_type=layernorm)"
-        )
+        exp = "dim=32, heads=8, kv_heads=8, head_dim=4, kv_dim=32, dropout=0.0, norm=False, qk_norm=False, bias=True, kv_norm=False, norm_type=layernorm"
+        assert exp in result
 
     def test_copy_parameters_self(self):
         D, H, HKV = 128, 128 // 32, 128 // 32

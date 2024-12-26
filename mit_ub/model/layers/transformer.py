@@ -8,7 +8,6 @@ from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, A
 from ..helpers import Dims2D
 from .attention import MultiHeadAttention
 from .convnext import ConvNextBlock
-from .layer_scale import LayerScale
 from .mlp import MLP, NormType
 from .soft_moe import SoftMoE
 
@@ -45,6 +44,7 @@ class TransformerEncoderLayer(nn.Module):
             bias=bias,
             norm=True,
             norm_type=norm_type,
+            layer_scale=layer_scale,
         )
 
         if num_experts is not None and num_slots is not None:
@@ -61,6 +61,7 @@ class TransformerEncoderLayer(nn.Module):
                 qk_norm=qk_norm,
                 norm=True,
                 norm_type=norm_type,
+                layer_scale=layer_scale,
             )
         elif num_experts is None and num_slots is None:
             self.mlp = MLP(
@@ -73,14 +74,12 @@ class TransformerEncoderLayer(nn.Module):
                 bias=bias,
                 norm=True,
                 norm_type=norm_type,
+                layer_scale=layer_scale,
             )
         else:
             raise ValueError("num_experts and num_slots must be both set or both None")
 
         self.stochastic_depth = StochasticDepth(stochastic_depth, mode="row")
-
-        self.layer_scale_attn = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
-        self.layer_scale_mlp = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
 
     def reset_parameters(self):
         for module in self.children():
@@ -90,11 +89,11 @@ class TransformerEncoderLayer(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         # Self attention
         y = self.self_attn(x, x, x)
-        x = x + self.stochastic_depth(self.layer_scale_attn(y))
+        x = x + self.stochastic_depth(y)
 
         # MLP
         y = self.mlp(x)
-        x = x + self.stochastic_depth(self.layer_scale_mlp(y))
+        x = x + self.stochastic_depth(y)
 
         return x
 
@@ -136,6 +135,7 @@ class TransformerDecoderLayer(nn.Module):
                 bias=bias,
                 norm=True,
                 norm_type=norm_type,
+                layer_scale=layer_scale,
             )
         else:
             self.register_module("self_attn", None)
@@ -152,6 +152,7 @@ class TransformerDecoderLayer(nn.Module):
             norm=True,
             kv_norm=kv_norm,
             norm_type=norm_type,
+            layer_scale=layer_scale,
         )
 
         if num_experts is not None and num_slots is not None:
@@ -168,6 +169,7 @@ class TransformerDecoderLayer(nn.Module):
                 qk_norm=qk_norm,
                 norm=True,
                 norm_type=norm_type,
+                layer_scale=layer_scale,
             )
         elif num_experts is None and num_slots is None:
             self.mlp = MLP(
@@ -180,17 +182,12 @@ class TransformerDecoderLayer(nn.Module):
                 bias=bias,
                 norm=True,
                 norm_type=norm_type,
+                layer_scale=layer_scale,
             )
         else:
             raise ValueError("num_experts and num_slots must be both set or both None")
 
         self.stochastic_depth = StochasticDepth(stochastic_depth, mode="row")
-
-        self.layer_scale_attn = (
-            LayerScale(d_model, layer_scale) if layer_scale is not None and self_attn else nn.Identity()
-        )
-        self.layer_scale_cross = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
-        self.layer_scale_mlp = LayerScale(d_model, layer_scale) if layer_scale is not None else nn.Identity()
 
     def reset_parameters(self):
         for module in self.children():
@@ -202,15 +199,15 @@ class TransformerDecoderLayer(nn.Module):
         x = q
         if self.self_attn is not None:
             y = self.self_attn(x, x, x)
-            x = x + self.stochastic_depth(self.layer_scale_attn(y))
+            x = x + self.stochastic_depth(y)
 
         # Cross attention
         y = self.cross_attn(x, kv, kv)
-        x = x + self.stochastic_depth(self.layer_scale_cross(y))
+        x = x + self.stochastic_depth(y)
 
         # MLP
         y = self.mlp(x)
-        x = x + self.stochastic_depth(self.layer_scale_mlp(y))
+        x = x + self.stochastic_depth(y)
 
         return x
 

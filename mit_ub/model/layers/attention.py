@@ -7,6 +7,7 @@ from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
 from ..helpers import Checkpointable, compile_backend, compile_is_disabled, max_autotune
+from .layer_scale import LayerScale
 from .mlp import NORM_EPS, NormType
 
 
@@ -37,6 +38,7 @@ def attention_forward(
     training: bool = False,
     mask: Tensor | None = None,
     norm_type: NormType = NormType.LAYER_NORM,
+    w_layer_scale: Tensor | None = None,
     # fmt: on
 ) -> Tensor:
     """
@@ -67,6 +69,7 @@ def attention_forward(
         training: Training or inference mode
         mask: Attention mask
         norm_type: Type of pre-normalization to apply.
+        w_layer_scale: Optional layer scale weight
 
     Shapes:
         q, k, v: :math:`(B, L, D)`, or :math:`(B, L, 3*D)` when packed QKV tensor
@@ -74,6 +77,7 @@ def attention_forward(
         b_q, b_k, b_v, b_out: :math:`(D,)`, or :math:`(3*D,)` when packed QKV tensor
         norm_w, norm_b: :math:`(head_dim,)`
         mask: :math:`(B, Lq, Lk)`
+        w_layer_scale: :math:`(D,)`
 
     Returns:
         Output tensor of shape :math:`(B, L, D)`
@@ -136,6 +140,10 @@ def attention_forward(
     o = F.linear(o, w_out, b_out)
     o = F.dropout(o, p=dropout, training=training, inplace=True)
 
+    # Layer scale
+    if w_layer_scale is not None:
+        o = o * w_layer_scale
+
     return o
 
 
@@ -154,6 +162,7 @@ class MultiHeadAttention(nn.Module, Checkpointable):
         norm: bool = False,
         kv_norm: bool = False,
         norm_type: NormType = NormType.LAYER_NORM,
+        layer_scale: float | None = None,
     ):
         super().__init__()
         self._embed_dim = embed_dim
@@ -200,6 +209,12 @@ class MultiHeadAttention(nn.Module, Checkpointable):
         self.w_out = nn.Parameter(torch.empty(embed_dim, embed_dim))
         self.b_out = nn.Parameter(torch.empty(embed_dim)) if bias else None
 
+        # Layer scale
+        if layer_scale is not None:
+            self.layer_scale = LayerScale(embed_dim, gamma=layer_scale)
+        else:
+            self.register_module("layer_scale", None)
+
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -210,8 +225,12 @@ class MultiHeadAttention(nn.Module, Checkpointable):
                 nn.init.ones_(param)
             elif name.startswith("w_"):
                 nn.init.xavier_uniform_(param)
+            elif name.startswith("layer_scale"):
+                pass
             else:
                 raise ValueError(f"Unsure how to initialize {name}")
+        if self.layer_scale is not None:
+            self.layer_scale.reset_parameters()
 
     def copy_parameters(self, src: "MultiHeadAttention") -> None:
         r"""Copies parameters from a source attention module.
@@ -314,6 +333,10 @@ class MultiHeadAttention(nn.Module, Checkpointable):
     def bias(self) -> bool:
         return self.b_in is not None
 
+    @property
+    def w_layer_scale(self) -> Tensor | None:
+        return self.layer_scale.gamma if self.layer_scale is not None else None
+
     def extra_repr(self) -> str:
         return (
             f"dim={self.embed_dim}, "
@@ -365,6 +388,7 @@ class MultiHeadAttention(nn.Module, Checkpointable):
                 self.training,
                 mask,
                 self.norm_type,
+                self.w_layer_scale,
                 use_reentrant=False,
                 # fmt: on
             )
@@ -387,5 +411,6 @@ class MultiHeadAttention(nn.Module, Checkpointable):
                 self.training,
                 mask,
                 self.norm_type,
+                self.w_layer_scale,
                 # fmt: on
             )

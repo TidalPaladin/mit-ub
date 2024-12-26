@@ -14,11 +14,12 @@ class TestConvNext:
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    def test_forward(self, device, dtype):
+    @pytest.mark.parametrize("layer_scale", [None, 1.0])
+    def test_forward(self, device, dtype, layer_scale):
         B, C, H, W = 1, 32, 64, 64
         torch.random.manual_seed(42)
         x = torch.randn(B, C, H, W)
-        layer = ConvNextBlock(C)
+        layer = ConvNextBlock(C, layer_scale=layer_scale)
         with torch.autocast(device_type=device, dtype=dtype, enabled=True):
             out = layer(x.movedim(1, -1).view(B, -1, C), size=(H, W))
         assert out.shape == (B, H * W, C)
@@ -32,11 +33,12 @@ class TestConvNext:
     )
     @pytest.mark.parametrize("checkpoint", [False, True])
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    def test_backward(self, device, dtype, checkpoint):
+    @pytest.mark.parametrize("layer_scale", [None, 1.0])
+    def test_backward(self, device, dtype, checkpoint, layer_scale):
         B, C, H, W = 1, 32, 64, 64
         torch.random.manual_seed(42)
         x = torch.randn(B, C, H, W, requires_grad=True)
-        layer = ConvNextBlock(C)
+        layer = ConvNextBlock(C, layer_scale=layer_scale)
         layer.checkpoint = checkpoint
         with torch.autocast(device_type=device, dtype=dtype, enabled=True):
             out = layer(x.movedim(1, -1).view(B, -1, C), size=(H, W))

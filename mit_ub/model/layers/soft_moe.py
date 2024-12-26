@@ -58,6 +58,7 @@ class SoftMoE(nn.Module):
         qk_norm: bool = False,
         norm: bool = False,
         norm_type: NormType = NormType.LAYER_NORM,
+        layer_scale: float | None = None,
     ):
         super().__init__()
         if num_slots < num_experts:
@@ -90,6 +91,8 @@ class SoftMoE(nn.Module):
             norm=norm,
             norm_type=norm_type,
             kv_norm=norm,
+            # Layer scale only on the combine step
+            layer_scale=layer_scale,
         )
         self.experts = nn.ModuleList(
             [

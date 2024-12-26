@@ -137,8 +137,8 @@ class TestConvViT:
 
         # Set the adaptive model to process fixed tokens at native resolution.
         # Layer scale at 1e-9 should shut off the contribution of the dynamic tokens.
+        config = replace(config, layer_scale=1e-9)
         baseline = AdaptiveViT(config)
-        config = replace(config, layer_scale_adaptive=1e-9)
         model = ConvViT(config)
 
         # Put the baseline weights into the model

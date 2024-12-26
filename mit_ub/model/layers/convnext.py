@@ -51,6 +51,7 @@ def convnext_block_forward_2d(
     eps: float = NORM_EPS,
     training: bool = False,
     norm_type: NormType = NormType.LAYER_NORM,
+    w_layer_scale: Tensor | None = None,
 ) -> Tensor:
     # Depthwise convolution
     y = tokens_to_grid(x, size)
@@ -75,6 +76,10 @@ def convnext_block_forward_2d(
         training,
         norm_type,
     )
+
+    if w_layer_scale is not None:
+        y = y * w_layer_scale
+
     return y
 
 
@@ -110,7 +115,10 @@ class ConvNextBlock(nn.Module):
             norm=True,
             norm_type=norm_type,
         )
-        self.layer_scale = LayerScale(dim, layer_scale) if layer_scale else nn.Identity()
+        if layer_scale is not None:
+            self.layer_scale = LayerScale(dim, gamma=layer_scale)
+        else:
+            self.register_module("layer_scale", None)
         self.stochastic_depth = StochasticDepth(stochastic_depth, mode="row")
         self.checkpoint = False
         self.reset_parameters()
@@ -127,6 +135,10 @@ class ConvNextBlock(nn.Module):
     @property
     def dim_feedforward(self) -> int:
         return self._dim_feedforward
+
+    @property
+    def w_layer_scale(self) -> Tensor | None:
+        return self.layer_scale.gamma if self.layer_scale is not None else None
 
     def forward(self, x: Tensor, size: Dims2D) -> Tensor:
         if self.training and self.checkpoint:
@@ -150,6 +162,7 @@ class ConvNextBlock(nn.Module):
                 NORM_EPS,
                 self.training,
                 self.mlp.norm_type,
+                self.w_layer_scale,
                 use_reentrant=False,
             )
             assert isinstance(y, Tensor)
@@ -173,5 +186,6 @@ class ConvNextBlock(nn.Module):
                 NORM_EPS,
                 self.training,
                 self.mlp.norm_type,
+                self.w_layer_scale,
             )
-        return x + self.stochastic_depth(self.layer_scale(y))
+        return x + self.stochastic_depth(y)
