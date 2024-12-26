@@ -125,6 +125,10 @@ class SoftMoE(nn.Module):
     def num_experts(self) -> int:
         return len(self.experts)
 
+    @property
+    def norm(self) -> bool:
+        return self.dispatch.norm
+
     def extra_repr(self) -> str:
         return f"num_experts={self.num_experts}, " f"num_slots={self.num_slots}, "
 
