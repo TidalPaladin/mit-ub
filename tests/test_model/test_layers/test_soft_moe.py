@@ -16,17 +16,14 @@ class TestSoftMoE:
         ],
     )
     @pytest.mark.parametrize("norm_type", [NormType.LAYER_NORM, NormType.RMS_NORM])
-    @pytest.mark.parametrize("stochastic_depth", [0.0, 0.25])
-    def test_forward(self, device, norm_type, stochastic_depth):
+    def test_forward(self, device, norm_type):
         B, L, D = 1, 128, 128
         nhead = D // 32
         num_experts = 4
         num_slots = L // 2
 
         x = torch.randn(B, L, D, device=device)
-        layer = SoftMoE(
-            D, D, num_experts, num_slots, nhead=nhead, norm_type=norm_type, stochastic_depth=stochastic_depth
-        ).to(device)
+        layer = SoftMoE(D, D, num_experts, num_slots, nhead=nhead, norm_type=norm_type).to(device)
 
         with torch.autocast(device_type=device, dtype=torch.float16):
             out = layer(x)
@@ -72,7 +69,7 @@ class TestSoftMoE:
         num_slots = L // 2
 
         x = torch.randn(B, L, D, device=device)
-        layer = SoftMoE(D, D, num_experts, num_slots, nhead=nhead, dropout=0.1, stochastic_depth=0.25).to(device)
+        layer = SoftMoE(D, D, num_experts, num_slots, nhead=nhead, dropout=0.1).to(device)
 
         layer.train()
         with torch.autocast(device_type=device, dtype=torch.float16):

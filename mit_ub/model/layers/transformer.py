@@ -61,7 +61,6 @@ class TransformerEncoderLayer(nn.Module):
                 norm=True,
                 norm_type=norm_type,
                 layer_scale=layer_scale,
-                stochastic_depth=stochastic_depth,
             )
         elif num_experts is None and num_slots is None:
             self.mlp = MLP(
@@ -171,7 +170,6 @@ class TransformerDecoderLayer(nn.Module):
                 norm=True,
                 norm_type=norm_type,
                 layer_scale=layer_scale,
-                stochastic_depth=stochastic_depth,
             )
         elif num_experts is None and num_slots is None:
             self.mlp = MLP(
