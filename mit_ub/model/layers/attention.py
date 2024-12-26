@@ -4,17 +4,18 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor, nn
+from torch.utils.checkpoint import checkpoint
 
-from ..helpers import compile_backend, compile_is_disabled
-from .mlp import NormType
+from ..helpers import Checkpointable, compile_backend, compile_is_disabled, max_autotune
+from .mlp import NORM_EPS, NormType
 
 
 @torch.compile(
     fullgraph=True,
     backend=compile_backend(),
     options={
-        "max_autotune": True,
-        "triton.cudagraph_trees": True,
+        "max_autotune": max_autotune(),
+        "triton.cudagraph_trees": max_autotune(),
         "shape_padding": True,
         "epilogue_fusion": True,
     },
@@ -29,7 +30,7 @@ def attention_forward(
     num_heads: int, num_kv_heads: int,
     norm_w: Tensor | None = None, norm_b: Tensor | None = None,
     dropout: float = 0.0,
-    eps: float = 1e-5,
+    eps: float = NORM_EPS,
     pre_norm_w: Tensor | None = None,
     pre_norm_b: Tensor | None = None,
     kv_norm: bool = False,
@@ -138,7 +139,7 @@ def attention_forward(
     return o
 
 
-class MultiHeadAttention(nn.Module):
+class MultiHeadAttention(nn.Module, Checkpointable):
 
     def __init__(
         self,
@@ -161,6 +162,7 @@ class MultiHeadAttention(nn.Module):
         self.dropout = dropout
         self.kv_norm = kv_norm
         self.norm_type = norm_type
+        self.checkpoint = False
 
         # Register optional parameters
         for prefix in ("w", "b"):
@@ -345,20 +347,45 @@ class MultiHeadAttention(nn.Module):
         b_k = self.b_k if self.b_in is None else None
         b_v = self.b_v if self.b_in is None else None
 
-        return attention_forward(
-            # fmt: off
-            q, _k, _v,
-            w_q, w_k, w_v,
-            b_q, b_k, b_v,
-            self.w_out, self.b_out,
-            self.num_heads, self.num_kv_heads,
-            self.w_norm, self.b_norm,
-            dropout=self.dropout,
-            pre_norm_w=self.w_pre_norm,
-            pre_norm_b=self.b_pre_norm,
-            kv_norm=self.kv_norm,
-            training=self.training,
-            mask=mask,
-            norm_type=self.norm_type,
-            # fmt: on
-        )
+        if self.training and self.checkpoint:
+            result = checkpoint(
+                # fmt: off
+                attention_forward,
+                q, _k, _v,
+                w_q, w_k, w_v,
+                b_q, b_k, b_v,
+                self.w_out, self.b_out,
+                self.num_heads, self.num_kv_heads,
+                self.w_norm, self.b_norm,
+                self.dropout,
+                NORM_EPS,
+                self.w_pre_norm,
+                self.b_pre_norm,
+                self.kv_norm,
+                self.training,
+                mask,
+                self.norm_type,
+                use_reentrant=False,
+                # fmt: on
+            )
+            assert isinstance(result, Tensor)
+            return result
+        else:
+            return attention_forward(
+                # fmt: off
+                q, _k, _v,
+                w_q, w_k, w_v,
+                b_q, b_k, b_v,
+                self.w_out, self.b_out,
+                self.num_heads, self.num_kv_heads,
+                self.w_norm, self.b_norm,
+                self.dropout,
+                NORM_EPS,
+                self.w_pre_norm,
+                self.b_pre_norm,
+                self.kv_norm,
+                self.training,
+                mask,
+                self.norm_type,
+                # fmt: on
+            )

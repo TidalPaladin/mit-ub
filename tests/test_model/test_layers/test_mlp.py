@@ -88,14 +88,19 @@ class TestMLP:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
-    def test_backward(self, device):
+    @pytest.mark.parametrize("norm", [False, True])
+    @pytest.mark.parametrize("checkpoint", [False, True])
+    def test_backward(self, device, norm, checkpoint):
         torch.random.manual_seed(0)
         B, L, D = 2, 8, 32
         x = torch.randn(B, L, D, requires_grad=True).to(device)
-        layer = MLP(D, D, D, dropout=0.1).to(device)
+        layer = MLP(D, D, D, dropout=0.1, norm=norm).to(device)
+        layer.checkpoint = checkpoint
         layer.train()
         y = layer(x)
         y.sum().backward()
+        for p in layer.parameters():
+            assert p.grad is not None
 
     @pytest.mark.parametrize(
         "device",

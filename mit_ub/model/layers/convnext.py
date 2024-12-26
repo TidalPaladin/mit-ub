@@ -4,22 +4,31 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 from torchvision.ops import StochasticDepth
 
 from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
-from ..helpers import Dims2D, compile_backend, compile_is_disabled, grid_to_tokens, to_tuple, tokens_to_grid
+from ..helpers import (
+    Dims2D,
+    compile_backend,
+    compile_is_disabled,
+    grid_to_tokens,
+    max_autotune,
+    to_tuple,
+    tokens_to_grid,
+)
 from ..layers.layer_scale import LayerScale
-from ..layers.mlp import MLP, NormType, mlp_forward
+from ..layers.mlp import MLP, NORM_EPS, NormType, mlp_forward
 
 
 @torch.compile(
     fullgraph=True,
     backend=compile_backend(),
     options={
-        "max_autotune": True,
+        "max_autotune": max_autotune(),
         "epilogue_fusion": True,
         "shape_padding": True,
-        "triton.cudagraph_trees": True,
+        "triton.cudagraph_trees": max_autotune(),
     },
     disable=compile_is_disabled(),
 )
@@ -39,7 +48,7 @@ def convnext_block_forward_2d(
     gate_activation: Activation | None = DEFAULT_MLP_GATE_ACTIVATION,
     w_norm: Tensor | None = None,
     b_norm: Tensor | None = None,
-    eps: float = 1e-5,
+    eps: float = NORM_EPS,
     training: bool = False,
     norm_type: NormType = NormType.LAYER_NORM,
 ) -> Tensor:
@@ -103,6 +112,7 @@ class ConvNextBlock(nn.Module):
         )
         self.layer_scale = LayerScale(dim, layer_scale) if layer_scale else nn.Identity()
         self.stochastic_depth = StochasticDepth(stochastic_depth, mode="row")
+        self.checkpoint = False
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -119,23 +129,49 @@ class ConvNextBlock(nn.Module):
         return self._dim_feedforward
 
     def forward(self, x: Tensor, size: Dims2D) -> Tensor:
-        y = convnext_block_forward_2d(
-            x,
-            size,
-            self.conv_dw.weight,
-            self.mlp.w_in,
-            self.mlp.w_out,
-            self.conv_dw.bias,
-            self.mlp.b_in,
-            self.mlp.b_out,
-            self.mlp.w_gate,
-            self.mlp.b_gate,
-            self.mlp.dropout,
-            self.mlp.activation,
-            self.mlp.gate_activation,
-            self.mlp.w_norm,
-            self.mlp.b_norm,
-            training=self.training,
-            norm_type=self.mlp.norm_type,
-        )
+        if self.training and self.checkpoint:
+            y = checkpoint(
+                convnext_block_forward_2d,
+                x,
+                size,
+                self.conv_dw.weight,
+                self.mlp.w_in,
+                self.mlp.w_out,
+                self.conv_dw.bias,
+                self.mlp.b_in,
+                self.mlp.b_out,
+                self.mlp.w_gate,
+                self.mlp.b_gate,
+                self.mlp.dropout,
+                self.mlp.activation,
+                self.mlp.gate_activation,
+                self.mlp.w_norm,
+                self.mlp.b_norm,
+                NORM_EPS,
+                self.training,
+                self.mlp.norm_type,
+                use_reentrant=False,
+            )
+            assert isinstance(y, Tensor)
+        else:
+            y = convnext_block_forward_2d(
+                x,
+                size,
+                self.conv_dw.weight,
+                self.mlp.w_in,
+                self.mlp.w_out,
+                self.conv_dw.bias,
+                self.mlp.b_in,
+                self.mlp.b_out,
+                self.mlp.w_gate,
+                self.mlp.b_gate,
+                self.mlp.dropout,
+                self.mlp.activation,
+                self.mlp.gate_activation,
+                self.mlp.w_norm,
+                self.mlp.b_norm,
+                NORM_EPS,
+                self.training,
+                self.mlp.norm_type,
+            )
         return x + self.stochastic_depth(self.layer_scale(y))

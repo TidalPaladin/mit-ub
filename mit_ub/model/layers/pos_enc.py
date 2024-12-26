@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from ..activations import DEFAULT_POS_ENC_ACTIVATION, Activation
-from ..helpers import compile_backend, compile_is_disabled
+from ..helpers import compile_backend, compile_is_disabled, max_autotune
 
 
 @torch.compile(fullgraph=True, backend=compile_backend(), disable=compile_is_disabled())
@@ -43,9 +43,9 @@ def create_grid(
     backend=compile_backend(),
     disable=compile_is_disabled(),
     options={
-        "max_autotune": True,
+        "max_autotune": max_autotune(),
         "shape_padding": True,
-        "triton.cudagraph_trees": True,
+        "triton.cudagraph_trees": max_autotune(),
     },
 )
 def relative_factorized_position_forward(

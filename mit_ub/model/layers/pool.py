@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
-from ..helpers import compile_is_disabled
+from ..helpers import compile_is_disabled, max_autotune
 
 
 class PoolType(StrEnum):
@@ -19,7 +19,8 @@ class PoolType(StrEnum):
 @torch.compile(
     fullgraph=True,
     options={
-        "max_autotune": True,
+        "max_autotune": max_autotune(),
+        "triton.cudagraph_trees": max_autotune(),
         "shape_padding": True,
     },
     disable=compile_is_disabled(),

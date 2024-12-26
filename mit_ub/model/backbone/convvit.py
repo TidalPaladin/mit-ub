@@ -5,7 +5,7 @@ import torch.nn as nn
 from torch import Tensor
 from torch.nn import functional as F
 
-from ..helpers import Dims2D
+from ..helpers import Dims2D, set_checkpointing
 from ..layers.layer_scale import LayerScale
 from ..layers.transformer import TransformerConvDecoderLayer, TransformerDecoderLayer
 from .adaptive_vit import AdaptiveViT, AdaptiveViTConfig
@@ -43,6 +43,9 @@ class ConvViT(AdaptiveViT):
                 if config.layer_scale_adaptive is not None
                 else nn.Identity()
             )
+
+        if config.checkpoint:
+            set_checkpointing(self, config.checkpoint)
 
     def create_mask(
         self,
@@ -90,6 +93,8 @@ class ConvViT(AdaptiveViT):
         )
         _kwargs.update(kwargs)
         layer = TransformerConvDecoderLayer(**_kwargs)
+        if self.config.checkpoint:
+            set_checkpointing(layer, self.config.checkpoint)
         return layer
 
     def forward(self, x: Tensor, reshape: bool = True) -> Tensor:

@@ -6,7 +6,7 @@ from torch import Tensor
 
 from ..activations import DEFAULT_MLP_ACTIVATION_STR, DEFAULT_MLP_GATE_ACTIVATION_STR, Activation
 from ..config import ModelConfig
-from ..helpers import Dims2D, grid_to_tokens, tokens_to_grid
+from ..helpers import Dims2D, grid_to_tokens, set_checkpointing, tokens_to_grid
 from ..layers.convnext import ConvNextBlock
 from ..layers.mlp import NormType
 
@@ -27,6 +27,7 @@ class ConvNextConfig(ModelConfig):
     stochastic_depth: float = 0.0
     up_depths: Sequence[int] = field(default_factory=lambda: [])
     norm_type: NormType = cast(NormType, "layernorm")
+    checkpoint: bool = False
 
     def instantiate(self) -> "ConvNext":
         return ConvNext(self)
@@ -121,6 +122,9 @@ class ConvNext(nn.Module):
             if self.config.norm_type == NormType.LAYER_NORM
             else nn.RMSNorm(self.config.dim)
         )
+
+        if config.checkpoint:
+            set_checkpointing(self, config.checkpoint)
 
     def forward(self, x: Tensor, reshape: bool = True) -> Tensor:
         # Patch embed stem

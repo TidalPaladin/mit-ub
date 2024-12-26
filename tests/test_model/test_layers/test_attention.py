@@ -104,6 +104,7 @@ class TestMultiHeadAttention:
         ],
     )
     @pytest.mark.parametrize("norm", [False, True])
+    @pytest.mark.parametrize("checkpoint", [False, True])
     @pytest.mark.parametrize(
         "num_heads,num_kv_heads,Lq,Lk,Dq,Dk",
         [
@@ -114,7 +115,7 @@ class TestMultiHeadAttention:
             (32, 8, 32, 32, 128, 64),
         ],
     )
-    def test_backward(self, device, norm, num_heads, num_kv_heads, Lq, Lk, Dq, Dk):
+    def test_backward(self, device, norm, checkpoint, num_heads, num_kv_heads, Lq, Lk, Dq, Dk):
         model = MultiHeadAttention(
             Dq,
             num_heads,
@@ -124,6 +125,7 @@ class TestMultiHeadAttention:
             vdim=Dk if Dk != Dq or Lk != Lq else None,
             dropout=0.1,
         ).to(device)
+        model.checkpoint = checkpoint
         model.train()
 
         B = 2
@@ -135,6 +137,8 @@ class TestMultiHeadAttention:
             out = model(q, k, v)
 
         out.sum().backward()
+        for p in model.parameters():
+            assert p.grad is not None
 
     @pytest.mark.parametrize(
         "num_heads,num_kv_heads,Dq,Dk",

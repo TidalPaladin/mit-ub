@@ -94,9 +94,11 @@ class TestConvViT:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
+    @pytest.mark.parametrize("checkpoint", [False, True])
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    def test_backward(self, config, device, dtype):
+    def test_backward(self, config, device, dtype, checkpoint):
         x = torch.randn(1, 3, 224, 224, device=device, requires_grad=True)
+        config = replace(config, checkpoint=checkpoint)
         model = ConvViT(config).to(device)
 
         with torch.autocast(device_type=device, dtype=dtype):
