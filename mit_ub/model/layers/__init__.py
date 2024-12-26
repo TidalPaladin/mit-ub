@@ -5,6 +5,7 @@ from .mlp import MLP, NormType, mlp_forward
 from .pool import AveragePool, MaxPool, MultiHeadAttentionPool
 from .pos_enc import RelativeFactorizedPosition, relative_factorized_position_forward
 from .soft_moe import SoftMoE
+from .stochastic_depth import apply_stochastic_depth, stochastic_depth_indices, unapply_stochastic_depth
 from .transformer import (
     TransformerConvDecoderLayer,
     TransformerConvEncoderLayer,
@@ -33,4 +34,7 @@ __all__ = [
     "MaxPool",
     "MultiHeadAttentionPool",
     "NormType",
+    "stochastic_depth_indices",
+    "apply_stochastic_depth",
+    "unapply_stochastic_depth",
 ]

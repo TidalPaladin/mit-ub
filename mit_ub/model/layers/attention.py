@@ -9,6 +9,7 @@ from torch.utils.checkpoint import checkpoint
 from ..helpers import Checkpointable, compile_backend, compile_is_disabled, max_autotune
 from .layer_scale import LayerScale
 from .mlp import NORM_EPS, NormType
+from .stochastic_depth import apply_stochastic_depth, stochastic_depth_indices, unapply_stochastic_depth
 
 
 @torch.compile(
@@ -39,6 +40,7 @@ def attention_forward(
     mask: Tensor | None = None,
     norm_type: NormType = NormType.LAYER_NORM,
     w_layer_scale: Tensor | None = None,
+    stochastic_depth: float = 0.0,
     # fmt: on
 ) -> Tensor:
     """
@@ -70,6 +72,7 @@ def attention_forward(
         mask: Attention mask
         norm_type: Type of pre-normalization to apply.
         w_layer_scale: Optional layer scale weight
+        stochastic_depth: Dropout probability for stochastic depth
 
     Shapes:
         q, k, v: :math:`(B, L, D)`, or :math:`(B, L, 3*D)` when packed QKV tensor
@@ -82,8 +85,20 @@ def attention_forward(
     Returns:
         Output tensor of shape :math:`(B, L, D)`
     """
+    B = q.shape[0]
     is_packed = k is None and v is None and w_k is None and w_v is None and b_k is None and b_v is None
     head_dim = q.shape[-1] // num_heads
+
+    # Apply stochastic depth
+    if stochastic_depth > 0.0 and training:
+        indices = stochastic_depth_indices(q, stochastic_depth)
+        q = apply_stochastic_depth(q, indices)
+        if not is_packed:
+            assert k is not None and v is not None
+            k = apply_stochastic_depth(k, indices)
+            v = apply_stochastic_depth(v, indices)
+    else:
+        indices = None
 
     # Pre-normalization
     if pre_norm_w is not None:
@@ -144,6 +159,11 @@ def attention_forward(
     if w_layer_scale is not None:
         o = o * w_layer_scale
 
+    # Unapply stochastic depth
+    if stochastic_depth > 0.0 and training:
+        assert indices is not None
+        o = unapply_stochastic_depth(o, indices, B)
+
     return o
 
 
@@ -163,6 +183,7 @@ class MultiHeadAttention(nn.Module, Checkpointable):
         kv_norm: bool = False,
         norm_type: NormType = NormType.LAYER_NORM,
         layer_scale: float | None = None,
+        stochastic_depth: float = 0.0,
     ):
         super().__init__()
         self._embed_dim = embed_dim
@@ -172,6 +193,7 @@ class MultiHeadAttention(nn.Module, Checkpointable):
         self.kv_norm = kv_norm
         self.norm_type = norm_type
         self.checkpoint = False
+        self.stochastic_depth = stochastic_depth
 
         # Register optional parameters
         for prefix in ("w", "b"):
@@ -349,7 +371,8 @@ class MultiHeadAttention(nn.Module, Checkpointable):
             f"qk_norm={self.qk_norm}, "
             f"bias={self.bias}, "
             f"kv_norm={self.kv_norm}, "
-            f"norm_type={self.norm_type}"
+            f"norm_type={self.norm_type}, "
+            f"stochastic_depth={self.stochastic_depth}"
         )
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor, mask: Tensor | None = None) -> Tensor:
@@ -389,6 +412,7 @@ class MultiHeadAttention(nn.Module, Checkpointable):
                 mask,
                 self.norm_type,
                 self.w_layer_scale,
+                self.stochastic_depth,
                 use_reentrant=False,
                 # fmt: on
             )
@@ -412,5 +436,6 @@ class MultiHeadAttention(nn.Module, Checkpointable):
                 mask,
                 self.norm_type,
                 self.w_layer_scale,
+                self.stochastic_depth,
                 # fmt: on
             )

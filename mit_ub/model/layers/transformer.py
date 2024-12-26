@@ -2,7 +2,6 @@ from typing import Tuple
 
 import torch.nn as nn
 from torch import Tensor
-from torchvision.ops import StochasticDepth
 
 from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
 from ..helpers import Dims2D
@@ -62,6 +61,7 @@ class TransformerEncoderLayer(nn.Module):
                 norm=True,
                 norm_type=norm_type,
                 layer_scale=layer_scale,
+                stochastic_depth=stochastic_depth,
             )
         elif num_experts is None and num_slots is None:
             self.mlp = MLP(
@@ -75,11 +75,10 @@ class TransformerEncoderLayer(nn.Module):
                 norm=True,
                 norm_type=norm_type,
                 layer_scale=layer_scale,
+                stochastic_depth=stochastic_depth,
             )
         else:
             raise ValueError("num_experts and num_slots must be both set or both None")
-
-        self.stochastic_depth = StochasticDepth(stochastic_depth, mode="row")
 
     def reset_parameters(self):
         for module in self.children():
@@ -89,11 +88,11 @@ class TransformerEncoderLayer(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         # Self attention
         y = self.self_attn(x, x, x)
-        x = x + self.stochastic_depth(y)
+        x = x + y
 
         # MLP
         y = self.mlp(x)
-        x = x + self.stochastic_depth(y)
+        x = x + y
 
         return x
 
@@ -136,6 +135,7 @@ class TransformerDecoderLayer(nn.Module):
                 norm=True,
                 norm_type=norm_type,
                 layer_scale=layer_scale,
+                stochastic_depth=stochastic_depth,
             )
         else:
             self.register_module("self_attn", None)
@@ -153,6 +153,7 @@ class TransformerDecoderLayer(nn.Module):
             kv_norm=kv_norm,
             norm_type=norm_type,
             layer_scale=layer_scale,
+            stochastic_depth=stochastic_depth,
         )
 
         if num_experts is not None and num_slots is not None:
@@ -170,6 +171,7 @@ class TransformerDecoderLayer(nn.Module):
                 norm=True,
                 norm_type=norm_type,
                 layer_scale=layer_scale,
+                stochastic_depth=stochastic_depth,
             )
         elif num_experts is None and num_slots is None:
             self.mlp = MLP(
@@ -183,11 +185,10 @@ class TransformerDecoderLayer(nn.Module):
                 norm=True,
                 norm_type=norm_type,
                 layer_scale=layer_scale,
+                stochastic_depth=stochastic_depth,
             )
         else:
             raise ValueError("num_experts and num_slots must be both set or both None")
-
-        self.stochastic_depth = StochasticDepth(stochastic_depth, mode="row")
 
     def reset_parameters(self):
         for module in self.children():
@@ -199,15 +200,15 @@ class TransformerDecoderLayer(nn.Module):
         x = q
         if self.self_attn is not None:
             y = self.self_attn(x, x, x)
-            x = x + self.stochastic_depth(y)
+            x = x + y
 
         # Cross attention
         y = self.cross_attn(x, kv, kv)
-        x = x + self.stochastic_depth(y)
+        x = x + y
 
         # MLP
         y = self.mlp(x)
-        x = x + self.stochastic_depth(y)
+        x = x + y
 
         return x
 
@@ -257,6 +258,7 @@ class TransformerConvEncoderLayer(TransformerEncoderLayer):
             dropout=dropout,
             bias=bias,
             layer_scale=layer_scale,
+            stochastic_depth=stochastic_depth,
         )
 
     def forward(self, x: Tensor, size: Tuple[int, ...]) -> Tensor:
@@ -315,6 +317,7 @@ class TransformerConvDecoderLayer(TransformerDecoderLayer):
             dropout=dropout,
             bias=bias,
             layer_scale=layer_scale,
+            stochastic_depth=stochastic_depth,
         )
 
     def forward(self, q: Tensor, kv: Tensor, size: Tuple[int, ...]) -> Tensor:

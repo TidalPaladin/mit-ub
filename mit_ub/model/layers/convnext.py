@@ -5,7 +5,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
-from torchvision.ops import StochasticDepth
 
 from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
 from ..helpers import (
@@ -19,6 +18,7 @@ from ..helpers import (
 )
 from ..layers.layer_scale import LayerScale
 from ..layers.mlp import MLP, NORM_EPS, NormType, mlp_forward
+from ..layers.stochastic_depth import apply_stochastic_depth, stochastic_depth_indices, unapply_stochastic_depth
 
 
 @torch.compile(
@@ -52,7 +52,15 @@ def convnext_block_forward_2d(
     training: bool = False,
     norm_type: NormType = NormType.LAYER_NORM,
     w_layer_scale: Tensor | None = None,
+    stochastic_depth: float = 0.0,
 ) -> Tensor:
+    B = x.shape[0]
+    if stochastic_depth > 0.0 and training:
+        indices = stochastic_depth_indices(x, stochastic_depth)
+        x = apply_stochastic_depth(x, indices)
+    else:
+        indices = None
+
     # Depthwise convolution
     y = tokens_to_grid(x, size)
     y = F.conv2d(y, conv_w, conv_b, stride=1, padding=conv_w.shape[-1] // 2, groups=y.shape[1])
@@ -79,6 +87,11 @@ def convnext_block_forward_2d(
 
     if w_layer_scale is not None:
         y = y * w_layer_scale
+
+    # Unapply stochastic depth
+    if stochastic_depth > 0.0 and training:
+        assert indices is not None
+        y = unapply_stochastic_depth(y, indices, B)
 
     return y
 
@@ -119,7 +132,7 @@ class ConvNextBlock(nn.Module):
             self.layer_scale = LayerScale(dim, gamma=layer_scale)
         else:
             self.register_module("layer_scale", None)
-        self.stochastic_depth = StochasticDepth(stochastic_depth, mode="row")
+        self.stochastic_depth = stochastic_depth
         self.checkpoint = False
         self.reset_parameters()
 
@@ -163,6 +176,7 @@ class ConvNextBlock(nn.Module):
                 self.training,
                 self.mlp.norm_type,
                 self.w_layer_scale,
+                self.stochastic_depth,
                 use_reentrant=False,
             )
             assert isinstance(y, Tensor)
@@ -187,5 +201,6 @@ class ConvNextBlock(nn.Module):
                 self.training,
                 self.mlp.norm_type,
                 self.w_layer_scale,
+                self.stochastic_depth,
             )
-        return x + self.stochastic_depth(y)
+        return x + y

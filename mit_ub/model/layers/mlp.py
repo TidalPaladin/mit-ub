@@ -10,6 +10,7 @@ from torch.utils.checkpoint import checkpoint
 from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
 from ..helpers import Checkpointable, compile_backend, compile_is_disabled, max_autotune
 from .layer_scale import LayerScale
+from .stochastic_depth import apply_stochastic_depth, stochastic_depth_indices, unapply_stochastic_depth
 
 
 NORM_EPS: Final = 1e-5
@@ -48,7 +49,17 @@ def mlp_forward(
     training: bool = False,
     norm_type: NormType = NormType.LAYER_NORM,
     w_layer_scale: Tensor | None = None,
+    stochastic_depth: float = 0.0,
 ) -> Tensor:
+    # Apply stochastic depth
+    B = x.shape[0]
+    if stochastic_depth > 0.0 and training:
+        indices = stochastic_depth_indices(x, stochastic_depth)
+        x = apply_stochastic_depth(x, indices)
+    else:
+        indices = None
+
+    # Pre-normalization
     if w_norm is not None:
         if norm_type == NormType.LAYER_NORM:
             x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
@@ -57,21 +68,30 @@ def mlp_forward(
         else:
             raise ValueError(f"Unknown norm type: {norm_type}")
 
+    # First projection
     y = F.linear(x, w1, b1)
     y = activation(y)
 
+    # Gate projection (GLU variants)
     if w_gate is not None:
         gate = F.linear(x, w_gate, b_gate)
         if gate_activation is not None:
             gate = gate_activation(gate)
         y = y * gate
 
+    # Dropout, second projection
     y = F.dropout(y, p=dropout, training=training, inplace=True)
     y = F.linear(y, w2, b2)
     y = F.dropout(y, p=dropout, training=training, inplace=True)
 
+    # Layer scale
     if w_layer_scale is not None:
         y = y * w_layer_scale
+
+    # Unapply stochastic depth
+    if stochastic_depth > 0.0 and training:
+        assert indices is not None
+        y = unapply_stochastic_depth(y, indices, B)
 
     return y
 
@@ -90,6 +110,8 @@ class MLP(nn.Module, Checkpointable):
         bias: Whether to use bias in the linear layers.
         norm: Whether to apply normalization to the input.
         norm_type: Type of pre-normalization to apply.
+        layer_scale: Layer scale factor.
+        stochastic_depth: Dropout probability for stochastic depth.
 
     Basic MLP:
         >>> mlp = MLP(10, 20, 10))
@@ -110,6 +132,7 @@ class MLP(nn.Module, Checkpointable):
         norm: bool = False,
         norm_type: NormType = NormType.LAYER_NORM,
         layer_scale: float | None = None,
+        stochastic_depth: float = 0.0,
     ):
         super().__init__()
         self.dropout = dropout
@@ -117,6 +140,7 @@ class MLP(nn.Module, Checkpointable):
         self.gate_activation = gate_activation
         self.norm_type = norm_type
         self.checkpoint = False
+        self.stochastic_depth = stochastic_depth
 
         # Register optional parameters
         for prefix in ("w_", "b_"):
@@ -198,7 +222,8 @@ class MLP(nn.Module, Checkpointable):
             f"gate_act={self.gate_activation.__name__ if self.gate_activation is not None else None}, "
             f"bias={self.bias}, "
             f"norm={self.norm}, "
-            f"norm_type={self.norm_type}"
+            f"norm_type={self.norm_type}, "
+            f"stochastic_depth={self.stochastic_depth}"
         )
 
     def forward(self, x: Tensor) -> Tensor:
@@ -221,6 +246,7 @@ class MLP(nn.Module, Checkpointable):
                 self.training,
                 self.norm_type,
                 self.w_layer_scale,
+                self.stochastic_depth,
                 use_reentrant=False,
             )
             assert isinstance(result, Tensor)
@@ -243,4 +269,5 @@ class MLP(nn.Module, Checkpointable):
                 self.training,
                 self.norm_type,
                 self.w_layer_scale,
+                self.stochastic_depth,
             )

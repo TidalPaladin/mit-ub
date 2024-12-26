@@ -63,6 +63,7 @@ class TestMultiHeadAttention:
     )
     @pytest.mark.parametrize("norm", [False, True])
     @pytest.mark.parametrize("norm_type", [NormType.LAYER_NORM, NormType.RMS_NORM])
+    @pytest.mark.parametrize("stochastic_depth", [0.0, 0.25])
     @pytest.mark.parametrize("layer_scale", [None, 0.1])
     @pytest.mark.parametrize(
         "num_heads,num_kv_heads,Lq,Lk,Dq,Dk",
@@ -74,7 +75,9 @@ class TestMultiHeadAttention:
             (32, 8, 32, 32, 128, 64),
         ],
     )
-    def test_forward(self, device, norm, norm_type, num_heads, num_kv_heads, Lq, Lk, Dq, Dk, layer_scale):
+    def test_forward(
+        self, device, norm, norm_type, num_heads, num_kv_heads, Lq, Lk, Dq, Dk, layer_scale, stochastic_depth
+    ):
         model = MultiHeadAttention(
             Dq,
             num_heads,
@@ -85,6 +88,7 @@ class TestMultiHeadAttention:
             dropout=0.1,
             norm_type=norm_type,
             layer_scale=layer_scale,
+            stochastic_depth=stochastic_depth,
         ).to(device)
 
         B = 2
@@ -204,9 +208,10 @@ class TestMultiHeadAttention:
             kdim=Dk if Dk != Dq or Lk != Lq else None,
             vdim=Dk if Dk != Dq or Lk != Lq else None,
             dropout=0.1,
+            stochastic_depth=0.25,
         ).to(device)
 
-        B = 2
+        B = 8
         q = torch.randn(B, Lq, Dq, device=device)
         k = torch.randn(B, Lk, Dk, device=device) if Lk != Lq or Dk != Dq else q
         v = torch.randn(B, Lk, Dk, device=device) if Lk != Lq or Dk != Dq else q
