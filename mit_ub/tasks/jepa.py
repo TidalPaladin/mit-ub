@@ -255,13 +255,16 @@ class JEPA(Task):
         return self.jepa_config.ema_alpha + (1 - self.jepa_config.ema_alpha) * fraction_complete
 
     @torch.no_grad()
-    def update_ema(self) -> None:
+    def update_ema(self, batch_idx: int) -> None:
         """Update the Exponential Moving Average (EMA) of the backbone parameters."""
         momentum = self.get_ema_momentum()
         weight = 1 - momentum
         for ema_param, param in zip(self.teacher_backbone.parameters(), self.backbone.parameters()):
             ema_param.lerp_(param, weight)
-        if self.trainer.global_step % self.jepa_config.ema_sync_interval == 0:
+
+        is_correct_global_step = (self.trainer.global_step + 1) % self.jepa_config.ema_sync_interval == 0
+        is_correct_batch_idx = (batch_idx + 1) % self.trainer.accumulate_grad_batches == 0
+        if is_correct_global_step and is_correct_batch_idx:
             self.synchronize_ema_weights()
 
     @torch.no_grad()
@@ -330,7 +333,7 @@ class JEPA(Task):
 
         # ema update from previous step when training
         if state.mode == Mode.TRAIN:
-            self.update_ema()
+            self.update_ema(batch_idx)
         # update weight decay
         if self.jepa_config.weight_decay_final is not None:
             self.update_weight_decay()

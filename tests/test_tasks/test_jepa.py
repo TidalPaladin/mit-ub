@@ -134,8 +134,10 @@ class TestJEPA:
         config = JEPAConfig(ema_alpha=0.95, momentum_schedule=True)
         task = JEPA(vit_dummy, optimizer_init=optimizer_init, jepa_config=config)
         mocker.patch.object(task, "get_ema_momentum", return_value=momentum)
-        trainer = mocker.MagicMock(spec_set=pl.Trainer)
+        trainer = mocker.MagicMock(spec=pl.Trainer)
         trainer.world_size = 1
+        trainer.accumulate_grad_batches = 1
+        trainer.global_step = 1
         task.trainer = trainer
 
         with torch.no_grad():
@@ -148,10 +150,55 @@ class TestJEPA:
                 param.fill_(new)
 
         # Update EMA
-        task.update_ema()
+        task.update_ema(0)
         expected = torch.tensor(expected)
         for param in task.teacher_backbone.parameters():
             assert_close(param.data, expected.expand_as(param.data))
+
+    @pytest.mark.parametrize(
+        "interval,accumulate_grad_batches,global_step,batch_idx,should_sync",
+        [
+            (100, 1, 0, 0, False),
+            (100, 1, 49, 49, False),
+            (50, 1, 49, 49, True),
+            (100, 1, 99, 99, True),
+            (100, 5, 0, 0 * 5, False),
+            (100, 5, 49, 49 * 5, False),
+            (50, 5, 49, 49 * 5 - 1, True),
+            (50, 5, 49, 49 * 5, False),
+            (50, 5, 49, 49 * 5 + 1, False),
+            (100, 5, 99, 99 * 5 - 1, True),
+            (100, 5, 99, 99 * 5, False),
+            (100, 5, 99, 99 * 5 + 1, False),
+        ],
+    )
+    def test_sync_interval(
+        self,
+        mocker,
+        vit_dummy,
+        optimizer_init,
+        interval,
+        accumulate_grad_batches,
+        global_step,
+        batch_idx,
+        should_sync,
+    ):
+        config = JEPAConfig(ema_alpha=0.95, momentum_schedule=True, ema_sync_interval=interval)
+        task = JEPA(vit_dummy, optimizer_init=optimizer_init, jepa_config=config)
+        mocker.patch.object(task, "get_ema_momentum", return_value=0.95)
+        sync = mocker.patch.object(task, "synchronize_ema_weights")
+
+        trainer = mocker.MagicMock(spec=pl.Trainer)
+        trainer.world_size = 1
+        trainer.accumulate_grad_batches = accumulate_grad_batches
+        trainer.global_step = global_step
+        task.trainer = trainer
+
+        task.update_ema(batch_idx)
+        if should_sync:
+            sync.assert_called_once()
+        else:
+            sync.assert_not_called()
 
     @pytest.mark.parametrize("world_size", [1, 2])
     def test_synchronize_ema_weights(self, vit_dummy, mocker, optimizer_init, world_size):
