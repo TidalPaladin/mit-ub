@@ -134,8 +134,10 @@ class TestJEPA:
         config = JEPAConfig(ema_alpha=0.95, momentum_schedule=True)
         task = JEPA(vit_dummy, optimizer_init=optimizer_init, jepa_config=config)
         mocker.patch.object(task, "get_ema_momentum", return_value=momentum)
-        trainer = mocker.MagicMock(spec_set=pl.Trainer)
+        trainer = mocker.MagicMock(spec=pl.Trainer)
         trainer.world_size = 1
+        trainer.accumulate_grad_batches = 1
+        trainer.global_step = 1
         task.trainer = trainer
 
         with torch.no_grad():
