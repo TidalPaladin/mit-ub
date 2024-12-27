@@ -177,6 +177,13 @@ class MultiHeadAttention(nn.Module, Checkpointable):
         self.checkpoint = False
         self.stochastic_depth = stochastic_depth
 
+        if embed_dim % num_heads != 0:
+            raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})")
+        if self.head_dim % 16 != 0:
+            raise ValueError(f"head_dim ({self.head_dim}) must be divisible by 16")
+        if self.kv_dim % 16 != 0:
+            raise ValueError(f"kv_dim ({self.kv_dim}) must be divisible by 16")
+
         # Register optional parameters
         for prefix in ("w", "b"):
             for suffix in ("_in", "_q", "_k", "_v", "_out", "_pre_norm", "_norm"):
