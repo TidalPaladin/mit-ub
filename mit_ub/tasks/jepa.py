@@ -81,7 +81,7 @@ class JEPAConfig:
     salt_pepper_prob: float | Tuple[float, float] = (0.01, 0.05)
     weight_decay_final: float | None = None
     ema_sync_interval: int = 100
-    self_attn: bool = True
+    self_attn: bool = False
 
     def __post_init__(self) -> None:
         if not 0 < self.context_ratio <= 1:
