@@ -104,6 +104,6 @@ class TestSoftMoE:
             assert not torch.allclose(v, weight_reset[k], equal_nan=True)
 
     def test_extra_repr(self):
-        layer = SoftMoE(32, 64, 4, 16, nhead=8)
+        layer = SoftMoE(128, 256, 4, 16, nhead=4)
         result = str(layer)
         assert "num_experts=4, num_slots=16" in result

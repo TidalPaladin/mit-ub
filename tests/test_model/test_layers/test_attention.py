@@ -68,11 +68,11 @@ class TestMultiHeadAttention:
     @pytest.mark.parametrize(
         "num_heads,num_kv_heads,Lq,Lk,Dq,Dk",
         [
-            (32, 32, 32, 32, 128, 128),
-            (32, 16, 32, 32, 128, 128),
-            (32, 32, 32, 16, 128, 128),
-            (32, 32, 32, 32, 128, 64),
-            (32, 8, 32, 32, 128, 64),
+            (8, 8, 32, 32, 128, 128),
+            (8, 4, 32, 32, 128, 128),
+            (8, 8, 32, 16, 128, 128),
+            (8, 8, 32, 32, 128, 64),
+            (8, 2, 32, 32, 128, 64),
         ],
     )
     def test_forward(
@@ -115,11 +115,11 @@ class TestMultiHeadAttention:
     @pytest.mark.parametrize(
         "num_heads,num_kv_heads,Lq,Lk,Dq,Dk",
         [
-            (32, 32, 32, 32, 128, 128),
-            (32, 16, 32, 32, 128, 128),
-            (32, 32, 32, 16, 128, 128),
-            (32, 32, 32, 32, 128, 64),
-            (32, 8, 32, 32, 128, 64),
+            (8, 8, 32, 32, 128, 128),
+            (8, 4, 32, 32, 128, 128),
+            (8, 8, 32, 16, 128, 128),
+            (8, 8, 32, 32, 128, 64),
+            (8, 2, 32, 32, 128, 64),
         ],
     )
     def test_backward(self, device, norm, checkpoint, layer_scale, num_heads, num_kv_heads, Lq, Lk, Dq, Dk):
@@ -151,11 +151,11 @@ class TestMultiHeadAttention:
     @pytest.mark.parametrize(
         "num_heads,num_kv_heads,Dq,Dk",
         [
-            (32, 32, 128, 128),
-            (32, 16, 128, 128),
-            (32, 32, 128, 128),
-            (32, 32, 128, 64),
-            (32, 8, 128, 64),
+            (8, 8, 128, 128),
+            (8, 4, 128, 128),
+            (8, 8, 128, 128),
+            (8, 8, 128, 64),
+            (8, 2, 128, 64),
         ],
     )
     @pytest.mark.parametrize("norm", [False, True])
@@ -192,11 +192,11 @@ class TestMultiHeadAttention:
     @pytest.mark.parametrize(
         "num_heads,num_kv_heads,Lq,Lk,Dq,Dk",
         [
-            (32, 32, 32, 32, 128, 128),
-            (32, 16, 32, 32, 128, 128),
-            (32, 32, 32, 16, 128, 128),
-            (32, 32, 32, 32, 128, 64),
-            (32, 8, 32, 32, 128, 64),
+            (4, 4, 32, 32, 128, 128),
+            (4, 2, 32, 32, 128, 128),
+            (4, 4, 32, 16, 128, 128),
+            (4, 4, 32, 32, 128, 64),
+            (4, 1, 32, 32, 128, 64),
         ],
     )
     def test_forward_deterministic(self, device, norm, num_heads, num_kv_heads, Lq, Lk, Dq, Dk):
@@ -240,8 +240,8 @@ class TestMultiHeadAttention:
     @pytest.mark.parametrize(
         "num_heads,L,D",
         [
-            (32, 32, 128),
-            (16, 16, 64),
+            (8, 32, 128),
+            (4, 16, 64),
         ],
     )
     def test_packed_matches_unpacked(self, device, norm, qk_norm, num_heads, L, D):
@@ -286,7 +286,7 @@ class TestMultiHeadAttention:
         assert_close(packed_out, unpacked_out)
 
     def test_fused_norm(self):
-        num_heads, num_kv_heads, Lq, Lk, Dq, Dk = 32, 32, 32, 32, 128, 128
+        num_heads, num_kv_heads, Lq, Lk, Dq, Dk = 8, 8, 32, 32, 128, 128
         model = MultiHeadAttention(
             Dq,
             num_heads,
@@ -315,9 +315,9 @@ class TestMultiHeadAttention:
         assert_close(baseline, actual)
 
     def test_extra_repr(self):
-        layer = MultiHeadAttention(32, 8, 8)
+        layer = MultiHeadAttention(128, 8, 8)
         result = str(layer)
-        exp = "dim=32, heads=8, kv_heads=8, head_dim=4, kv_dim=32, dropout=0.0, norm=False, qk_norm=False, bias=True, kv_norm=False, norm_type=layernorm"
+        exp = "dim=128, heads=8, kv_heads=8, head_dim=16, kv_dim=128, dropout=0.0, norm=False, qk_norm=False, bias=True, kv_norm=False, norm_type=layernorm"
         assert exp in result
 
     def test_copy_parameters_self(self):
@@ -357,13 +357,13 @@ class TestMultiHeadAttention:
     @pytest.mark.parametrize(
         "d1,h1,hkv1,norm1,qk1,d2,h2,hkv2,norm2,qk2",
         [
-            (32, 8, 8, False, False, 32, 8, 8, False, False),
-            (32, 8, 8, False, False, 32, 8, 8, True, False),
-            (32, 8, 8, False, False, 32, 8, 8, False, True),
-            (32, 8, 8, False, False, 32, 8, 8, True, True),
-            (32, 8, 8, False, False, 32, 8, 8, False, False),
-            (32, 8, 8, True, False, 32, 8, 8, False, False),
-            (32, 8, 8, False, True, 32, 8, 8, False, False),
+            (128, 8, 8, False, False, 128, 8, 8, False, False),
+            (128, 8, 8, False, False, 128, 8, 8, True, False),
+            (128, 8, 8, False, False, 128, 8, 8, False, True),
+            (128, 8, 8, False, False, 128, 8, 8, True, True),
+            (128, 8, 8, False, False, 128, 8, 8, False, False),
+            (128, 8, 8, True, False, 128, 8, 8, False, False),
+            (128, 8, 8, False, True, 128, 8, 8, False, False),
         ],
     )
     def test_copy_parameters_no_error(self, d1, h1, hkv1, norm1, qk1, d2, h2, hkv2, norm2, qk2):
