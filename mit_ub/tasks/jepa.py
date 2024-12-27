@@ -12,7 +12,6 @@ from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
 from torch import Tensor
 from torch.distributed import ReduceOp, all_reduce
-from torch.distributed import barrier as dist_barrier
 from torch.optim.optimizer import Optimizer
 
 from ..data.mixup import mixup, sample_mixup_parameters
@@ -61,6 +60,9 @@ class JEPAConfig:
         salt_pepper_prob: Proportion of salt and pepper noise to apply to the input.
         weight_decay_final: Final weight decay value. If set, the weight decay will be linearly
             annealed from the current value to this value over the course of training.
+        ema_sync_interval: Interval (in steps) at which to synchronize the EMA weights across all processes.
+            Synchronization can incur a heavy performance penalty for large models, so this should be set to a high value.
+            However, larger values lead to divergence in the EMA weights across processes.
     """
 
     context_ratio: float = 0.5
@@ -77,6 +79,7 @@ class JEPAConfig:
     noise_clip: bool = True
     salt_pepper_prob: float | Tuple[float, float] = (0.01, 0.05)
     weight_decay_final: float | None = None
+    ema_sync_interval: int = 100
 
     def __post_init__(self) -> None:
         if not 0 < self.context_ratio <= 1:
@@ -95,6 +98,8 @@ class JEPAConfig:
             raise ValueError("predictor_depth must be at least 1")
         if self.weight_decay_final is not None and not 0 <= self.weight_decay_final:
             raise ValueError("weight_decay_final must be non-negative")
+        if self.ema_sync_interval < 1:
+            raise ValueError("ema_sync_interval must be at least 1")
 
 
 class JEPA(Task):
@@ -253,9 +258,11 @@ class JEPA(Task):
     def update_ema(self) -> None:
         """Update the Exponential Moving Average (EMA) of the backbone parameters."""
         momentum = self.get_ema_momentum()
+        weight = 1 - momentum
         for ema_param, param in zip(self.teacher_backbone.parameters(), self.backbone.parameters()):
-            ema_param.lerp_(param, 1 - momentum)
-        self.synchronize_ema_weights()
+            ema_param.lerp_(param, weight)
+        if self.trainer.global_step % self.jepa_config.ema_sync_interval == 0:
+            self.synchronize_ema_weights()
 
     @torch.no_grad()
     def synchronize_ema_weights(self) -> None:
@@ -267,12 +274,16 @@ class JEPA(Task):
         in Distributed Data Parallel (DDP) training.
         """
         if self.trainer.world_size > 1:
+            # Submit all reduce operations for each parameter
+            handles = []
             for ema_param in self.teacher_backbone.parameters():
-                # There seems to be sporadic deadlocks in DDP, so we use barriers to keep things synchronized
-                dist_barrier()
-                all_reduce(ema_param.data, op=ReduceOp.SUM)
-                ema_param.data /= self.trainer.world_size
-            dist_barrier()
+                handle = all_reduce(ema_param.data, op=ReduceOp.SUM, async_op=True)
+                handles.append(handle)
+
+            # Complete the average on each parameter
+            for handle, ema_param in zip(handles, self.teacher_backbone.parameters()):
+                handle.wait()
+                ema_param.data.div_(self.trainer.world_size)
 
     def update_weight_decay(self) -> List[float | None]:
         """Update the weight decay for each parameter group based on the current training progress."""
