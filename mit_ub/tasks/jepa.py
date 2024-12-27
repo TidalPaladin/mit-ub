@@ -63,6 +63,7 @@ class JEPAConfig:
         ema_sync_interval: Interval (in steps) at which to synchronize the EMA weights across all processes.
             Synchronization can incur a heavy performance penalty for large models, so this should be set to a high value.
             However, larger values lead to divergence in the EMA weights across processes.
+        self_attn: If True, use self-attention in the predictor.
     """
 
     context_ratio: float = 0.5
@@ -80,6 +81,7 @@ class JEPAConfig:
     salt_pepper_prob: float | Tuple[float, float] = (0.01, 0.05)
     weight_decay_final: float | None = None
     ema_sync_interval: int = 100
+    self_attn: bool = True
 
     def __post_init__(self) -> None:
         if not 0 < self.context_ratio <= 1:
@@ -179,7 +181,10 @@ class JEPA(Task):
 
         # JEPA predictor
         self.jepa_predictor = nn.ModuleList(
-            [self.backbone.create_decoder_layer(i, self_attn=False) for i in range(self.jepa_config.predictor_depth)]
+            [
+                self.backbone.create_decoder_layer(i, self_attn=self.jepa_config.self_attn)
+                for i in range(self.jepa_config.predictor_depth)
+            ]
         )
         self.save_hyperparameters()
 
