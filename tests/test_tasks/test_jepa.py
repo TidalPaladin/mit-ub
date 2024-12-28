@@ -1,3 +1,4 @@
+import math
 import os
 from unittest.mock import MagicMock
 
@@ -10,7 +11,7 @@ from torch.multiprocessing import spawn  # type: ignore
 from torch.testing import assert_close
 
 from mit_ub.model.layers import has_layer_scale
-from mit_ub.tasks.jepa import JEPA, JEPAConfig
+from mit_ub.tasks.jepa import JEPA, EMAConfig, JEPAConfig
 
 
 def run_ema_sync(rank, world_size, backbone, optimizer_init):
@@ -68,7 +69,11 @@ class TestJEPA:
     def test_create_metrics(self, task, state):
         metrics = task.create_metrics(state)
         base_keys = {"example_sim", "micro_token_sim", "macro_token_sim", "jepa_loss"}
-        train_keys = {"layer_scale_mean", "layer_scale_max"} if has_layer_scale(task.backbone) else set()
+        train_keys = (
+            {"layer_scale_mean", "layer_scale_max", "ema_momentum"}
+            if has_layer_scale(task.backbone)
+            else {"ema_momentum"}
+        )
 
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
@@ -76,18 +81,29 @@ class TestJEPA:
             assert set(metrics.keys()) == base_keys
 
     @pytest.mark.parametrize(
-        "momentum_schedule,max_steps,current_step,ema_alpha,expected",
+        "max_steps,current_step,expected",
         [
-            (True, 1000, 0, 0.95, 0.95),
-            (True, 1000, 1000, 0.95, 1.0),
-            (True, 1000, 500, 0.95, 0.975),
-            (False, 1000, 1000, 0.95, 0.95),
+            # Initial step starts at initial momentum
+            (1000, 0, 1.0),
+            # After warmup steps, momentum reaches target momentum
+            (1000, 100, 0.98),
+            # Before cooldown, momentum is somewhere in between
+            (1000, 500, 0.9885),
+            # After cooldown steps, momentum reaches target momentum
+            (1000, 1000, 1.0),
         ],
     )
-    def test_ema_momentum_step(
-        self, mocker, vit_dummy, optimizer_init, momentum_schedule, max_steps, current_step, ema_alpha, expected
-    ):
-        config = JEPAConfig(ema_alpha=ema_alpha, momentum_schedule=momentum_schedule)
+    def test_ema_momentum_step(self, mocker, vit_dummy, optimizer_init, max_steps, current_step, expected):
+        momentum = 0.98
+        initial_momentum = 1.0
+        ema_config = EMAConfig(
+            momentum=momentum,
+            initial_momentum=initial_momentum,
+            warmup_steps=100,
+            cooldown_steps=200,
+            timescale=200,
+        )
+        config = JEPAConfig(ema_config=ema_config)
         task = JEPA(vit_dummy, optimizer_init=optimizer_init, jepa_config=config)
         trainer = mocker.MagicMock(spec_set=pl.Trainer)
         trainer.max_steps = max_steps
@@ -97,31 +113,7 @@ class TestJEPA:
         task.trainer = trainer
 
         actual = task.get_ema_momentum()
-        assert actual == expected
-
-    @pytest.mark.parametrize(
-        "momentum_schedule,max_epochs,current_epoch,ema_alpha,expected",
-        [
-            (True, 100, 0, 0.95, 0.95),
-            (True, 100, 100, 0.95, 1.0),
-            (True, 100, 50, 0.95, 0.975),
-            (False, 100, 100, 0.95, 0.95),
-        ],
-    )
-    def test_ema_momentum_epoch(
-        self, mocker, vit_dummy, optimizer_init, momentum_schedule, max_epochs, current_epoch, ema_alpha, expected
-    ):
-        config = JEPAConfig(ema_alpha=ema_alpha, momentum_schedule=momentum_schedule)
-        task = JEPA(vit_dummy, optimizer_init=optimizer_init, jepa_config=config)
-        trainer = mocker.MagicMock(spec_set=pl.Trainer)
-        trainer.max_steps = None
-        trainer.global_step = None
-        trainer.max_epochs = max_epochs
-        trainer.current_epoch = current_epoch
-        task.trainer = trainer
-
-        actual = task.get_ema_momentum()
-        assert actual == expected
+        assert math.isclose(actual, expected, abs_tol=1e-3)
 
     @pytest.mark.parametrize(
         "current,new,momentum,expected",
@@ -131,7 +123,7 @@ class TestJEPA:
         ],
     )
     def test_update_ema(self, mocker, vit_dummy, optimizer_init, current, new, momentum, expected):
-        config = JEPAConfig(ema_alpha=0.95, momentum_schedule=True)
+        config = JEPAConfig()
         task = JEPA(vit_dummy, optimizer_init=optimizer_init, jepa_config=config)
         mocker.patch.object(task, "get_ema_momentum", return_value=momentum)
         trainer = mocker.MagicMock(spec=pl.Trainer)
@@ -154,6 +146,21 @@ class TestJEPA:
         expected = torch.tensor(expected)
         for param in task.teacher_backbone.parameters():
             assert_close(param.data, expected.expand_as(param.data))
+
+    def test_no_ema_update_on_momentum_1(self, mocker, vit_dummy, optimizer_init):
+        config = JEPAConfig()
+        task = JEPA(vit_dummy, optimizer_init=optimizer_init, jepa_config=config)
+        mocker.patch.object(task, "get_ema_momentum", return_value=1.0)
+        # Early return should mean parameters are not iterated over
+        spy = mocker.spy(task.teacher_backbone, "parameters")
+        trainer = mocker.MagicMock(spec=pl.Trainer)
+        trainer.world_size = 1
+        trainer.accumulate_grad_batches = 1
+        trainer.global_step = 1
+        task.trainer = trainer
+
+        task.update_ema(0)
+        spy.assert_not_called()
 
     @pytest.mark.parametrize(
         "interval,accumulate_grad_batches,global_step,batch_idx,should_sync",
@@ -183,7 +190,8 @@ class TestJEPA:
         batch_idx,
         should_sync,
     ):
-        config = JEPAConfig(ema_alpha=0.95, momentum_schedule=True, ema_sync_interval=interval)
+        ema_config = EMAConfig(momentum=0.95, sync_interval=interval, initial_momentum=0.95, cooldown_steps=1)
+        config = JEPAConfig(ema_config=ema_config)
         task = JEPA(vit_dummy, optimizer_init=optimizer_init, jepa_config=config)
         mocker.patch.object(task, "get_ema_momentum", return_value=0.95)
         sync = mocker.patch.object(task, "synchronize_ema_weights")
@@ -192,6 +200,7 @@ class TestJEPA:
         trainer.world_size = 1
         trainer.accumulate_grad_batches = accumulate_grad_batches
         trainer.global_step = global_step
+        trainer.max_steps = 1000
         task.trainer = trainer
 
         task.update_ema(batch_idx)

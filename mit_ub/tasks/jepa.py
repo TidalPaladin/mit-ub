@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 
@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics as tm
+from deep_helpers.optim.rsqrt import get_momentum
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
 from torch import Tensor
@@ -38,6 +39,61 @@ def apply_noise_batched(transform: RandomNoise, x: Tensor) -> Tensor:
 
 
 @dataclass
+class EMAConfig:
+    """
+    Configuration for student-teacher EMA updates.
+
+    Momentum scheduling uses the following strategy:
+        * Begin at `initial_momentum`
+        * Linear warmup over `warmup_steps` to `momentum`
+        * Reciprocal square root increase over `timescale` steps to `momentum`
+        * Linear cooldown over `cooldown_steps` back to `initial_momentum`
+
+    Args:
+        momentum: Momentum value after warmup.
+        warmup_steps: Number of steps over which to warm up the momentum.
+        cooldown_steps: Number of steps over which to cooldown the momentum.
+        stopped_steps: Number of steps after cooldown at which to hold the momentum at `initial_momentum`.
+        timescale: Time scale for the EMA update.
+        initial_momentum: Initial momentum value.
+        sync_interval: Interval (in steps) at which to synchronize the EMA weights across all processes.
+            Synchronization can incur a heavy performance penalty for large models, so this should be set to a high value.
+            However, larger values lead to divergence in the EMA weights across processes.
+    """
+
+    momentum: float = 0.98
+    warmup_steps: int = 1000
+    cooldown_steps: int = 25000
+    stopped_steps: int = 0
+    timescale: int = 10000
+    initial_momentum: float = 1.0
+    sync_interval: int = 100
+
+    def __post_init__(self) -> None:
+        if not 0.0 < self.momentum < 1.0:
+            raise ValueError("momentum must be in the range [0, 1]")
+        if not 0 < self.sync_interval:
+            raise ValueError("sync_interval must be positive")
+        if not 0 <= self.warmup_steps:
+            raise ValueError("warmup_steps must be non-negative")
+        if not 0 <= self.cooldown_steps:
+            raise ValueError("cooldown_steps must be non-negative")
+        if not 0 <= self.timescale:
+            raise ValueError("timescale must be non-negative")
+        if not 0.0 <= self.initial_momentum <= 1.0:
+            raise ValueError("initial_momentum must be in the range [0, 1]")
+        if not self.initial_momentum >= self.momentum:
+            raise ValueError("initial_momentum must be >= momentum")
+        if not 0 <= self.stopped_steps:
+            raise ValueError("stopped_steps must be non-negative")
+
+    def validate_schedule(self, max_steps: int) -> None:
+        linear_steps = self.warmup_steps + self.cooldown_steps + self.stopped_steps
+        if linear_steps > max_steps:
+            raise ValueError(f"Cannot satisfy EMA momentum schedule for {max_steps} steps: {self}")
+
+
+@dataclass
 class JEPAConfig:
     """
     Configuration for JEPA related hyperparameters.
@@ -49,8 +105,7 @@ class JEPAConfig:
             Increasing this ensures more adjacent tokens appear together in the context.
         context_subsample_ratio: Sampling ratio for encoded context just before passing
             it to the predictor.
-        ema_alpha: Smoothing factor for EMA updates.
-        momentum_schedule: If True, use a momentum schedule for EMA updates.
+        ema_config: Configuration for EMA updates.
         predictor_depth: Depth of the predictor network.
         mixup_alpha: Alpha parameter for the Beta distribution used to sample the mixup weight.
         mixup_prob: Probability of applying mixup to the input and target.
@@ -60,9 +115,6 @@ class JEPAConfig:
         salt_pepper_prob: Proportion of salt and pepper noise to apply to the input.
         weight_decay_final: Final weight decay value. If set, the weight decay will be linearly
             annealed from the current value to this value over the course of training.
-        ema_sync_interval: Interval (in steps) at which to synchronize the EMA weights across all processes.
-            Synchronization can incur a heavy performance penalty for large models, so this should be set to a high value.
-            However, larger values lead to divergence in the EMA weights across processes.
         self_attn: If True, use self-attention in the predictor.
     """
 
@@ -70,8 +122,7 @@ class JEPAConfig:
     target_ratio: float = 0.25
     scale: int = 4
     context_subsample_ratio: float = 0.5
-    ema_alpha: float = 0.95
-    momentum_schedule: bool = False
+    ema_config: EMAConfig = field(default_factory=lambda: EMAConfig())
     predictor_depth: int = 4
     mixup_alpha: float = 1.0
     mixup_prob: float = 0.2
@@ -80,7 +131,6 @@ class JEPAConfig:
     noise_clip: bool = True
     salt_pepper_prob: float | Tuple[float, float] = (0.01, 0.05)
     weight_decay_final: float | None = None
-    ema_sync_interval: int = 100
     self_attn: bool = False
 
     def __post_init__(self) -> None:
@@ -90,8 +140,6 @@ class JEPAConfig:
             raise ValueError("target_ratio must be in the range (0, 1]")
         if not 0 < self.context_subsample_ratio <= 1:
             raise ValueError("context_subsample_ratio must be in the range (0, 1]")
-        if not 0 < self.ema_alpha < 1:
-            raise ValueError("ema_alpha must be in the range (0, 1)")
         if not 0 < self.mixup_alpha:
             raise ValueError("mixup_alpha must be positive")
         if not 0 <= self.mixup_prob <= 1:
@@ -100,8 +148,6 @@ class JEPAConfig:
             raise ValueError("predictor_depth must be at least 1")
         if self.weight_decay_final is not None and not 0 <= self.weight_decay_final:
             raise ValueError("weight_decay_final must be non-negative")
-        if self.ema_sync_interval < 1:
-            raise ValueError("ema_sync_interval must be at least 1")
 
 
 class JEPA(Task):
@@ -211,6 +257,8 @@ class JEPA(Task):
         if has_layer_scale(self.backbone) and state.mode == Mode.TRAIN:
             metrics["layer_scale_max"] = MaxLayerScale()
             metrics["layer_scale_mean"] = MeanLayerScale()
+        if state.mode == Mode.TRAIN:
+            metrics["ema_momentum"] = tm.MeanMetric()
 
         return metrics
 
@@ -253,21 +301,42 @@ class JEPA(Task):
 
     def get_ema_momentum(self) -> float:
         r"""Get the momentum for the EMA update based on the current step or epoch."""
-        if not self.jepa_config.momentum_schedule:
-            return self.jepa_config.ema_alpha
-        fraction_complete = self.fraction_complete
-        fraction_complete = fraction_complete if fraction_complete is not None else 0.0
-        return self.jepa_config.ema_alpha + (1 - self.jepa_config.ema_alpha) * fraction_complete
+        if not (max_steps := self.trainer.max_steps):
+            raise RuntimeError("Cannot determine EMA momentum without trainer.max_steps")
+        if self.trainer.global_step == 0 and not getattr(self.trainer, "fast_dev_run", False):
+            self.jepa_config.ema_config.validate_schedule(max_steps)
+
+        # Shortcut in the stopped stage
+        global_step = self.trainer.global_step
+        if max_steps - global_step < self.jepa_config.ema_config.stopped_steps:
+            return self.jepa_config.ema_config.initial_momentum
+
+        momentum = get_momentum(
+            self.trainer.global_step,
+            self.jepa_config.ema_config.momentum,
+            self.jepa_config.ema_config.warmup_steps,
+            self.jepa_config.ema_config.cooldown_steps,
+            self.trainer.max_steps,
+            self.jepa_config.ema_config.timescale,
+            self.jepa_config.ema_config.initial_momentum,
+        )
+        assert 0 <= momentum <= 1.0
+        return momentum
 
     @torch.no_grad()
     def update_ema(self, batch_idx: int) -> None:
         """Update the Exponential Moving Average (EMA) of the backbone parameters."""
         momentum = self.get_ema_momentum()
+
+        # Shortcut if momentum=1.0 (no update)
+        if momentum == 1.0:
+            return
+
         weight = 1 - momentum
         for ema_param, param in zip(self.teacher_backbone.parameters(), self.backbone.parameters()):
             ema_param.lerp_(param, weight)
 
-        is_correct_global_step = (self.trainer.global_step + 1) % self.jepa_config.ema_sync_interval == 0
+        is_correct_global_step = (self.trainer.global_step + 1) % self.jepa_config.ema_config.sync_interval == 0
         is_correct_batch_idx = (batch_idx + 1) % self.trainer.accumulate_grad_batches == 0
         if is_correct_global_step and is_correct_batch_idx:
             self.synchronize_ema_weights()
@@ -396,6 +465,9 @@ class JEPA(Task):
                 if "layer_scale_mean" in metrics:
                     metrics["layer_scale_mean"].update(self.backbone)
                     metrics["layer_scale_max"].update(self.backbone)
+
+                if "ema_momentum" in metrics:
+                    metrics["ema_momentum"].update(self.get_ema_momentum())
 
         output = {
             "log": {
