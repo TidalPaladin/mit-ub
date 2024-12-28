@@ -1,8 +1,8 @@
 .PHONY: benchmark clean clean-env check quality style tag-version test env upload upload-test
 
 PROJECT=mit_ub
-QUALITY_DIRS=$(PROJECT) tests
-CLEAN_DIRS=$(PROJECT) tests
+QUALITY_DIRS=$(PROJECT) tests scripts
+CLEAN_DIRS=$(PROJECT) tests scripts
 PYTHON=pdm run python
 BENCHMARK_DIR = ./benchmarks
 
