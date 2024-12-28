@@ -102,7 +102,7 @@ def step_classification_from_features(
     config: "ClassificationConfig",
     mixup_weight: Tensor | None = None,
     metrics: tm.MetricCollection | None = None,
-    metric_names: Sequence[str] = ("acc", "auroc"),
+    metric_names: Sequence[str] = ("acc", "macro_acc", "auroc"),
 ) -> Dict[str, Tensor]:
     # Forward pass
     N = features.shape[0]
@@ -139,6 +139,7 @@ def create_metrics(config: "ClassificationConfig") -> tm.MetricCollection:
         metrics = tm.MetricCollection(
             {
                 "acc": tm.Accuracy(task="binary"),
+                "macro_acc": tm.Accuracy(task="binary", average="macro"),
                 "auroc": tm.AUROC(task="binary"),
                 "bce_loss": tm.MeanMetric(),
             }
@@ -147,6 +148,7 @@ def create_metrics(config: "ClassificationConfig") -> tm.MetricCollection:
         metrics = tm.MetricCollection(
             {
                 "acc": tm.Accuracy(task="multiclass", num_classes=config.num_classes),
+                "macro_acc": tm.Accuracy(task="multiclass", average="macro", num_classes=config.num_classes),
                 "ce_loss": tm.MeanMetric(),
             }
         )

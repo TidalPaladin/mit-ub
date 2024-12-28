@@ -37,7 +37,7 @@ class TestClassificationTask:
     )
     def test_create_metrics(self, task, state):
         metrics = task.create_metrics(state)
-        base_keys = {"ce_loss", "acc"}
+        base_keys = {"ce_loss", "acc", "macro_acc"}
         assert set(metrics.keys()) == base_keys
 
     @pytest.mark.parametrize(
@@ -51,7 +51,7 @@ class TestClassificationTask:
     )
     def test_create_metrics_binary(self, binary_task, state):
         metrics = binary_task.create_metrics(state)
-        base_keys = {"bce_loss", "acc", "auroc"}
+        base_keys = {"bce_loss", "acc", "macro_acc", "auroc"}
         assert set(metrics.keys()) == base_keys
 
     def test_fit(self, task, cifar10_datamodule, logger):
@@ -103,7 +103,7 @@ class TestJEPAWithClassification:
     )
     def test_create_metrics(self, task, state):
         metrics = task.create_metrics(state)
-        base_keys = {"example_sim", "micro_token_sim", "macro_token_sim", "jepa_loss", "ce_loss", "acc"}
+        base_keys = {"example_sim", "micro_token_sim", "macro_token_sim", "jepa_loss", "ce_loss", "acc", "macro_acc"}
         train_keys = (
             {"layer_scale_mean", "layer_scale_max", "ema_momentum"}
             if has_layer_scale(task.backbone)
@@ -125,7 +125,16 @@ class TestJEPAWithClassification:
     )
     def test_create_metrics_binary(self, binary_task, state):
         metrics = binary_task.create_metrics(state)
-        base_keys = {"example_sim", "micro_token_sim", "macro_token_sim", "jepa_loss", "bce_loss", "acc", "auroc"}
+        base_keys = {
+            "example_sim",
+            "micro_token_sim",
+            "macro_token_sim",
+            "jepa_loss",
+            "bce_loss",
+            "acc",
+            "macro_acc",
+            "auroc",
+        }
         train_keys = (
             {"layer_scale_mean", "layer_scale_max", "ema_momentum"}
             if has_layer_scale(binary_task.backbone)
@@ -205,7 +214,7 @@ class TestDistillationWithClassification:
     )
     def test_create_metrics(self, task, state):
         metrics = task.create_metrics(state)
-        base_keys = {"distill_loss", "ce_loss", "acc"}
+        base_keys = {"distill_loss", "ce_loss", "acc", "macro_acc"}
         train_keys = {"layer_scale_mean", "layer_scale_max"} if has_layer_scale(task.backbone) else set()
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
@@ -223,7 +232,7 @@ class TestDistillationWithClassification:
     )
     def test_create_metrics_binary(self, binary_task, state):
         metrics = binary_task.create_metrics(state)
-        base_keys = {"distill_loss", "bce_loss", "acc", "auroc"}
+        base_keys = {"distill_loss", "bce_loss", "acc", "macro_acc", "auroc"}
         train_keys = {"layer_scale_mean", "layer_scale_max"} if has_layer_scale(binary_task.backbone) else set()
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
