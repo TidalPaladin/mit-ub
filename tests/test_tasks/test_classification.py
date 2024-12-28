@@ -104,7 +104,11 @@ class TestJEPAWithClassification:
     def test_create_metrics(self, task, state):
         metrics = task.create_metrics(state)
         base_keys = {"example_sim", "micro_token_sim", "macro_token_sim", "jepa_loss", "ce_loss", "acc"}
-        train_keys = {"layer_scale_mean", "layer_scale_max"} if has_layer_scale(task.backbone) else set()
+        train_keys = (
+            {"layer_scale_mean", "layer_scale_max", "ema_momentum"}
+            if has_layer_scale(task.backbone)
+            else {"ema_momentum"}
+        )
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
         else:
@@ -122,7 +126,11 @@ class TestJEPAWithClassification:
     def test_create_metrics_binary(self, binary_task, state):
         metrics = binary_task.create_metrics(state)
         base_keys = {"example_sim", "micro_token_sim", "macro_token_sim", "jepa_loss", "bce_loss", "acc", "auroc"}
-        train_keys = {"layer_scale_mean", "layer_scale_max"} if has_layer_scale(binary_task.backbone) else set()
+        train_keys = (
+            {"layer_scale_mean", "layer_scale_max", "ema_momentum"}
+            if has_layer_scale(binary_task.backbone)
+            else {"ema_momentum"}
+        )
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
         else:
