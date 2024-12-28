@@ -19,9 +19,11 @@ fit:
 
     callbacks:
       # Save the best model based on validation loss and most recent model
-      - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+      # This custom callback synchronizes the teacher weights before saving the checkpoint,
+      # and it ensures that a final checkpoint is saved when fitting is complete.
+      - class_path: mit_ub.callbacks.ModelCheckpoint
         init_args:
-          filename: "epoch={epoch}-step={step}-acc={val/acc:.4f}"
+          filename: "step={step}-acc={val/acc:.4f}"
           monitor: "val/acc"
           auto_insert_metric_name: false
           mode: max
