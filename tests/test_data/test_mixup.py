@@ -2,7 +2,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from mit_ub.data.mixup import is_mixed, mixup, mixup_dense_label, sample_mixup_parameters
+from mit_ub.data.mixup import is_mixed, is_mixed_with_unknown, mixup, mixup_dense_label, sample_mixup_parameters
 
 
 @pytest.mark.parametrize(
@@ -126,3 +126,28 @@ def test_mixup_dense_label(device: str, mixup_prob: float, mixup_alpha: float):
     # Test that weight=1 gives rolled labels
     one_weight = torch.ones(labels.shape[0], device=device)
     assert torch.allclose(mixup_dense_label(labels, one_weight, num_classes=N), labels_one_hot.roll(1, 0))
+
+
+def test_is_mixed_with_unknown_binary():
+    torch.random.manual_seed(0)
+    label = torch.tensor([0, 1, -10, 0, 1, -10])
+    mask = label != -10
+    weight = sample_mixup_parameters(label.shape[0], 0.8, 1.0)
+
+    result = mask & ~is_mixed_with_unknown(weight, mask)
+    mixed_label = mixup(label, weight)
+    assert (mixed_label[result] >= 0).all()
+    assert (mixed_label[~result] < 0).all()
+
+
+def test_is_mixed_with_unknown_categorical():
+    torch.random.manual_seed(0)
+    num_classes = 4
+    label = torch.tensor([0, 1, -10, 2, 3, -10])
+    mask = label != -10
+    weight = sample_mixup_parameters(label.shape[0], 0.8, 1.0)
+
+    result = mask & ~is_mixed_with_unknown(weight, mask)
+    mixed_label = mixup_dense_label(label, weight, num_classes=num_classes)
+    assert (mixed_label[result].sum(-1) == 1).all()
+    assert (mixed_label[~result].sum(-1) < 1).all()
