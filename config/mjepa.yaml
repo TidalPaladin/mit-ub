@@ -75,10 +75,18 @@ fit:
       #strict_checkpoint: true
 
       jepa_config:
-        # Momentum of teacher weight update and an optional linear schedule for increasing alpha to 1.0
-        # NOTE: Using a momentum schedule breaks the infinite LR schedule provided by the reciprocal square root scheduler.
-        ema_alpha: 0.98
-        momentum_schedule: false
+        # Reciprocal square root EMA momentum schedule, from `initial_momentum` to `momentum` during warmup,
+        # and ending at `initial_momentum` after cooldown. If `stopped_steps` is set, the schedule will run at
+        # `initial_momentum` for the final `stopped_steps` steps.
+        # We match these roughly against the LR schedule as a good initial hyperparameter guess.
+        ema_config: 
+          momentum: 0.98
+          initial_momentum: 1.0
+          warmup_steps: 500
+          stopped_steps: 15000
+          cooldown_steps: 15000
+          timescale: 10000
+          sync_interval: 100
 
         # Optional final weight decay for the backbone
         # NOTE: Using a weight decay schedule breaks the infinite LR schedule provided by the reciprocal square root scheduler.
@@ -87,6 +95,8 @@ fit:
         # Depth of transformer decoder making JEPA predictions.
         # Setting to 1/2 or 1/3 of the backbone depth is a good starting point.
         predictor_depth: 9
+        # By default the predictor will not use self-attention. This is empirically comparable to using self-attention.
+        self_attn: false
 
         # Ratios of input to sample as context and targets.
         # Should satisfy context_ratio + target_ratio <= 1.0
