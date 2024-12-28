@@ -80,12 +80,12 @@ fit:
         # `initial_momentum` for the final `stopped_steps` steps.
         # We match these roughly against the LR schedule as a good initial hyperparameter guess.
         ema_config: 
-          momentum: 0.98
+          momentum: 0.95
           initial_momentum: 1.0
-          warmup_steps: 500
+          warmup_steps: 1000
           stopped_steps: 15000
           cooldown_steps: 15000
-          timescale: 10000
+          timescale: 8000
           sync_interval: 100
 
         # Optional final weight decay for the backbone

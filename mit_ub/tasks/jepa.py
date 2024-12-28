@@ -308,15 +308,19 @@ class JEPA(Task):
 
         # Shortcut in the stopped stage
         global_step = self.trainer.global_step
-        if max_steps - global_step < self.jepa_config.ema_config.stopped_steps:
+        if max_steps - global_step < (stopped_steps := self.jepa_config.ema_config.stopped_steps):
             return self.jepa_config.ema_config.initial_momentum
+
+        # Effective total schedule length accounting for stopped stage duration
+        effective_max_steps = max_steps - stopped_steps
+        assert effective_max_steps > 0, "Effective max steps must be positive"
 
         momentum = get_momentum(
             self.trainer.global_step,
             self.jepa_config.ema_config.momentum,
             self.jepa_config.ema_config.warmup_steps,
             self.jepa_config.ema_config.cooldown_steps,
-            self.trainer.max_steps,
+            effective_max_steps,
             self.jepa_config.ema_config.timescale,
             self.jepa_config.ema_config.initial_momentum,
         )
