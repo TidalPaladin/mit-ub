@@ -81,25 +81,31 @@ class TestJEPA:
             assert set(metrics.keys()) == base_keys
 
     @pytest.mark.parametrize(
-        "max_steps,current_step,expected",
+        "max_steps,current_step,stopped_steps,expected",
         [
             # Initial step starts at initial momentum
-            (1000, 0, 1.0),
+            (1000, 0, 0, 1.0),
             # After warmup steps, momentum reaches target momentum
-            (1000, 100, 0.98),
+            (1000, 100, 0, 0.98),
             # Before cooldown, momentum is somewhere in between
-            (1000, 500, 0.9885),
+            (1000, 500, 0, 0.9885),
             # After cooldown steps, momentum reaches target momentum
-            (1000, 1000, 1.0),
+            (1000, 1000, 0, 1.0),
+            # Alternate cooldown with a stopped stage
+            (1000, 800, 200, 1.0),
+            (1000, 1000, 200, 1.0),
         ],
     )
-    def test_ema_momentum_step(self, mocker, vit_dummy, optimizer_init, max_steps, current_step, expected):
+    def test_ema_momentum_step(
+        self, mocker, vit_dummy, optimizer_init, max_steps, current_step, stopped_steps, expected
+    ):
         momentum = 0.98
         initial_momentum = 1.0
         ema_config = EMAConfig(
             momentum=momentum,
             initial_momentum=initial_momentum,
             warmup_steps=100,
+            stopped_steps=stopped_steps,
             cooldown_steps=200,
             timescale=200,
         )
