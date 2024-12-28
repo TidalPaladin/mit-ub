@@ -12,7 +12,7 @@ from deep_helpers.tasks import Task
 from einops import rearrange
 from torch import Tensor
 
-from ..data import is_mixed, mixup, mixup_dense_label, sample_mixup_parameters
+from ..data import is_mixed, is_mixed_with_unknown, mixup, mixup_dense_label, sample_mixup_parameters
 from ..model import AdaptiveViTConfig, AnyModelConfig, ViTConfig
 from ..model.layers.pool import PoolType, get_global_pooling_layer
 from .distillation import DistillationConfig, DistillationWithProbe
@@ -35,14 +35,18 @@ def categorical_loss(
 ) -> Tensor:
     # Filter valid labels
     mask = is_valid_categorical_label(label)
-    if not mask.any():
-        return logits.new_zeros(1)
 
     # Apply mixup to labels if needed
     if mixup_weight is not None:
         label = mixup_dense_label(label, mixup_weight, num_classes=num_classes)
+        mask = mask & ~is_mixed_with_unknown(mixup_weight, mask)
 
-    return F.cross_entropy(logits[mask], label[mask])
+    if not mask.any():
+        return logits.new_zeros(1)
+
+    loss = F.cross_entropy(logits[mask], label[mask])
+    assert loss >= 0.0, f"Loss is negative: {loss}"
+    return loss
 
 
 def binary_loss(
@@ -52,14 +56,18 @@ def binary_loss(
 ) -> Tensor:
     # Filter valid labels
     mask = is_valid_binary_label(label)
-    if not mask.any():
-        return logits.new_zeros(1)
 
     # Apply mixup to labels if needed
     if mixup_weight is not None:
         label = mixup(label, mixup_weight)
+        mask = mask & ~is_mixed_with_unknown(mixup_weight, mask)
 
-    return F.binary_cross_entropy_with_logits(logits[mask].flatten(), label[mask].flatten().float())
+    if not mask.any():
+        return logits.new_zeros(1)
+
+    loss = F.binary_cross_entropy_with_logits(logits[mask].flatten(), label[mask].flatten().float())
+    assert loss >= 0.0, f"Loss is negative: {loss}"
+    return loss
 
 
 @torch.no_grad()
@@ -81,7 +89,7 @@ def update_metrics(
     _pred = pred[mask]
     _y = label[mask]
     for name, metric in metrics.items():
-        if name.endswith("_loss"):
+        if name.endswith("_loss") and name != "jepa_loss":
             metric.update(loss)
         elif name in metric_names:
             metric.update(_pred.view_as(_y), _y)
@@ -106,6 +114,7 @@ def step_classification_from_features(
         loss = binary_loss(pred_logits, label, mixup_weight)
     else:
         loss = categorical_loss(pred_logits, label, config.num_classes, mixup_weight)
+    assert loss >= 0.0, f"Loss is negative: {loss}"
 
     # logits -> predictions
     with torch.no_grad():

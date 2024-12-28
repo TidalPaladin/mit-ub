@@ -72,7 +72,8 @@ def mixup_dense_label(x: Tensor, weight: Tensor, num_classes: int) -> Tensor:
     Returns:
         The mixed label tensor.
     """
-    y = F.one_hot(x, num_classes=num_classes).float()
+    y = x.new_zeros(x.shape[0], num_classes, dtype=torch.float)
+    y[x >= 0] = F.one_hot(x[x >= 0], num_classes=num_classes).float()
     return mixup(y, weight)
 
 
@@ -91,3 +92,21 @@ def is_mixed(weight: Tensor) -> Tensor:
         The mixed label tensor.
     """
     return weight != 0
+
+
+@torch.no_grad()
+def is_mixed_with_unknown(weight: Tensor, mask: Tensor) -> Tensor:
+    r"""Checks which examples have mixup applied and the mixed counterpart has unknown label.
+
+    Args:
+        weight: The mixup weights.
+        mask: The mask of valid labels.
+
+    Shapes:
+        weight: :math:`(B,)`
+        mask: :math:`(B,)`
+        Output: :math:`(B,)`
+    """
+    mixed = is_mixed(weight)
+    counterpart = mask.roll(1, 0)
+    return mixed & ~counterpart
