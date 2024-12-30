@@ -1,7 +1,7 @@
 from typing import Any, Dict, Optional
 
 import torch
-from lightning_fabric.utilities.rank_zero import rank_zero_info
+from lightning_utilities.core.rank_zero import rank_zero_info
 from torchvision.datasets import CIFAR100 as CIFAR100Base
 
 from .cifar10 import CIFAR10DataModule

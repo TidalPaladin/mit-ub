@@ -208,12 +208,19 @@ class JEPA(Task):
 
     def forward(self, x: Tensor, context_mask: Tensor, target_mask: Tensor) -> Dict[str, Tensor]:
         # Run encoder on context
+        torch.cuda.nvtx.range_push("context_backbone")
         context: Tensor = self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
+        torch.cuda.nvtx.range_pop()
         B, L, _ = context.shape
 
         # Sample a subset of the context as input to the predictor and project
         if self.jepa_config.context_subsample_ratio < 1.0:
-            subsample_mask = create_mask((L,), mask_ratio=1 - self.jepa_config.context_subsample_ratio, batch_size=B)
+            subsample_mask = create_mask(
+                (L,),
+                mask_ratio=1 - self.jepa_config.context_subsample_ratio,
+                batch_size=B,
+                device=context.device,
+            )
             context = apply_mask(subsample_mask, context, fill_value=None)
 
         # Prepare positional encoding for target queries
@@ -222,9 +229,11 @@ class JEPA(Task):
         query = apply_mask(target_mask, query, fill_value=None)
 
         # Run query and context through predictor
+        torch.cuda.nvtx.range_push("jepa_predictor")
         for block in self.jepa_predictor:
             block = cast(TransformerDecoderLayer, block)
             query = block(query, context)
+        torch.cuda.nvtx.range_pop()
 
         pred = self.jepa_norm(query)
         pred = self.jepa_out_proj(pred)
@@ -258,6 +267,7 @@ class JEPA(Task):
         momentum = self.get_ema_momentum()
 
         # NOTE: This also handles synchronization of EMA weights across processes
+        torch.cuda.nvtx.range_push("ema_update")
         update_teacher(
             self.backbone,
             self.teacher_backbone,
@@ -268,6 +278,7 @@ class JEPA(Task):
             self.trainer.world_size,
             self.jepa_config.ema_config.sync_interval,
         )
+        torch.cuda.nvtx.range_pop()
 
     @torch.no_grad()
     def synchronize_ema_weights(self) -> None:
@@ -325,36 +336,48 @@ class JEPA(Task):
             self.update_weight_decay()
 
         # generate context mask - will always be non-ragged
+        torch.cuda.nvtx.range_push("context_mask")
         context_mask = self.backbone.create_mask(x, self.jepa_config.context_ratio, self.jepa_config.scale)
+        assert context_mask.device == x.device, "Context mask device does not match input device"
         assert not mask_is_ragged(context_mask), "Context mask is ragged"
+        torch.cuda.nvtx.range_pop()
 
         # generate target mask - select non-ragged target mask from locations not in context mask
+        torch.cuda.nvtx.range_push("target_mask")
         target_mask = generate_non_overlapping_mask(
             context_mask, self.jepa_config.context_ratio, self.jepa_config.target_ratio
         )
+        assert target_mask.device == x.device, "Target mask device does not match input device"
         assert not mask_is_ragged(target_mask), "Target mask is ragged"
         assert not (context_mask & target_mask).any(), "Context and target masks overlap"
+        torch.cuda.nvtx.range_pop()
 
         # generate ground truth with forward pass of ema backbone on unmasked image
         with torch.no_grad():
             self.teacher_backbone.eval()
+            torch.cuda.nvtx.range_push("ema_backbone")
             full_target: Tensor = self.teacher_backbone(x, reshape=False)
+            torch.cuda.nvtx.range_pop()
 
             # apply random noise
             if self.training and self.jepa_config.use_noise:
+                torch.cuda.nvtx.range_push("noise")
                 x = apply_noise_batched(self.random_noise, x)
+                torch.cuda.nvtx.range_pop()
 
             # apply mixup, not overwriting full_target
             if self.training and self.jepa_config.mixup_prob > 0:
+                torch.cuda.nvtx.range_push("mixup")
                 mixup_weight = sample_mixup_parameters(
                     x.shape[0], self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, device=x.device
                 )
                 x = mixup(x, mixup_weight)
                 full_target = mixup(full_target, mixup_weight)
-                target = apply_mask(target_mask, full_target, fill_value=None)
+                torch.cuda.nvtx.range_pop()
             else:
                 mixup_weight = None
-                target = apply_mask(target_mask, full_target, fill_value=None)
+
+            target = apply_mask(target_mask, full_target, fill_value=None)
 
         # generate predictions by encoding the context and then running the encoded context
         # plus the positional target queries through the predictor
@@ -369,6 +392,7 @@ class JEPA(Task):
         # Compute metrics
         if metrics is not None:
             with torch.no_grad():
+                torch.cuda.nvtx.range_push("metrics")
                 metrics["jepa_loss"].update(loss)
                 metrics["example_sim"].update(full_target)
                 metrics["micro_token_sim"].update(pred)
@@ -380,6 +404,7 @@ class JEPA(Task):
 
                 if "ema_momentum" in metrics:
                     metrics["ema_momentum"].update(self.get_ema_momentum())
+                torch.cuda.nvtx.range_pop()
 
         output = {
             "log": {

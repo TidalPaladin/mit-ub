@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
-from lightning_fabric.utilities.rank_zero import rank_zero_info
+from lightning_utilities.core.rank_zero import rank_zero_info
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset
 from torchvision.datasets import CIFAR10 as CIFAR10Base
