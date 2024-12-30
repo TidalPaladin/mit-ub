@@ -213,7 +213,12 @@ class JEPA(Task):
 
         # Sample a subset of the context as input to the predictor and project
         if self.jepa_config.context_subsample_ratio < 1.0:
-            subsample_mask = create_mask((L,), mask_ratio=1 - self.jepa_config.context_subsample_ratio, batch_size=B)
+            subsample_mask = create_mask(
+                (L,),
+                mask_ratio=1 - self.jepa_config.context_subsample_ratio,
+                batch_size=B,
+                device=context.device,
+            )
             context = apply_mask(subsample_mask, context, fill_value=None)
 
         # Prepare positional encoding for target queries

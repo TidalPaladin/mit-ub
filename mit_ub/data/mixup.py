@@ -26,8 +26,9 @@ def sample_mixup_parameters(
         A tensor of size ``size`` sampled from a Beta distribution with parameters ``mixup_alpha`` and ``mixup_alpha``.
     """
     # Generate mixup weight
-    dist = torch.distributions.Beta(mixup_alpha, mixup_alpha)
-    weight = dist.sample(torch.Size((size,))).to(device)
+    _mixup_alpha = torch.tensor(mixup_alpha, device=device)
+    dist = torch.distributions.Beta(_mixup_alpha, _mixup_alpha)
+    weight = dist.sample(torch.Size((size,)))
 
     # Generate mask of mixup samples
     mixup_mask = torch.rand_like(weight) < mixup_prob

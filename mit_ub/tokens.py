@@ -29,7 +29,7 @@ def _apply_with_fill(mask: Tensor, x: Tensor, fill_value: float | Tensor) -> Ten
 
 def _apply_non_ragged(mask: Tensor, x: Tensor) -> Tensor:
     N, _, D = x.shape
-    return x[mask].view(N, -1, D)
+    return torch.masked_select(x, mask.view(N, -1, 1)).reshape(N, -1, D)
 
 
 def _apply_ragged(mask: Tensor, x: Tensor, padding_value: float | Tensor) -> Tensor:
