@@ -18,10 +18,10 @@ def uniform_noise(x: Tensor, min: float = -0.2, max: float = 0.2, clip: bool = T
     Returns:
         Input with uniform noise applied
     """
-    noise = torch.rand_like(x) * (max - min) + min
+    noise = torch.empty_like(x).uniform_(min, max)
     result = x + noise
     if clip:
-        result = result.clip(min=0, max=1)
+        result.clip_(min=0, max=1)
     return result
 
 
@@ -43,7 +43,7 @@ def salt_pepper_noise(x: Tensor, prob: float | Tuple[float, float] = (0.01, 0.05
     else:
         p = x.new_tensor(prob)
     mask = torch.rand_like(x) < p
-    value = torch.rand_like(x).round()
+    value = torch.rand_like(x).round_()
     return torch.where(mask, value, x)
 
 

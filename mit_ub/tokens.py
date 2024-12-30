@@ -156,11 +156,11 @@ def create_mask(
     mask = torch.full((batch_size, Lmask), True, device=device, dtype=torch.bool)
 
     # select exactly num_masked_tokens random locations, with unique locations for each batch element
-    token_idx = torch.randperm(Lmask).view(1, Lmask).expand(batch_size, -1)
+    token_idx = torch.randperm(Lmask, device=device).view(1, Lmask).expand(batch_size, -1)
     indices = torch.argsort(torch.rand_like(token_idx, dtype=torch.float32), dim=-1)[..., :num_masked_tokens]
     token_idx = torch.gather(token_idx, dim=-1, index=indices)
     assert token_idx.shape == (batch_size, num_masked_tokens)
-    batch_idx = torch.arange(batch_size).view(batch_size, 1).expand(-1, num_masked_tokens)
+    batch_idx = torch.arange(batch_size, device=device).view(batch_size, 1).expand(-1, num_masked_tokens)
 
     # update mask based on chosen locations
     mask[batch_idx.flatten(), token_idx.flatten()] = False
@@ -192,7 +192,7 @@ def generate_non_overlapping_mask(mask1: Tensor, p1: float, p2: float) -> Tensor
         raise ValueError("Cannot satisfy non-overlap constraint.")
 
     # Generate random values in the shape of the mask
-    x = torch.rand(B, L)
+    x = torch.rand(B, L, device=mask1.device)
 
     # Fill values in the first mask with a high value
     x[mask1] = 2.0
@@ -202,6 +202,6 @@ def generate_non_overlapping_mask(mask1: Tensor, p1: float, p2: float) -> Tensor
 
     # Create the second mask
     mask2 = torch.zeros_like(mask1)
-    rows = torch.arange(B).unsqueeze_(-1)
+    rows = torch.arange(B, device=mask2.device).unsqueeze_(-1)
     mask2[rows, idx] = True
     return mask2
