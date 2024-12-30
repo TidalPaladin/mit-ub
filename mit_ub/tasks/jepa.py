@@ -8,11 +8,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics as tm
-from deep_helpers.optim.rsqrt import get_momentum
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
 from torch import Tensor
-from torch.distributed import ReduceOp, all_reduce
 from torch.optim.optimizer import Optimizer
 
 from ..data.mixup import mixup, sample_mixup_parameters
@@ -24,6 +22,7 @@ from ..model.layers.layer_scale import has_layer_scale
 from ..model.layers.pos_enc import RelativeFactorizedPosition
 from ..model.layers.transformer import TransformerDecoderLayer
 from ..tokens import apply_mask, create_mask, generate_non_overlapping_mask, mask_is_ragged
+from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
 
 
 @torch.no_grad()
@@ -36,61 +35,6 @@ def apply_noise_batched(transform: RandomNoise, x: Tensor) -> Tensor:
     for i in range(x.shape[0]):
         x[i] = transform(x[i])
     return x
-
-
-@dataclass
-class EMAConfig:
-    """
-    Configuration for student-teacher EMA updates.
-
-    Momentum scheduling uses the following strategy:
-        * Begin at `initial_momentum`
-        * Linear warmup over `warmup_steps` to `momentum`
-        * Reciprocal square root increase over `timescale` steps to `momentum`
-        * Linear cooldown over `cooldown_steps` back to `initial_momentum`
-
-    Args:
-        momentum: Momentum value after warmup.
-        warmup_steps: Number of steps over which to warm up the momentum.
-        cooldown_steps: Number of steps over which to cooldown the momentum.
-        stopped_steps: Number of steps after cooldown at which to hold the momentum at `initial_momentum`.
-        timescale: Time scale for the EMA update.
-        initial_momentum: Initial momentum value.
-        sync_interval: Interval (in steps) at which to synchronize the EMA weights across all processes.
-            Synchronization can incur a heavy performance penalty for large models, so this should be set to a high value.
-            However, larger values lead to divergence in the EMA weights across processes.
-    """
-
-    momentum: float = 0.98
-    warmup_steps: int = 1000
-    cooldown_steps: int = 25000
-    stopped_steps: int = 0
-    timescale: int = 10000
-    initial_momentum: float = 1.0
-    sync_interval: int = 100
-
-    def __post_init__(self) -> None:
-        if not 0.0 < self.momentum < 1.0:
-            raise ValueError("momentum must be in the range [0, 1]")
-        if not 0 < self.sync_interval:
-            raise ValueError("sync_interval must be positive")
-        if not 0 <= self.warmup_steps:
-            raise ValueError("warmup_steps must be non-negative")
-        if not 0 <= self.cooldown_steps:
-            raise ValueError("cooldown_steps must be non-negative")
-        if not 0 <= self.timescale:
-            raise ValueError("timescale must be non-negative")
-        if not 0.0 <= self.initial_momentum <= 1.0:
-            raise ValueError("initial_momentum must be in the range [0, 1]")
-        if not self.initial_momentum >= self.momentum:
-            raise ValueError("initial_momentum must be >= momentum")
-        if not 0 <= self.stopped_steps:
-            raise ValueError("stopped_steps must be non-negative")
-
-    def validate_schedule(self, max_steps: int) -> None:
-        linear_steps = self.warmup_steps + self.cooldown_steps + self.stopped_steps
-        if linear_steps > max_steps:
-            raise ValueError(f"Cannot satisfy EMA momentum schedule for {max_steps} steps: {self}")
 
 
 @dataclass
@@ -209,8 +153,8 @@ class JEPA(Task):
         assert isinstance(backbone, (ViT, AdaptiveViT))
         self.backbone = backbone
         self.teacher_backbone = deepcopy(self.backbone)
-        for p in self.teacher_backbone.parameters():
-            p.requires_grad = False
+        self.teacher_backbone.requires_grad_(False)
+        self.teacher_backbone.eval()
 
         # Position encoding / initialization for prediction queries.
         self.pos_enc = RelativeFactorizedPosition(
@@ -303,68 +247,32 @@ class JEPA(Task):
         r"""Get the momentum for the EMA update based on the current step or epoch."""
         if not (max_steps := self.trainer.max_steps):
             raise RuntimeError("Cannot determine EMA momentum without trainer.max_steps")
-        if self.trainer.global_step == 0 and not getattr(self.trainer, "fast_dev_run", False):
+        if (global_step := self.trainer.global_step) == 0 and not getattr(self.trainer, "fast_dev_run", False):
             self.jepa_config.ema_config.validate_schedule(max_steps)
 
-        # Shortcut in the stopped stage
-        global_step = self.trainer.global_step
-        if max_steps - global_step < (stopped_steps := self.jepa_config.ema_config.stopped_steps):
-            return self.jepa_config.ema_config.initial_momentum
-
-        # Effective total schedule length accounting for stopped stage duration
-        effective_max_steps = max_steps - stopped_steps
-        assert effective_max_steps > 0, "Effective max steps must be positive"
-
-        momentum = get_momentum(
-            self.trainer.global_step,
-            self.jepa_config.ema_config.momentum,
-            self.jepa_config.ema_config.warmup_steps,
-            self.jepa_config.ema_config.cooldown_steps,
-            effective_max_steps,
-            self.jepa_config.ema_config.timescale,
-            self.jepa_config.ema_config.initial_momentum,
-        )
-        assert 0 <= momentum <= 1.0
-        return momentum
+        return get_ema_momentum(max_steps, global_step, self.jepa_config.ema_config)
 
     @torch.no_grad()
     def update_ema(self, batch_idx: int) -> None:
         """Update the Exponential Moving Average (EMA) of the backbone parameters."""
         momentum = self.get_ema_momentum()
 
-        # Shortcut if momentum=1.0 (no update)
-        if momentum == 1.0:
-            return
-
-        weight = 1 - momentum
-        for ema_param, param in zip(self.teacher_backbone.parameters(), self.backbone.parameters()):
-            ema_param.lerp_(param, weight)
-
-        is_correct_global_step = (self.trainer.global_step + 1) % self.jepa_config.ema_config.sync_interval == 0
-        is_correct_batch_idx = (batch_idx + 1) % self.trainer.accumulate_grad_batches == 0
-        if is_correct_global_step and is_correct_batch_idx:
-            self.synchronize_ema_weights()
+        # NOTE: This also handles synchronization of EMA weights across processes
+        update_teacher(
+            self.backbone,
+            self.teacher_backbone,
+            momentum,
+            batch_idx,
+            self.trainer.global_step,
+            self.trainer.accumulate_grad_batches,
+            self.trainer.world_size,
+            self.jepa_config.ema_config.sync_interval,
+        )
 
     @torch.no_grad()
     def synchronize_ema_weights(self) -> None:
-        """
-        Synchronize the Exponential Moving Average (EMA) weights across all processes.
-
-        This method ensures that the EMA weights are consistent across all processes
-        in a distributed training setup. It uses barriers to avoid sporadic deadlocks
-        in Distributed Data Parallel (DDP) training.
-        """
-        if self.trainer.world_size > 1:
-            # Submit all reduce operations for each parameter
-            handles = []
-            for ema_param in self.teacher_backbone.parameters():
-                handle = all_reduce(ema_param.data, op=ReduceOp.SUM, async_op=True)
-                handles.append(handle)
-
-            # Complete the average on each parameter
-            for handle, ema_param in zip(handles, self.teacher_backbone.parameters()):
-                handle.wait()
-                ema_param.data.div_(self.trainer.world_size)
+        """Synchronize the EMA weights across all processes using parameter buckets."""
+        synchronize_teacher(self.teacher_backbone, self.trainer.world_size)
 
     def update_weight_decay(self) -> List[float | None]:
         """Update the weight decay for each parameter group based on the current training progress."""
