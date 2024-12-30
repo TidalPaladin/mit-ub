@@ -30,8 +30,9 @@ class EMAConfig:
         timescale: Time scale for the EMA update.
         initial_momentum: Initial momentum value.
         sync_interval: Interval (in steps) at which to synchronize the EMA weights across all processes.
-            Synchronization can incur a heavy performance penalty for large models, so this should be set to a high value.
-            However, larger values lead to divergence in the EMA weights across processes.
+            Synchronization can incur a performance penalty for large models, which is mitigated by setting
+            a high synchronization interval. However, larger values lead to divergence in the EMA weights
+            across processes.
     """
 
     momentum: float = 0.98
@@ -40,7 +41,7 @@ class EMAConfig:
     stopped_steps: int = 0
     timescale: int = 10000
     initial_momentum: float = 1.0
-    sync_interval: int = 100
+    sync_interval: int = 1
 
     def __post_init__(self) -> None:
         if not 0.0 < self.momentum < 1.0:
@@ -219,7 +220,9 @@ def update_teacher(
 
     This function accounts for distributed training and gradient accumulation.
     Updates to local weights are only performed on the batch for which a gradient accumulation
-    and weight update occurs.
+    and weight update occurs. Weight synchronization is performed at the specified interval,
+    and follows the strategy used by DDP of bucketing parameters into chunks and interleaving
+    computation with reduction.
 
     Args:
         student: The student model.
