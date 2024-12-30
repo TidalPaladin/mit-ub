@@ -30,9 +30,9 @@ class EMAConfig:
         timescale: Time scale for the EMA update.
         initial_momentum: Initial momentum value.
         sync_interval: Interval (in steps) at which to synchronize the EMA weights across all processes.
-            Synchronization can incur a performance penalty for large models, which is mitigated by setting
-            a high synchronization interval. However, larger values lead to divergence in the EMA weights
-            across processes.
+            This should not be needed since consistent student weights are ensured by the DDP wrapper.
+            However, if for some reason this isn't happening, manual synchronization can be performed
+            at a preset interval by setting this value.
     """
 
     momentum: float = 0.98
@@ -41,12 +41,12 @@ class EMAConfig:
     stopped_steps: int = 0
     timescale: int = 10000
     initial_momentum: float = 1.0
-    sync_interval: int = 1
+    sync_interval: int | None = None
 
     def __post_init__(self) -> None:
         if not 0.0 < self.momentum < 1.0:
             raise ValueError("momentum must be in the range [0, 1]")
-        if not 0 < self.sync_interval:
+        if self.sync_interval is not None and not 0 < self.sync_interval:
             raise ValueError("sync_interval must be positive")
         if not 0 <= self.warmup_steps:
             raise ValueError("warmup_steps must be non-negative")
@@ -214,7 +214,7 @@ def update_teacher(
     global_step: int,
     accumulate_grad_batches: int,
     world_size: int,
-    sync_interval: int,
+    sync_interval: int | None,
 ) -> None:
     """Update the Exponential Moving Average (EMA) of the teacher parameters.
 
@@ -240,7 +240,7 @@ def update_teacher(
 
     # Determine what to do
     is_distributed = world_size > 1
-    is_sync_step = (global_step + 1) % sync_interval == 0
+    is_sync_step = sync_interval is not None and (global_step + 1) % sync_interval == 0
     is_update_batch_idx = (batch_idx + 1) % accumulate_grad_batches == 0
     if is_distributed and is_sync_step and is_update_batch_idx:
         # Local params need update and weights need to be synced
