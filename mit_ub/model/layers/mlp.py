@@ -220,9 +220,11 @@ class MLP(nn.Module, Checkpointable):
         else:
             indices = None
 
-        if self.training and self.checkpoint:
+        if self.checkpoint and torch.is_grad_enabled():
+            # Workaround for checkpointing with compile + DDP
+            fn = torch.compiler.disable(mlp_forward) if torch.distributed.is_initialized() else mlp_forward
             result = checkpoint(
-                mlp_forward,
+                fn,
                 x,
                 self.w_in,
                 self.w_out,
