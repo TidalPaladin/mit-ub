@@ -8,7 +8,8 @@ from ..activations import DEFAULT_MLP_ACTIVATION_STR, DEFAULT_MLP_GATE_ACTIVATIO
 from ..config import ModelConfig
 from ..helpers import Dims2D, grid_to_tokens, set_checkpointing, tokens_to_grid
 from ..layers.convnext import ConvNextBlock
-from ..layers.mlp import NormType
+from ..layers.mlp import MLP, NormType
+from ..layers.pool import PoolType, get_global_pooling_layer
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,12 @@ class ConvNextConfig(ModelConfig):
     def dim(self) -> int:
         if self.up_depths:
             return list(reversed(self.dims))[len(self.up_depths) - 1]
+        return self.dims[-1]
+
+    @property
+    def dim_feedforward(self) -> int:
+        if self.up_depths:
+            return list(reversed(self.dims_feedforward))[len(self.up_depths) - 1]
         return self.dims[-1]
 
     @property
@@ -125,6 +132,51 @@ class ConvNext(nn.Module):
 
         if config.checkpoint:
             set_checkpointing(self, config.checkpoint)
+
+    def create_head(
+        self,
+        out_dim: int,
+        pool_type: PoolType | None = None,
+        **kwargs,
+    ) -> nn.Module:
+        r"""Creates a head for the model.
+
+        The head is an optional pooling layer followed by an MLP.
+
+        Args:
+            out_dim: Dimension of the output.
+            pool_type: Type of pooling to apply, or ``None`` to skip pooling.
+            **kwargs: Additional keyword arguments to override default layer parameters.
+        """
+        pool = (
+            get_global_pooling_layer(
+                cast(PoolType, kwargs.get("pool_type", PoolType.ATTENTION)),
+                self.config.dim,
+                num_heads=kwargs.get("nhead", self.config.nhead),
+                dropout=kwargs.get("dropout", self.config.dropout),
+            )
+            if pool_type is not None
+            else nn.Identity()
+        )
+
+        # No stochastic depth, no layerscale
+        _kwargs = {
+            "in_features": self.config.dim,
+            "hidden_features": self.config.dim_feedforward,
+            "out_features": out_dim,
+            "dropout": kwargs.get("dropout", self.config.dropout),
+            "activation": kwargs.get("activation", self.config.activation),
+            "gate_activation": kwargs.get("gate_activation", self.config.gate_activation),
+            "bias": kwargs.get("bias", self.config.bias),
+            "norm": kwargs.get("norm", True),
+            "norm_type": kwargs.get("norm_type", self.config.norm_type),
+        }
+        mlp = MLP(**_kwargs)
+
+        layer = nn.Sequential()
+        layer.add_module("pool", pool)
+        layer.add_module("head_mlp", mlp)
+        return layer
 
     def forward(self, x: Tensor, reshape: bool = True) -> Tensor:
         # Patch embed stem

@@ -163,12 +163,6 @@ class JEPA(Task):
             dropout=0.1,
         )
 
-        # Projections for the input context and output predictions
-        self.jepa_norm = nn.LayerNorm(self.backbone.config.dim)
-        self.jepa_out_proj = nn.Linear(self.backbone.config.dim, self.backbone.config.dim)
-        nn.init.xavier_uniform_(self.jepa_out_proj.weight)
-        nn.init.zeros_(self.jepa_out_proj.bias)
-
         # JEPA predictor
         self.jepa_predictor = nn.ModuleList(
             [
@@ -176,6 +170,7 @@ class JEPA(Task):
                 for i in range(self.jepa_config.predictor_depth)
             ]
         )
+        self.jepa_head = self.backbone.create_head(out_dim=self.backbone.config.dim, pool_type=None)
         self.save_hyperparameters()
 
         # Random noise
@@ -235,8 +230,7 @@ class JEPA(Task):
             query = block(query, context)
         torch.cuda.nvtx.range_pop()
 
-        pred = self.jepa_norm(query)
-        pred = self.jepa_out_proj(pred)
+        pred = self.jepa_head(query)
         return {"jepa": pred, "jepa_context": context}
 
     @property

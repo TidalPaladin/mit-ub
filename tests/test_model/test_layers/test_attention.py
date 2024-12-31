@@ -301,11 +301,11 @@ class TestMultiHeadAttention:
         k = torch.randn(B, Lk, Dk) if Lk != Lq or Dk != Dq else q
         v = torch.randn(B, Lk, Dk) if Lk != Lq or Dk != Dq else q
 
-        w_norm = model.w_pre_norm
-        b_norm = model.b_pre_norm
+        w_norm = model.w_norm
+        b_norm = model.b_norm
         actual = model(q, k, v)
 
-        model.w_pre_norm = model.b_pre_norm = None  # type: ignore
+        model.w_norm = model.b_norm = None  # type: ignore
         _q = F.layer_norm(q, q.shape[-1:], weight=w_norm, bias=b_norm)
         k = F.layer_norm(k, k.shape[-1:], weight=w_norm, bias=b_norm) if k is not q else _q
         v = F.layer_norm(v, v.shape[-1:], weight=w_norm, bias=b_norm) if v is not q else _q

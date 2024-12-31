@@ -8,7 +8,8 @@ from ...tokens import apply_mask, create_mask
 from ..activations import DEFAULT_MLP_ACTIVATION_STR, DEFAULT_MLP_GATE_ACTIVATION_STR, Activation
 from ..config import ModelConfig
 from ..helpers import set_checkpointing
-from ..layers.mlp import NormType
+from ..layers.mlp import MLP, NormType
+from ..layers.pool import PoolType, get_global_pooling_layer
 from ..layers.transformer import TransformerDecoderLayer, TransformerEncoderLayer
 from ..stem import PatchEmbed2d, PatchEmbed3d
 from .convnext import tokens_to_grid
@@ -139,6 +140,51 @@ class ViT(nn.Module):
         layer = TransformerDecoderLayer(**_kwargs)
         if self.config.checkpoint:
             set_checkpointing(layer, self.config.checkpoint)
+        return layer
+
+    def create_head(
+        self,
+        out_dim: int,
+        pool_type: PoolType | None = None,
+        **kwargs,
+    ) -> nn.Module:
+        r"""Creates a head for the model.
+
+        The head is an optional pooling layer followed by an MLP.
+
+        Args:
+            out_dim: Dimension of the output.
+            pool_type: Type of pooling to apply, or ``None`` to skip pooling.
+            **kwargs: Additional keyword arguments to override default layer parameters.
+        """
+        pool = (
+            get_global_pooling_layer(
+                cast(PoolType, kwargs.get("pool_type", PoolType.ATTENTION)),
+                self.config.dim,
+                num_heads=kwargs.get("nhead", self.config.nhead),
+                dropout=kwargs.get("dropout", self.config.dropout),
+            )
+            if pool_type is not None
+            else nn.Identity()
+        )
+
+        # No stochastic depth, no layerscale
+        _kwargs = {
+            "in_features": self.config.dim,
+            "hidden_features": self.config.dim_feedforward,
+            "out_features": out_dim,
+            "dropout": kwargs.get("dropout", self.config.dropout),
+            "activation": kwargs.get("activation", self.config.activation),
+            "gate_activation": kwargs.get("gate_activation", self.config.gate_activation),
+            "bias": kwargs.get("bias", self.config.bias),
+            "norm": kwargs.get("norm", True),
+            "norm_type": kwargs.get("norm_type", self.config.norm_type),
+        }
+        mlp = MLP(**_kwargs)
+
+        layer = nn.Sequential()
+        layer.add_module("pool", pool)
+        layer.add_module("head_mlp", mlp)
         return layer
 
     def on_load_checkpoint(self, state_dict: Dict[str, Any], *args, **kwargs) -> None:

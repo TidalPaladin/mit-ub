@@ -90,14 +90,15 @@ class Distillation(Task):
         teacher_backbone = teacher_config.instantiate()
         self.teacher_backbone = teacher_backbone
 
-        student_dim = backbone.config.dim
-        teacher_dim = teacher_backbone.config.dim
-        self.proj = nn.Linear(student_dim, teacher_dim) if student_dim != teacher_dim else nn.Identity()
+        self.distillation_head = self.backbone.create_head(
+            out_dim=teacher_backbone.config.dim,
+            pool_type=None,
+        )
 
         # Load teacher checkpoint and freeze parameters
         self.teacher_backbone = self.load_teacher_checkpoint(teacher_checkpoint)
-        for p in self.teacher_backbone.parameters():
-            p.requires_grad = False
+        self.teacher_backbone.requires_grad_(False)
+        self.teacher_backbone.eval()
 
         self.random_noise = RandomNoise(
             self.config.noise_scale,
@@ -129,7 +130,7 @@ class Distillation(Task):
     def forward(self, x: Tensor) -> Dict[str, Tensor]:
         pred = self.backbone(x)
         pred = grid_to_tokens(pred)
-        pred_proj = self.proj(pred)
+        pred_proj = self.distillation_head(pred)
         return {"distill_pred": pred, "distill_pred_proj": pred_proj}
 
     def step(
