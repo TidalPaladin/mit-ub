@@ -395,10 +395,12 @@ class MultiHeadAttention(nn.Module, Checkpointable):
         b_k = self.b_k if self.b_in is None else None
         b_v = self.b_v if self.b_in is None else None
 
-        if self.training and self.checkpoint:
+        if self.checkpoint and torch.is_grad_enabled():
+            # Workaround for checkpointing with compile + DDP
+            fn = torch.compiler.disable(attention_forward) if torch.distributed.is_initialized() else attention_forward
             result = checkpoint(
                 # fmt: off
-                attention_forward,
+                fn,
                 q, _k, _v,
                 w_q, w_k, w_v,
                 b_q, b_k, b_v,
