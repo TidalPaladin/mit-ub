@@ -30,11 +30,11 @@ def attention_forward(
     b_q: Tensor | None, b_k: Tensor | None, b_v: Tensor | None,
     w_out: Tensor, b_out: Tensor | None,
     num_heads: int, num_kv_heads: int,
-    norm_w: Tensor | None = None, norm_b: Tensor | None = None,
+    w_qk_norm: Tensor | None = None, b_qk_norm: Tensor | None = None,
     dropout: float = 0.0,
     eps: float = NORM_EPS,
-    pre_norm_w: Tensor | None = None,
-    pre_norm_b: Tensor | None = None,
+    w_norm: Tensor | None = None,
+    b_norm: Tensor | None = None,
     kv_norm: bool = False,
     training: bool = False,
     mask: Tensor | None = None,
@@ -59,12 +59,12 @@ def attention_forward(
         b_out: Output projection bias
         num_heads: Number of attention heads
         num_kv_heads: Number of key-value heads. Set to ``num_heads`` for multi-head attention.
-        norm_w: Normalization weight of shape :math:`(head_dim,)` or None
-        norm_b: Normalization bias of shape :math:`(head_dim,)` or None
+        w_qk_norm: Normalization weight of shape :math:`(head_dim,)` or None
+        b_qk_norm: Normalization bias of shape :math:`(head_dim,)` or None
         dropout: Dropout probability
         eps: Epsilon value for normalization
-        pre_norm_w: Weight for pre-normalization, or ``None`` for no pre-normalization
-        pre_norm_b: Bias for pre-normalization
+        w_norm: Weight for pre-normalization, or ``None`` for no pre-normalization
+        b_norm: Bias for pre-normalization
         kv_norm: Whether to normalize the key and value tensors in non-packed QKV mode. This should
             probably be ``True`` when using encoder-decoder attention on an unnormalized KV.
         training: Training or inference mode
@@ -76,7 +76,7 @@ def attention_forward(
         q, k, v: :math:`(B, L, D)`, or :math:`(B, L, 3*D)` when packed QKV tensor
         w_q, w_k, w_v, w_out: :math:`(D, D)`, or :math:`(3*D, D)` when packed QKV tensor
         b_q, b_k, b_v, b_out: :math:`(D,)`, or :math:`(3*D,)` when packed QKV tensor
-        norm_w, norm_b: :math:`(head_dim,)`
+        w_qk_norm, b_qk_norm: :math:`(head_dim,)`
         mask: :math:`(B, Lq, Lk)`
         w_layer_scale: :math:`(D,)`
 
@@ -88,17 +88,17 @@ def attention_forward(
     head_dim = q.shape[-1] // num_heads
 
     # Pre-normalization
-    if pre_norm_w is not None:
+    if w_norm is not None:
         if norm_type == NormType.LAYER_NORM:
-            q = F.layer_norm(q, q.shape[-1:], weight=pre_norm_w, bias=pre_norm_b, eps=eps)
+            q = F.layer_norm(q, q.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
             if not is_packed and kv_norm:
-                k = F.layer_norm(k, k.shape[-1:], weight=pre_norm_w, bias=pre_norm_b, eps=eps)  # type: ignore[arg-type]
-                v = F.layer_norm(v, v.shape[-1:], weight=pre_norm_w, bias=pre_norm_b, eps=eps)  # type: ignore[arg-type]
+                k = F.layer_norm(k, k.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)  # type: ignore[arg-type]
+                v = F.layer_norm(v, v.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)  # type: ignore[arg-type]
         elif norm_type == NormType.RMS_NORM:
-            q = F.rms_norm(q, q.shape[-1:], weight=pre_norm_w, eps=eps)
+            q = F.rms_norm(q, q.shape[-1:], weight=w_norm, eps=eps)
             if not is_packed and kv_norm:
-                k = F.rms_norm(k, k.shape[-1:], weight=pre_norm_w, eps=eps)  # type: ignore[arg-type]
-                v = F.rms_norm(v, v.shape[-1:], weight=pre_norm_w, eps=eps)  # type: ignore[arg-type]
+                k = F.rms_norm(k, k.shape[-1:], weight=w_norm, eps=eps)  # type: ignore[arg-type]
+                v = F.rms_norm(v, v.shape[-1:], weight=w_norm, eps=eps)  # type: ignore[arg-type]
         else:
             raise ValueError(f"Unknown norm type: {norm_type}")
 
@@ -121,9 +121,9 @@ def attention_forward(
     v = rearrange(cast(Tensor, v), "b l (h d) -> b h l d", h=num_kv_heads)
 
     # QK normalization
-    if norm_w is not None:
-        q = F.layer_norm(q, q.shape[-1:], weight=norm_w, bias=norm_b, eps=eps)
-        k = F.layer_norm(k, k.shape[-1:], weight=norm_w, bias=norm_b, eps=eps)
+    if w_qk_norm is not None:
+        q = F.layer_norm(q, q.shape[-1:], weight=w_qk_norm, bias=b_qk_norm, eps=eps)
+        k = F.layer_norm(k, k.shape[-1:], weight=w_qk_norm, bias=b_qk_norm, eps=eps)
 
     # KV expansion
     if num_kv_heads != num_heads:
@@ -132,7 +132,7 @@ def attention_forward(
         v = v.repeat_interleave(ratio, 1, output_size=num_heads)
 
     # SDPA
-    scale = 1.0 if norm_w is not None else None
+    scale = 1.0 if w_qk_norm is not None else None
     o = F.scaled_dot_product_attention(
         q, k, v, attn_mask=mask, dropout_p=dropout if training else 0.0, is_causal=False, scale=scale
     )
@@ -186,17 +186,17 @@ class MultiHeadAttention(nn.Module, Checkpointable):
 
         # Register optional parameters
         for prefix in ("w", "b"):
-            for suffix in ("_in", "_q", "_k", "_v", "_out", "_pre_norm", "_norm"):
+            for suffix in ("_in", "_q", "_k", "_v", "_out", "_qk_norm", "_norm"):
                 param = f"{prefix}{suffix}"
                 self.register_parameter(param, None)
 
         # Fused pre-norm
         if norm:
-            self.w_pre_norm = nn.Parameter(torch.empty(embed_dim))
+            self.w_norm = nn.Parameter(torch.empty(embed_dim))
             if norm_type == NormType.RMS_NORM:
-                self.b_pre_norm = nn.Parameter(torch.empty(embed_dim))
+                self.b_norm = nn.Parameter(torch.empty(embed_dim))
             else:
-                self.register_parameter("b_pre_norm", None)
+                self.register_parameter("b_norm", None)
 
         # Packed QKV projection
         if kdim is None and vdim is None:
@@ -213,8 +213,8 @@ class MultiHeadAttention(nn.Module, Checkpointable):
 
         # QK normalization
         if qk_norm:
-            self.w_norm = nn.Parameter(torch.empty(self.head_dim))
-            self.b_norm = nn.Parameter(torch.empty(self.head_dim))
+            self.w_qk_norm = nn.Parameter(torch.empty(self.head_dim))
+            self.b_qk_norm = nn.Parameter(torch.empty(self.head_dim))
 
         # Output projection
         self.w_out = nn.Parameter(torch.empty(embed_dim, embed_dim))
@@ -296,13 +296,13 @@ class MultiHeadAttention(nn.Module, Checkpointable):
             self.w_v.data = src.w_in.data[self.num_heads * self.head_dim + self.num_kv_heads * self.head_dim :]
 
         # Norm and projection
-        if embed_compatible and self.w_pre_norm is not None and src.w_pre_norm is not None:
-            self.w_pre_norm.data = src.w_pre_norm.data
-            if self.b_pre_norm is not None and src.b_pre_norm is not None:
-                self.b_pre_norm.data = src.b_pre_norm.data
-        if attn_compatible and self.w_norm is not None and src.w_norm is not None:
+        if embed_compatible and self.w_norm is not None and src.w_norm is not None:
             self.w_norm.data = src.w_norm.data
-            self.b_norm.data = src.b_norm.data
+            if self.b_norm is not None and src.b_norm is not None:
+                self.b_norm.data = src.b_norm.data
+        if attn_compatible and self.w_qk_norm is not None and src.w_qk_norm is not None:
+            self.w_qk_norm.data = src.w_qk_norm.data
+            self.b_qk_norm.data = src.b_qk_norm.data
         if embed_compatible and self.w_out is not None and src.w_out is not None:
             self.w_out.data = src.w_out.data
             if self.b_out is not None and src.b_out is not None:
@@ -334,11 +334,11 @@ class MultiHeadAttention(nn.Module, Checkpointable):
 
     @property
     def qk_norm(self) -> bool:
-        return self.w_norm is not None
+        return self.w_qk_norm is not None
 
     @property
     def norm(self) -> bool:
-        return self.w_pre_norm is not None
+        return self.w_norm is not None
 
     @property
     def bias(self) -> bool:
@@ -406,11 +406,11 @@ class MultiHeadAttention(nn.Module, Checkpointable):
                 b_q, b_k, b_v,
                 self.w_out, self.b_out,
                 self.num_heads, self.num_kv_heads,
-                self.w_norm, self.b_norm,
+                self.w_qk_norm, self.b_qk_norm,
                 self.dropout,
                 NORM_EPS,
-                self.w_pre_norm,
-                self.b_pre_norm,
+                self.w_norm,
+                self.b_norm,
                 self.kv_norm,
                 self.training,
                 mask,
@@ -427,11 +427,11 @@ class MultiHeadAttention(nn.Module, Checkpointable):
                 b_q, b_k, b_v,
                 self.w_out, self.b_out,
                 self.num_heads, self.num_kv_heads,
-                self.w_norm, self.b_norm,
+                self.w_qk_norm, self.b_qk_norm,
                 self.dropout,
                 NORM_EPS,
-                self.w_pre_norm,
-                self.b_pre_norm,
+                self.w_norm,
+                self.b_norm,
                 self.kv_norm,
                 self.training,
                 mask,
