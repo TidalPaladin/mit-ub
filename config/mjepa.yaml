@@ -68,7 +68,7 @@ fit:
       classification_config:
         num_classes: 10
         pool_type: simple-attention # Use multi-head attention pooling followed by linear projection to output logits
-        mlp_tower: false
+        mlp_tower: true
         tower_input_norm: false
 
       #checkpoint: ...
