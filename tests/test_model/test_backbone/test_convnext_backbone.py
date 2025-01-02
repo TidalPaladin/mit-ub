@@ -219,4 +219,4 @@ class TestConvNext:
         assert out.shape == exp
 
         # Ensure this is present for targeting weight decay
-        assert isinstance(head.get_submodule("head_mlp"), MLP)
+        assert isinstance(head.get_submodule("mlp"), MLP)
