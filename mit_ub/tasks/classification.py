@@ -167,6 +167,9 @@ class ClassificationConfig:
         freeze_backbone: If True, the backbone is frozen during training.
         pool_type: Type of pooling to use.
         label_key: Key in the batch dictionary that contains the label.
+        mlp_tower: If True, use a MLP tower instead of a simple linear layer.
+        tower_input_norm: If True, apply input normalization to the tower.
+            Input normalization should not be necessary for backbones that already have an output normalization layer.
     """
 
     num_classes: int
@@ -176,6 +179,8 @@ class ClassificationConfig:
     # TODO: jsonargparse can't handle the strenum it seems
     pool_type: str | PoolType = "attention"
     label_key: str = "label"
+    mlp_tower: bool = False
+    tower_input_norm: bool = False
 
     def __post_init__(self) -> None:
         if self.num_classes <= 0:
@@ -250,7 +255,8 @@ class ClassificationTask(Task):
         self.classification_head = self.backbone.create_head(
             out_dim=self.config.num_classes if not self.config.is_binary else 1,
             pool_type=PoolType(classification_config.pool_type),
-            use_mlp=True,
+            use_mlp=self.config.mlp_tower,
+            input_norm=self.config.tower_input_norm,
         )
         self.save_hyperparameters()
 
@@ -345,9 +351,8 @@ class JEPAWithClassification(JEPAWithProbe):
         return self.backbone.create_head(
             out_dim=self.classification_config.num_classes if not self.classification_config.is_binary else 1,
             pool_type=PoolType(self.classification_config.pool_type),
-            use_mlp=True,
-            # We know the teacher has LayerNorm on the output
-            input_norm=False,
+            use_mlp=self.classification_config.mlp_tower,
+            input_norm=self.classification_config.tower_input_norm,
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
@@ -425,8 +430,8 @@ class DistillationWithClassification(DistillationWithProbe):
         return self.backbone.create_head(
             out_dim=self.classification_config.num_classes if not self.classification_config.is_binary else 1,
             pool_type=PoolType(self.classification_config.pool_type),
-            use_mlp=True,
-            input_norm=True,
+            use_mlp=self.classification_config.mlp_tower,
+            input_norm=self.classification_config.tower_input_norm,
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
