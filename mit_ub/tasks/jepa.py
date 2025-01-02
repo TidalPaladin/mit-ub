@@ -60,6 +60,11 @@ class JEPAConfig:
         weight_decay_final: Final weight decay value. If set, the weight decay will be linearly
             annealed from the current value to this value over the course of training.
         self_attn: If True, use self-attention in the predictor.
+        mlp_tower: If True, use a MLP tower on the JEPA predictor output instead of a simple linear layer.
+            Empirically it seems better to not use a MLP tower.
+        tower_input_norm: If True, apply input normalization to the tower.
+            Input normalization should not be necessary for backbones that already have an output normalization layer.
+            Only has an effect if ``mlp_tower`` is ``True``.
     """
 
     context_ratio: float = 0.5
@@ -76,6 +81,8 @@ class JEPAConfig:
     salt_pepper_prob: float | Tuple[float, float] = (0.01, 0.05)
     weight_decay_final: float | None = None
     self_attn: bool = False
+    mlp_tower: bool = False
+    tower_input_norm: bool = False
 
     def __post_init__(self) -> None:
         if not 0 < self.context_ratio <= 1:
@@ -163,18 +170,18 @@ class JEPA(Task):
             dropout=0.1,
         )
 
-        # Projections for the input context and output predictions
-        self.jepa_norm = nn.LayerNorm(self.backbone.config.dim)
-        self.jepa_out_proj = nn.Linear(self.backbone.config.dim, self.backbone.config.dim)
-        nn.init.xavier_uniform_(self.jepa_out_proj.weight)
-        nn.init.zeros_(self.jepa_out_proj.bias)
-
         # JEPA predictor
         self.jepa_predictor = nn.ModuleList(
             [
                 self.backbone.create_decoder_layer(i, self_attn=self.jepa_config.self_attn)
                 for i in range(self.jepa_config.predictor_depth)
             ]
+        )
+        self.jepa_head = self.backbone.create_head(
+            self.backbone.config.dim,
+            pool_type=None,
+            use_mlp=self.jepa_config.mlp_tower,
+            input_norm=self.jepa_config.tower_input_norm,
         )
         self.save_hyperparameters()
 
@@ -235,8 +242,7 @@ class JEPA(Task):
             query = block(query, context)
         torch.cuda.nvtx.range_pop()
 
-        pred = self.jepa_norm(query)
-        pred = self.jepa_out_proj(pred)
+        pred = self.jepa_head(query)
         return {"jepa": pred, "jepa_context": context}
 
     @property

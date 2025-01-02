@@ -9,6 +9,8 @@ from torch.testing import assert_close
 
 from mit_ub.model.activations import relu2
 from mit_ub.model.backbone import AdaptiveViT, ConvViT, ConvViTConfig
+from mit_ub.model.layers.mlp import MLP
+from mit_ub.model.layers.pool import PoolType
 
 
 @pytest.fixture
@@ -157,3 +159,25 @@ class TestConvViT:
         y = model(x)
         y_baseline = baseline(x)
         assert_close(y, y_baseline)
+
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.cuda),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    @pytest.mark.parametrize("pool_type", [PoolType.ATTENTION, None])
+    def test_forward_head(self, config, device, dtype, pool_type):
+        x = torch.randn(1, 3, 224, 224, device=device)
+        model = ConvViT(config).to(device)
+        head = model.create_head(out_dim=10, pool_type=pool_type).to(device)
+        with torch.autocast(device_type=device, dtype=dtype, enabled=True):
+            features = model(x, reshape=False)
+            out = head(features)
+        exp = (1, 1, 10) if pool_type is not None else (1, 196, 10)
+        assert out.shape == exp
+
+        # Ensure this is present for targeting weight decay
+        assert isinstance(head.get_submodule("mlp"), MLP)
