@@ -155,6 +155,7 @@ class RandomNoise(Compose):
         self.uniform_scale = to_tuple(uniform_scale)
         self.multiplicative_scale = to_tuple(multiplicative_scale)
         self.salt_pepper_prob = to_tuple(salt_pepper_prob)
+        self.prob = prob
         self.clip = clip
         uniform_noise = RandomApply(
             [UniformNoise(min=self.uniform_scale[0], max=self.uniform_scale[1], clip=self.clip)], p=prob

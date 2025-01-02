@@ -132,7 +132,8 @@ def test_random_noise(device: str):
     torch.random.manual_seed(1)
     x = torch.rand(1, 10, 10, device=device)
     x_orig = x.clone()
-    result = RandomNoise()(x)
+    result = RandomNoise(prob=0.5)(x)
+
     assert not torch.allclose(result, x)
 
     # Check original input was not modified
@@ -148,6 +149,7 @@ def test_random_noise(device: str):
 )
 def test_apply_noise_batched(device: str):
     N = 512
+    torch.random.manual_seed(1)
     x = torch.rand(N, 3, 32, 32, device=device)
     x_orig = x.clone()
     result = apply_noise_batched(x)
