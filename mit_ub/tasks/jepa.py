@@ -20,6 +20,7 @@ from ..data.noise import (
     MULTIPLICATIVE_NOISE_MIN,
     SALT_PEPPER_NOISE_MAX,
     SALT_PEPPER_NOISE_MIN,
+    SALT_PEPPER_NOISE_PROB,
     UNIFORM_NOISE_MAX,
     UNIFORM_NOISE_MIN,
     RandomNoise,
@@ -77,7 +78,8 @@ class JEPAConfig:
     use_noise: bool = True
     uniform_noise_scale: float | Tuple[float, float] = (UNIFORM_NOISE_MIN, UNIFORM_NOISE_MAX)
     multiplicative_noise_scale: float | Tuple[float, float] = (MULTIPLICATIVE_NOISE_MIN, MULTIPLICATIVE_NOISE_MAX)
-    salt_pepper_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX)
+    salt_pepper_prob: float = SALT_PEPPER_NOISE_PROB
+    salt_pepper_pixel_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX)
     noise_prob: float = DEFAULT_NOISE_PROB
     noise_clip: bool = True
     weight_decay_final: float | None = None
@@ -192,6 +194,7 @@ class JEPA(Task):
             self.jepa_config.uniform_noise_scale,
             self.jepa_config.multiplicative_noise_scale,
             self.jepa_config.salt_pepper_prob,
+            self.jepa_config.salt_pepper_pixel_prob,
             self.jepa_config.noise_clip,
         )
 

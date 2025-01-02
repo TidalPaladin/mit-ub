@@ -90,12 +90,13 @@ def test_salt_pepper_noise(prob: float | tuple[float, float], expected_ratio: tu
 @pytest.mark.parametrize(
     "scale,clip,expected_range",
     [
-        (0.2, True, (0.0, 1.0)),
-        (0.5, False, (-float("inf"), float("inf"))),
+        ((0.5, 1.5), True, (0.0, 1.0)),
+        ((0.5, 1.5), False, (-float("inf"), float("inf"))),
     ],
 )
 def test_multiplicative_noise(scale: float, clip: bool, expected_range: tuple[float, float], device: str):
-    x = torch.ones(10, 10, device=device)
+    torch.random.manual_seed(1)
+    x = torch.rand(10, 10, device=device)
     x_orig = x.clone()
     min, max = to_tuple(scale)
     result = multiplicative_noise(x, min=min, max=max, clip=clip)

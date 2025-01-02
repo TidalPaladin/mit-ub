@@ -17,6 +17,9 @@ from ..data.noise import (
     DEFAULT_NOISE_PROB,
     MULTIPLICATIVE_NOISE_MAX,
     MULTIPLICATIVE_NOISE_MIN,
+    SALT_PEPPER_NOISE_MAX,
+    SALT_PEPPER_NOISE_MIN,
+    SALT_PEPPER_NOISE_PROB,
     UNIFORM_NOISE_MAX,
     UNIFORM_NOISE_MIN,
     RandomNoise,
@@ -51,7 +54,8 @@ class DistillationConfig:
     multiplicative_noise_scale: float | Tuple[float, float] = (MULTIPLICATIVE_NOISE_MIN, MULTIPLICATIVE_NOISE_MAX)
     noise_prob: float = DEFAULT_NOISE_PROB
     noise_clip: bool = True
-    salt_pepper_prob: float | Tuple[float, float] = (0.01, 0.05)
+    salt_pepper_prob: float = SALT_PEPPER_NOISE_PROB
+    salt_pepper_pixel_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX)
 
     def __post_init__(self) -> None:
         if not 0 < self.mixup_alpha:
@@ -115,6 +119,7 @@ class Distillation(Task):
             self.config.uniform_noise_scale,
             self.config.multiplicative_noise_scale,
             self.config.salt_pepper_prob,
+            self.config.salt_pepper_pixel_prob,
             self.config.noise_clip,
         )
 
