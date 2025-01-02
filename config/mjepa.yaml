@@ -138,22 +138,32 @@ fit:
           initial_lr: 0.0001
           initial_momentum: 0.95
 
-      # Use a higher weight decay on the JEPA predictor and output projection
-      # Use an even higher weight decay on the linear probe.
-      # Exempt position encodings, biases, and layer normalization from weight decay and use a higher learning rate.
+      # Override optimizer parameters for special parameter groups
       # NOTE: For parameters that match multiple groups, they are assigned to the first group that matches.
       parameter_groups:
+        # Biases (no weight decay)
         - params:
             - "bias"
-            - "LayerNorm"
-            - "LayerScale"
-            - "RelativeFactorizedPosition"
+            - "b_in"
+            - "b_out"
+            - "b_gate"
+            - "b_q"
+            - "b_k"
+            - "b_v"
+            - "b_norm"
+            - "b_qk_norm"
           weight_decay: 0.0
-          lr: 0.001
+        # LayerScale (no weight decay)
         - params:
-            - "jepa_predictor"
-            - "jepa_out_proj"
-          weight_decay: 0.25
+            - "LayerScale"
+          weight_decay: 0.0
+        # Multiplicative weights (no weight decay)
+        - params:
+            - "LayerNorm"
+            - "w_norm"
+            - "w_qk_norm"
+          weight_decay: 0.0
+        # Linear probe (higher weight decay)
         - params:
             - "linear_probe"
           weight_decay: 1.0
