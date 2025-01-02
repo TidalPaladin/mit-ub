@@ -14,7 +14,17 @@ from torch import Tensor
 from torch.optim.optimizer import Optimizer
 
 from ..data.mixup import mixup, sample_mixup_parameters
-from ..data.noise import RandomNoise
+from ..data.noise import (
+    DEFAULT_NOISE_PROB,
+    MULTIPLICATIVE_NOISE_MAX,
+    MULTIPLICATIVE_NOISE_MIN,
+    SALT_PEPPER_NOISE_MAX,
+    SALT_PEPPER_NOISE_MIN,
+    SALT_PEPPER_NOISE_PROB,
+    UNIFORM_NOISE_MAX,
+    UNIFORM_NOISE_MIN,
+    RandomNoise,
+)
 from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, ExampleSimilarity, TokenSimilarity
 from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
 from ..model import AdaptiveViT, AdaptiveViTConfig, ViT, ViTConfig
@@ -42,9 +52,11 @@ class JEPAConfig:
         mixup_alpha: Alpha parameter for the Beta distribution used to sample the mixup weight.
         mixup_prob: Probability of applying mixup to the input and target.
         use_noise: If True, apply noise to the input.
-        noise_scale: Scale of the noise to apply to the input.
-        noise_clip: If True, clip the noise to the range [0, 1].
+        uniform_noise_scale: Scale of the uniform noise to apply to the input.
+        multiplicative_noise_scale: Scale of the multiplicative noise to apply to the input.
         salt_pepper_prob: Proportion of salt and pepper noise to apply to the input.
+        noise_prob: Probability of applying a given noise transform.
+        noise_clip: If True, clip the noise to the range [0, 1].
         weight_decay_final: Final weight decay value. If set, the weight decay will be linearly
             annealed from the current value to this value over the course of training.
         self_attn: If True, use self-attention in the predictor.
@@ -64,9 +76,12 @@ class JEPAConfig:
     mixup_alpha: float = 1.0
     mixup_prob: float = 0.2
     use_noise: bool = True
-    noise_scale: float = 0.2
+    uniform_noise_scale: float | Tuple[float, float] = (UNIFORM_NOISE_MIN, UNIFORM_NOISE_MAX)
+    multiplicative_noise_scale: float | Tuple[float, float] = (MULTIPLICATIVE_NOISE_MIN, MULTIPLICATIVE_NOISE_MAX)
+    salt_pepper_prob: float = SALT_PEPPER_NOISE_PROB
+    salt_pepper_pixel_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX)
+    noise_prob: float = DEFAULT_NOISE_PROB
     noise_clip: bool = True
-    salt_pepper_prob: float | Tuple[float, float] = (0.01, 0.05)
     weight_decay_final: float | None = None
     self_attn: bool = False
     mlp_tower: bool = False
@@ -175,8 +190,11 @@ class JEPA(Task):
 
         # Random noise
         self.random_noise = RandomNoise(
-            self.jepa_config.noise_scale,
+            self.jepa_config.noise_prob,
+            self.jepa_config.uniform_noise_scale,
+            self.jepa_config.multiplicative_noise_scale,
             self.jepa_config.salt_pepper_prob,
+            self.jepa_config.salt_pepper_pixel_prob,
             self.jepa_config.noise_clip,
         )
 
