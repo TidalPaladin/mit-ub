@@ -11,6 +11,7 @@ MULTIPLICATIVE_NOISE_MIN: Final = 0.02
 MULTIPLICATIVE_NOISE_MAX: Final = 0.2
 SALT_PEPPER_NOISE_MIN: Final = 0.01
 SALT_PEPPER_NOISE_MAX: Final = 0.05
+DEFAULT_NOISE_PROB: Final = 0.25
 
 
 def to_tuple(x: float | Sequence[float]) -> Tuple[float, float]:
@@ -145,7 +146,7 @@ class RandomNoise(Compose):
 
     def __init__(
         self,
-        prob: float = 0.5,
+        prob: float = DEFAULT_NOISE_PROB,
         uniform_scale: float | Tuple[float, float] = (UNIFORM_NOISE_MIN, UNIFORM_NOISE_MAX),
         multiplicative_scale: float | Tuple[float, float] = (MULTIPLICATIVE_NOISE_MIN, MULTIPLICATIVE_NOISE_MAX),
         salt_pepper_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX),
@@ -168,7 +169,7 @@ class RandomNoise(Compose):
     def apply_batched(self, x: Tensor) -> Tensor:
         return apply_noise_batched(
             x,
-            prob=0.5,
+            prob=self.prob,
             uniform_scale=self.uniform_scale,
             multiplicative_scale=self.multiplicative_scale,
             salt_pepper_prob=self.salt_pepper_prob,
@@ -179,7 +180,7 @@ class RandomNoise(Compose):
 @torch.no_grad()
 def apply_noise_batched(
     x: Tensor,
-    prob: float = 0.5,
+    prob: float = DEFAULT_NOISE_PROB,
     uniform_scale: float | Tuple[float, float] = (UNIFORM_NOISE_MIN, UNIFORM_NOISE_MAX),
     multiplicative_scale: float | Tuple[float, float] = (MULTIPLICATIVE_NOISE_MIN, MULTIPLICATIVE_NOISE_MAX),
     salt_pepper_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX),

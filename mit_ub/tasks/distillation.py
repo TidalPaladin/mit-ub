@@ -13,7 +13,14 @@ from deep_helpers.tasks import Task
 from torch import Tensor
 
 from ..data.mixup import mixup, sample_mixup_parameters
-from ..data.noise import RandomNoise
+from ..data.noise import (
+    DEFAULT_NOISE_PROB,
+    MULTIPLICATIVE_NOISE_MAX,
+    MULTIPLICATIVE_NOISE_MIN,
+    UNIFORM_NOISE_MAX,
+    UNIFORM_NOISE_MIN,
+    RandomNoise,
+)
 from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
 from ..model import AnyModelConfig
 from ..model.helpers import grid_to_tokens
@@ -30,7 +37,9 @@ class DistillationConfig:
         mixup_alpha: Alpha parameter for the Beta distribution used to sample the mixup weight.
         mixup_prob: Probability of applying mixup to the input and target.
         use_noise: If True, apply noise to the input.
-        noise_scale: Scale of the noise to apply to the input.
+        uniform_noise_scale: Scale of the uniform noise to apply to the input.
+        multiplicative_noise_scale: Scale of the multiplicative noise to apply to the input.
+        noise_prob: Probability of applying a given noise transform.
         noise_clip: If True, clip the noise to the range [0, 1].
         salt_pepper_prob: Proportion of salt and pepper noise to apply to the input.
     """
@@ -38,7 +47,9 @@ class DistillationConfig:
     mixup_alpha: float = 1.0
     mixup_prob: float = 0.2
     use_noise: bool = True
-    noise_scale: float = 0.2
+    uniform_noise_scale: float | Tuple[float, float] = (UNIFORM_NOISE_MIN, UNIFORM_NOISE_MAX)
+    multiplicative_noise_scale: float | Tuple[float, float] = (MULTIPLICATIVE_NOISE_MIN, MULTIPLICATIVE_NOISE_MAX)
+    noise_prob: float = DEFAULT_NOISE_PROB
     noise_clip: bool = True
     salt_pepper_prob: float | Tuple[float, float] = (0.01, 0.05)
 
@@ -100,7 +111,9 @@ class Distillation(Task):
             p.requires_grad = False
 
         self.random_noise = RandomNoise(
-            self.config.noise_scale,
+            self.config.noise_prob,
+            self.config.uniform_noise_scale,
+            self.config.multiplicative_noise_scale,
             self.config.salt_pepper_prob,
             self.config.noise_clip,
         )
