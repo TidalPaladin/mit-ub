@@ -1,7 +1,7 @@
 from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, cast
+from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -14,7 +14,7 @@ from torch import Tensor
 
 from ..data import is_mixed, is_mixed_with_unknown, mixup, mixup_dense_label, sample_mixup_parameters
 from ..model import AdaptiveViTConfig, AnyModelConfig, ViTConfig
-from ..model.layers.pool import PoolType, get_global_pooling_layer
+from ..model.layers.pool import PoolType
 from .distillation import DistillationConfig, DistillationWithProbe
 from .jepa import JEPAConfig, JEPAWithProbe
 
@@ -167,6 +167,9 @@ class ClassificationConfig:
         freeze_backbone: If True, the backbone is frozen during training.
         pool_type: Type of pooling to use.
         label_key: Key in the batch dictionary that contains the label.
+        mlp_tower: If True, use a MLP tower instead of a simple linear layer.
+        tower_input_norm: If True, apply input normalization to the tower.
+            Input normalization should not be necessary for backbones that already have an output normalization layer.
     """
 
     num_classes: int
@@ -176,6 +179,8 @@ class ClassificationConfig:
     # TODO: jsonargparse can't handle the strenum it seems
     pool_type: str | PoolType = "attention"
     label_key: str = "label"
+    mlp_tower: bool = False
+    tower_input_norm: bool = False
 
     def __post_init__(self) -> None:
         if self.num_classes <= 0:
@@ -245,22 +250,14 @@ class ClassificationTask(Task):
             for param in self.backbone.parameters():
                 param.requires_grad = False
 
-        dim = self.backbone.config.dim
+        self.backbone.config.dim
 
-        self.classification_head = nn.Sequential(
-            nn.LayerNorm(dim),
-            get_global_pooling_layer(
-                cast(PoolType, self.config.pool_type),
-                dim,
-                num_heads=self.backbone.config.nhead,
-                dropout=self.backbone.config.dropout,
-            ),
-            nn.LayerNorm(dim),
-            nn.Dropout(self.backbone.config.dropout),
-            nn.Linear(dim, self.config.num_classes if not self.config.is_binary else 1),
+        self.classification_head = self.backbone.create_head(
+            out_dim=self.config.num_classes if not self.config.is_binary else 1,
+            pool_type=PoolType(classification_config.pool_type),
+            use_mlp=self.config.mlp_tower,
+            input_norm=self.config.tower_input_norm,
         )
-        nn.init.zeros_(self.classification_head[-1].bias)
-        nn.init.trunc_normal_(self.classification_head[-1].weight, std=0.02)
         self.save_hyperparameters()
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
@@ -351,18 +348,11 @@ class JEPAWithClassification(JEPAWithProbe):
         )
 
     def create_probe_head(self) -> nn.Module:
-        dim = self.backbone.config.dim
-        return nn.Sequential(
-            nn.LayerNorm(dim),
-            get_global_pooling_layer(
-                cast(PoolType, self.classification_config.pool_type),
-                dim,
-                num_heads=self.backbone.config.nhead,
-                dropout=self.backbone.config.dropout,
-            ),
-            nn.LayerNorm(dim),
-            nn.Dropout(self.backbone.config.dropout),
-            nn.Linear(dim, self.classification_config.num_classes if not self.classification_config.is_binary else 1),
+        return self.backbone.create_head(
+            out_dim=self.classification_config.num_classes if not self.classification_config.is_binary else 1,
+            pool_type=PoolType(self.classification_config.pool_type),
+            use_mlp=self.classification_config.mlp_tower,
+            input_norm=self.classification_config.tower_input_norm,
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
@@ -437,18 +427,11 @@ class DistillationWithClassification(DistillationWithProbe):
         )
 
     def create_probe_head(self) -> nn.Module:
-        dim = self.backbone.config.dim
-        return nn.Sequential(
-            nn.LayerNorm(dim),
-            get_global_pooling_layer(
-                cast(PoolType, self.classification_config.pool_type),
-                dim,
-                num_heads=self.backbone.config.nhead,
-                dropout=self.backbone.config.dropout,
-            ),
-            nn.LayerNorm(dim),
-            nn.Dropout(self.backbone.config.dropout),
-            nn.Linear(dim, self.classification_config.num_classes if not self.classification_config.is_binary else 1),
+        return self.backbone.create_head(
+            out_dim=self.classification_config.num_classes if not self.classification_config.is_binary else 1,
+            pool_type=PoolType(self.classification_config.pool_type),
+            use_mlp=self.classification_config.mlp_tower,
+            input_norm=self.classification_config.tower_input_norm,
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:

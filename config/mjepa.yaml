@@ -67,7 +67,9 @@ fit:
       # Configure the probe head
       classification_config:
         num_classes: 10
-        pool_type: attention # Use multi-head attention pooling followed by linear projection to output logits
+        pool_type: simple-attention # Use multi-head attention pooling followed by linear projection to output logits
+        mlp_tower: true
+        tower_input_norm: false
 
       #checkpoint: ...
 
@@ -115,6 +117,10 @@ fit:
         # Scale of context sampling. 
         # At scale=2, tokens are guaranteed to appear in 2x2 contiguous groups.
         scale: 2
+
+        # Use a simple linear layer on the JEPA predictor output projection
+        mlp_tower: false
+        tower_input_norm: false
 
       # Use SOAP optimizer and a reciplrocal square root learning rate schedule.
       # SOAP is empirically much faster than AdamW for this task.
