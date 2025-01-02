@@ -1,7 +1,14 @@
 import pytest
 import torch
 
-from mit_ub.data.noise import RandomNoise, multiplicative_noise, salt_pepper_noise, uniform_noise
+from mit_ub.data.noise import (
+    RandomNoise,
+    apply_noise_batched,
+    multiplicative_noise,
+    salt_pepper_noise,
+    to_tuple,
+    uniform_noise,
+)
 
 
 @pytest.mark.parametrize(
@@ -20,6 +27,7 @@ from mit_ub.data.noise import RandomNoise, multiplicative_noise, salt_pepper_noi
 )
 def test_uniform_noise(min: float, max: float, clip: bool, expected_range: tuple[float, float], device: str):
     x = torch.ones(10, 10, device=device)
+    x_orig = x.clone()
     result = uniform_noise(x, min=min, max=max, clip=clip)
 
     # Check shape and dtype preserved
@@ -37,6 +45,9 @@ def test_uniform_noise(min: float, max: float, clip: bool, expected_range: tuple
     result2 = uniform_noise(x, min=min, max=max, clip=clip)
     assert not torch.allclose(result, result2)
 
+    # Check original input was not modified
+    assert torch.allclose(x, x_orig)
+
 
 @pytest.mark.parametrize(
     "device",
@@ -50,7 +61,9 @@ def test_uniform_noise(min: float, max: float, clip: bool, expected_range: tuple
 )
 def test_salt_pepper_noise(prob: float | tuple[float, float], expected_ratio: tuple[float, float], device: str):
     x = torch.zeros(1000, 1000, device=device)
-    result = salt_pepper_noise(x, prob=prob)
+    x_orig = x.clone()
+    min, max = to_tuple(prob)
+    result = salt_pepper_noise(x, min=min, max=max)
 
     # Check shape and dtype preserved
     assert result.shape == x.shape
@@ -60,8 +73,11 @@ def test_salt_pepper_noise(prob: float | tuple[float, float], expected_ratio: tu
     assert torch.all((result == 0) | (result == 1))
 
     # Check different random values each time
-    result2 = salt_pepper_noise(x, prob=prob)
+    result2 = salt_pepper_noise(x, min=min, max=max)
     assert not torch.allclose(result, result2)
+
+    # Check original input was not modified
+    assert torch.allclose(x, x_orig)
 
 
 @pytest.mark.parametrize(
@@ -80,7 +96,9 @@ def test_salt_pepper_noise(prob: float | tuple[float, float], expected_ratio: tu
 )
 def test_multiplicative_noise(scale: float, clip: bool, expected_range: tuple[float, float], device: str):
     x = torch.ones(10, 10, device=device)
-    result = multiplicative_noise(x, scale=scale, clip=clip)
+    x_orig = x.clone()
+    min, max = to_tuple(scale)
+    result = multiplicative_noise(x, min=min, max=max, clip=clip)
 
     # Check shape and dtype preserved
     assert result.shape == x.shape
@@ -94,8 +112,11 @@ def test_multiplicative_noise(scale: float, clip: bool, expected_range: tuple[fl
     assert not torch.allclose(result, x)
 
     # Check different random values each time
-    result2 = multiplicative_noise(x, scale=scale, clip=clip)
+    result2 = multiplicative_noise(x, min=min, max=max, clip=clip)
     assert not torch.allclose(result, result2)
+
+    # Check original input was not modified
+    assert torch.allclose(x, x_orig)
 
 
 @pytest.mark.parametrize(
@@ -110,5 +131,30 @@ def test_random_noise(device: str):
     # triggers at least one noise application
     torch.random.manual_seed(1)
     x = torch.rand(1, 10, 10, device=device)
+    x_orig = x.clone()
     result = RandomNoise()(x)
     assert not torch.allclose(result, x)
+
+    # Check original input was not modified
+    assert torch.allclose(x, x_orig)
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param("cuda", marks=pytest.mark.cuda),
+    ],
+)
+def test_apply_noise_batched(device: str):
+    N = 512
+    x = torch.rand(N, 3, 32, 32, device=device)
+    x_orig = x.clone()
+    result = apply_noise_batched(x)
+    assert not torch.allclose(result, x)
+
+    # Check original input was not modified
+    assert torch.allclose(x, x_orig)
+
+    # Some inputs should not be modified
+    assert (result.view(N, -1) == x_orig.view(N, -1)).any()
