@@ -11,6 +11,7 @@ from ..helpers import compile_is_disabled, max_autotune
 
 class PoolType(StrEnum):
     ATTENTION = "attention"
+    SIMPLE_ATTENTION = "simple-attention"
     ATTENTION_QK_NORM = "attention-qk-norm"
     AVG = "avg"
     MAX = "max"
@@ -110,6 +111,45 @@ class MultiHeadAttentionPool(nn.Module):
         )
 
 
+@torch.compile(
+    fullgraph=True,
+    options={
+        "max_autotune": max_autotune(),
+        "triton.cudagraph_trees": max_autotune(),
+        "shape_padding": True,
+    },
+    disable=compile_is_disabled(),
+)
+def simple_attention_pool(x: Tensor, w: Tensor, num_heads: int) -> Tensor:
+    weights = F.linear(x, w).softmax(dim=1)
+    weights = rearrange(weights, "b l h -> b l h ()")
+    x = rearrange(x, "b l (h d) -> b l h d", h=num_heads)
+    y = (weights * x).sum(dim=1)
+    return rearrange(y, "b h d -> b (h d)")
+
+
+class SimpleAttentionPool(nn.Module):
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        assert dim % num_heads == 0, "dim must be divisible by num_heads"
+        self.num_heads = num_heads
+        self.dropout = dropout
+        self.w = nn.Parameter(torch.empty(num_heads, dim))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.w)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return simple_attention_pool(x, self.w, self.num_heads)
+
+
 class AveragePool(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
@@ -126,6 +166,8 @@ def get_global_pooling_layer(pool_type: PoolType, *args, **kwargs) -> nn.Module:
     match pool_type:
         case PoolType.ATTENTION:
             return MultiHeadAttentionPool(*args, **kwargs)
+        case PoolType.SIMPLE_ATTENTION:
+            return SimpleAttentionPool(*args, **kwargs)
         case PoolType.ATTENTION_QK_NORM:
             return MultiHeadAttentionPool(*args, **kwargs, qk_norm=True)
         case PoolType.AVG:
