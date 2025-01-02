@@ -2,7 +2,7 @@ from typing import Any, Dict, Final, List, Sequence, Tuple, cast
 
 import torch
 from torch import Tensor
-from torchvision.transforms.v2 import Compose, RandomApply, RandomChoice, Transform
+from torchvision.transforms.v2 import Compose, RandomApply, Transform
 
 
 UNIFORM_NOISE_MIN: Final = -0.2
@@ -145,26 +145,35 @@ class RandomNoise(Compose):
 
     def __init__(
         self,
+        prob: float = 0.5,
         uniform_scale: float | Tuple[float, float] = (UNIFORM_NOISE_MIN, UNIFORM_NOISE_MAX),
         multiplicative_scale: float | Tuple[float, float] = (MULTIPLICATIVE_NOISE_MIN, MULTIPLICATIVE_NOISE_MAX),
         salt_pepper_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX),
         clip: bool = True,
     ):
-        uniform_scale = to_tuple(uniform_scale)
-        multiplicative_scale = to_tuple(multiplicative_scale)
-        primary_noise = RandomApply(
-            [
-                RandomChoice(
-                    [
-                        UniformNoise(min=uniform_scale[0], max=uniform_scale[1], clip=clip),
-                        MultiplicativeNoise(min=multiplicative_scale[0], max=multiplicative_scale[1], clip=clip),
-                    ]
-                )
-            ],
-            p=0.5,
+        self.uniform_scale = to_tuple(uniform_scale)
+        self.multiplicative_scale = to_tuple(multiplicative_scale)
+        self.salt_pepper_prob = to_tuple(salt_pepper_prob)
+        self.clip = clip
+        uniform_noise = RandomApply(
+            [UniformNoise(min=self.uniform_scale[0], max=self.uniform_scale[1], clip=self.clip)], p=prob
         )
-        salt_pepper_noise = RandomApply([SaltPepperNoise(prob=salt_pepper_prob)], p=0.5)
-        super().__init__([primary_noise, salt_pepper_noise])
+        multiplicative_noise = RandomApply(
+            [MultiplicativeNoise(min=self.multiplicative_scale[0], max=self.multiplicative_scale[1], clip=self.clip)],
+            p=prob,
+        )
+        salt_pepper_noise = RandomApply([SaltPepperNoise(prob=self.salt_pepper_prob)], p=prob)
+        super().__init__([uniform_noise, multiplicative_noise, salt_pepper_noise])
+
+    def apply_batched(self, x: Tensor) -> Tensor:
+        return apply_noise_batched(
+            x,
+            prob=0.5,
+            uniform_scale=self.uniform_scale,
+            multiplicative_scale=self.multiplicative_scale,
+            salt_pepper_prob=self.salt_pepper_prob,
+            clip=self.clip,
+        )
 
 
 @torch.no_grad()

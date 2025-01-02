@@ -25,18 +25,6 @@ from ..tokens import apply_mask, create_mask, generate_non_overlapping_mask, mas
 from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
 
 
-@torch.no_grad()
-def apply_noise_batched(transform: RandomNoise, x: Tensor) -> Tensor:
-    r"""Applies noise to a batch of images such that each image in the batch is
-    independently transformed. This is an alternative to `self.random_noise` which
-    applies the same noise to all images in the batch.
-    """
-    x = x.clone()
-    for i in range(x.shape[0]):
-        x[i] = transform(x[i])
-    return x
-
-
 @dataclass
 class JEPAConfig:
     """
@@ -368,7 +356,7 @@ class JEPA(Task):
             # apply random noise
             if self.training and self.jepa_config.use_noise:
                 torch.cuda.nvtx.range_push("noise")
-                x = apply_noise_batched(self.random_noise, x)
+                x = self.random_noise.apply_batched(x)
                 torch.cuda.nvtx.range_pop()
 
             # apply mixup, not overwriting full_target

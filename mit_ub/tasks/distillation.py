@@ -18,7 +18,7 @@ from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
 from ..model import AnyModelConfig
 from ..model.helpers import grid_to_tokens
 from ..model.layers import has_layer_scale
-from .jepa import apply_noise_batched, mixup
+from .jepa import mixup
 
 
 @dataclass
@@ -148,7 +148,7 @@ class Distillation(Task):
             target: Tensor = self.teacher_backbone(x, reshape=False)
 
             if self.training and self.config.use_noise:
-                x = apply_noise_batched(self.random_noise, x)
+                x = self.random_noise.apply_batched(x)
 
             # apply mixup
             if self.training and self.config.mixup_prob > 0:
