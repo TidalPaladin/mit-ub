@@ -42,6 +42,7 @@ class CIFAR10DataModule(LightningDataModule):
         num_workers: Number of workers for data loading.
         pin_memory: Whether to pin memory.
         prefetch_factor: Prefetch factor for data loading.
+        persistent_workers: Whether to use persistent workers for the training dataloader.
 
     Keyword Args:
         Forwarded to :class:`torch.utils.data.DataLoader`.
@@ -61,6 +62,7 @@ class CIFAR10DataModule(LightningDataModule):
         num_workers: int = 0,
         pin_memory: bool = True,
         prefetch_factor: Optional[int] = None,
+        persistent_workers: bool = True,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -78,6 +80,7 @@ class CIFAR10DataModule(LightningDataModule):
         self.num_workers = num_workers
         self.pin_memory = pin_memory
         self.prefetch_factor = prefetch_factor
+        self.persistent_workers = persistent_workers if num_workers > 0 else False
         self.dataloader_config = kwargs
 
     def prepare_data(self):
@@ -103,7 +106,9 @@ class CIFAR10DataModule(LightningDataModule):
         """The train dataloader."""
         if not hasattr(self, "dataset_train"):
             raise RuntimeError("setup() must be called before train_dataloader()")  # pragma: no cover
-        return self._data_loader(self.dataset_train, shuffle=True, drop_last=True)
+        return self._data_loader(
+            self.dataset_train, shuffle=True, drop_last=True, persistent_workers=self.persistent_workers
+        )
 
     def val_dataloader(self, *args: Any, **kwargs: Any) -> Union[DataLoader, List[DataLoader]]:
         """The val dataloader."""

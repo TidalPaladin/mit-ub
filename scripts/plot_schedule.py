@@ -29,6 +29,7 @@ def parse_args() -> Namespace:
     parser.add_argument(
         "-m", "--momentum", default=False, action="store_true", help="Plot a momentum schedule (cycled inversely)"
     )
+    parser.add_argument("-ps", "--peak-steps", type=int, default=0, help="Number of steps at peak value")
     return parser.parse_args()
 
 
@@ -45,6 +46,7 @@ def main(args: Namespace) -> None:
                     total_steps=args.total_steps - args.stopped_steps,
                     timescale=args.timescale,
                     initial_momentum=args.initial,
+                    peak_steps=args.peak_steps,
                 )
                 for x in np.arange(args.total_steps)
             ]
@@ -60,6 +62,7 @@ def main(args: Namespace) -> None:
                     total_steps=args.total_steps - args.stopped_steps,
                     timescale=args.timescale,
                     initial_lr=args.initial,
+                    peak_steps=args.peak_steps,
                 )
                 for x in np.arange(args.total_steps)
             ]
