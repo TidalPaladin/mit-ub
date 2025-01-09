@@ -102,14 +102,20 @@ class ParameterBucket:
     def size_mb_with(self, new: Tensor) -> float:
         return self.size_mb() + (new.numel() * new.element_size()) / 1024 / 1024
 
+    @property
+    def device(self) -> torch.device:
+        return self.params[0].device if self.params else torch.device("cpu")
+
     def flat_params(self) -> Tensor:
         return torch.cat([param.data.flatten() for param in self.params])
 
     def add(self, param: Tensor) -> None:
+        if self.params and param.device != self.device:
+            raise ValueError(f"Parameter device {param.device} does not match bucket device {self.device}")
         self.params.append(param)
 
     def all_reduce(self, world_size: int) -> None:
-        if not self:
+        if not self or self.device.type == "cpu":
             return
         if self._handle is not None:
             raise RuntimeError("Cannot all_reduce twice")
@@ -117,6 +123,8 @@ class ParameterBucket:
         self._handle = all_reduce(self._flat_params, op=ReduceOp.SUM, async_op=True)
 
     def join(self) -> None:
+        if self.device.type == "cpu" or not self:
+            return
         if self._handle is None or self._flat_params is None:
             raise RuntimeError("Cannot join without all_reduce")
         self._handle.wait()
@@ -203,7 +211,9 @@ def _update_and_sync(
             buckets.append(current_bucket)
 
         current_bucket.add(teacher_param)
-    current_bucket.all_reduce(world_size)
+
+    if current_bucket:
+        current_bucket.all_reduce(world_size)
 
     # Collect the reduction results
     for bucket in buckets:
