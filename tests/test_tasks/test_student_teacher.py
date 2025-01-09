@@ -11,9 +11,9 @@ from torch.testing import assert_close
 from mit_ub.tasks.student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
 
 
-def run_ema_sync(rank, world_size):
+def run_ema_sync(rank, world_size, device):
     torch.random.manual_seed(0)
-    teacher = nn.Linear(10, 10)
+    teacher = nn.Linear(10, 10).to(device)
     try:
         # Initialize the process group and get rank
         os.environ["MASTER_ADDR"] = "localhost"
@@ -29,7 +29,7 @@ def run_ema_sync(rank, world_size):
         synchronize_teacher(teacher, world_size)
 
         # EMA weights are averaged
-        expected = torch.tensor(sum(range(world_size)) / world_size)
+        expected = torch.tensor(sum(range(world_size)) / world_size, device=device)
         for param in teacher.parameters():
             assert_close(param.data, expected.expand_as(param.data))
 
@@ -41,10 +41,10 @@ def run_ema_sync(rank, world_size):
             pass
 
 
-def run_update_and_sync(rank, world_size):
+def run_update_and_sync(rank, world_size, device):
     torch.random.manual_seed(0)
-    teacher = nn.Linear(10, 10)
-    student = nn.Linear(10, 10)
+    teacher = nn.Linear(10, 10).to(device)
+    student = nn.Linear(10, 10).to(device)
     try:
         # Initialize the process group and get rank
         os.environ["MASTER_ADDR"] = "localhost"
@@ -71,7 +71,7 @@ def run_update_and_sync(rank, world_size):
             sync_interval=1,
         )
 
-        ranks = torch.arange(world_size).float()
+        ranks = torch.arange(world_size, device=device).float()
         updated = ranks.lerp(ranks + 1, 0.5)
         expected = updated.mean()
         for param in teacher.parameters():
@@ -89,11 +89,11 @@ def run_update_and_sync(rank, world_size):
             pass
 
 
-def run_update_and_sync_big_model(rank, world_size, exp):
+def run_update_and_sync_big_model(rank, world_size, device, exp):
     torch.random.manual_seed(0)
-    teacher = nn.Sequential(*[nn.Linear(512, 512) for _ in range(5)])
+    teacher = nn.Sequential(*[nn.Linear(512, 512) for _ in range(5)]).to(device)
     torch.random.manual_seed(rank)
-    student = nn.Sequential(*[nn.Linear(512, 512) for _ in range(5)])
+    student = nn.Sequential(*[nn.Linear(512, 512) for _ in range(5)]).to(device)
     try:
         # Initialize the process group and get rank
         os.environ["MASTER_ADDR"] = "localhost"
@@ -261,20 +261,27 @@ def test_sync_interval(
 
 
 @pytest.mark.parametrize("world_size", [1, 2])
-def test_synchronize_teacher(world_size):
-    if not dist.is_available():
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param("cuda", marks=pytest.mark.cuda),
+    ],
+)
+def test_synchronize_teacher(world_size, device):
+    if not dist.is_available() and world_size > 1:
         pytest.skip("Distributed training is not available")
 
-    if world_size > 1:
-        spawn(run_ema_sync, args=(world_size,), nprocs=world_size, join=True)
+    if world_size > 1 and device != "cpu":
+        spawn(run_ema_sync, args=(world_size, device), nprocs=world_size, join=True)
 
     else:
         torch.random.manual_seed(0)
-        teacher = nn.Linear(10, 10)
+        teacher = nn.Linear(10, 10).to(device)
         synchronize_teacher(teacher, world_size)
 
         # No update will be made
-        expected = torch.tensor(1.0)
+        expected = torch.tensor(1.0, device=device)
         with torch.no_grad():
             for param in teacher.parameters():
                 param.fill_(expected)
@@ -283,17 +290,24 @@ def test_synchronize_teacher(world_size):
 
 
 @pytest.mark.parametrize("world_size", [1, 2])
-def test_update_and_sync(world_size):
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param("cuda", marks=pytest.mark.cuda),
+    ],
+)
+def test_update_and_sync(world_size, device):
     if not dist.is_available():
         pytest.skip("Distributed training is not available")
 
-    if world_size > 1:
-        spawn(run_update_and_sync, args=(world_size,), nprocs=world_size, join=True)
+    if world_size > 1 and device != "cpu":
+        spawn(run_update_and_sync, args=(world_size, device), nprocs=world_size, join=True)
 
     else:
         torch.random.manual_seed(0)
-        teacher = nn.Linear(10, 10)
-        student = nn.Linear(10, 10)
+        teacher = nn.Linear(10, 10).to(device)
+        student = nn.Linear(10, 10).to(device)
         with torch.no_grad():
             for param in teacher.parameters():
                 param.fill_(1.0)
@@ -312,24 +326,30 @@ def test_update_and_sync(world_size):
         )
 
         # No update will be made
-        expected = torch.tensor(0.5)
+        expected = torch.tensor(0.5, device=device)
         for param in teacher.parameters():
             assert_close(param.data, expected.expand_as(param.data))
 
 
-def test_update_and_sync_big_model():
+@pytest.mark.parametrize(
+    "device",
+    [
+        pytest.param("cuda", marks=pytest.mark.cuda),
+    ],
+)
+def test_update_and_sync_big_model(device):
     if not dist.is_available():
         pytest.skip("Distributed training is not available")
 
     # Run manually without distribution
     torch.random.manual_seed(0)
-    teacher1 = nn.Sequential(*[nn.Linear(512, 512) for _ in range(5)])
+    teacher1 = nn.Sequential(*[nn.Linear(512, 512) for _ in range(5)]).to(device)
     torch.random.manual_seed(0)
-    teacher2 = nn.Sequential(*[nn.Linear(512, 512) for _ in range(5)])
+    teacher2 = nn.Sequential(*[nn.Linear(512, 512) for _ in range(5)]).to(device)
     torch.random.manual_seed(0)
-    student1 = nn.Sequential(*[nn.Linear(512, 512) for _ in range(5)])
+    student1 = nn.Sequential(*[nn.Linear(512, 512) for _ in range(5)]).to(device)
     torch.random.manual_seed(1)
-    student2 = nn.Sequential(*[nn.Linear(512, 512) for _ in range(5)])
+    student2 = nn.Sequential(*[nn.Linear(512, 512) for _ in range(5)]).to(device)
 
     update_teacher(
         student1,
@@ -351,9 +371,9 @@ def test_update_and_sync_big_model():
         world_size=1,
         sync_interval=1,
     )
-    total = torch.tensor(0.0)
+    total = torch.tensor(0.0, device=device)
     for teacher1_param, teacher2_param in zip(teacher1.parameters(), teacher2.parameters()):
         total += (teacher1_param.sum() + teacher2_param.sum()) / 2
     total = total.detach()
 
-    spawn(run_update_and_sync_big_model, args=(2, total), nprocs=2, join=True)
+    spawn(run_update_and_sync_big_model, args=(2, device, total), nprocs=2, join=True)
