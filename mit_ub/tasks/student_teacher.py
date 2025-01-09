@@ -38,7 +38,7 @@ class EMAConfig:
 
     momentum: float = 0.98
     warmup_steps: int = 1000
-    peak_steps: int = 5000
+    peak_steps: int = 0
     cooldown_steps: int = 25000
     stopped_steps: int = 0
     timescale: int = 10000
