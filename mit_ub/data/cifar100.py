@@ -36,6 +36,7 @@ class CIFAR100DataModule(CIFAR10DataModule):
         num_workers: Number of workers for data loading.
         pin_memory: Whether to pin memory.
         prefetch_factor: Prefetch factor for data loading.
+        persistent_workers: Whether to use persistent workers for the training dataloader.
 
     Keyword Args:
         Forwarded to :class:`torch.utils.data.DataLoader`.

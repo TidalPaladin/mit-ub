@@ -25,6 +25,7 @@ class EMAConfig:
     Args:
         momentum: Momentum value after warmup.
         warmup_steps: Number of steps over which to warm up the momentum.
+        peak_steps: Number of steps at the peak.
         cooldown_steps: Number of steps over which to cooldown the momentum.
         stopped_steps: Number of steps after cooldown at which to hold the momentum at `initial_momentum`.
         timescale: Time scale for the EMA update.
@@ -37,6 +38,7 @@ class EMAConfig:
 
     momentum: float = 0.98
     warmup_steps: int = 1000
+    peak_steps: int = 5000
     cooldown_steps: int = 25000
     stopped_steps: int = 0
     timescale: int = 10000
@@ -50,6 +52,8 @@ class EMAConfig:
             raise ValueError("sync_interval must be positive")
         if not 0 <= self.warmup_steps:
             raise ValueError("warmup_steps must be non-negative")
+        if not 0 <= self.peak_steps:
+            raise ValueError("peak_steps must be non-negative")
         if not 0 <= self.cooldown_steps:
             raise ValueError("cooldown_steps must be non-negative")
         if not 0 <= self.timescale:
@@ -62,7 +66,7 @@ class EMAConfig:
             raise ValueError("stopped_steps must be non-negative")
 
     def validate_schedule(self, max_steps: int) -> None:
-        linear_steps = self.warmup_steps + self.cooldown_steps + self.stopped_steps
+        linear_steps = self.warmup_steps + self.cooldown_steps + self.stopped_steps + self.peak_steps
         if linear_steps > max_steps:
             raise ValueError(f"Cannot satisfy EMA momentum schedule for {max_steps} steps: {self}")
 
@@ -158,6 +162,7 @@ def get_ema_momentum(
         effective_max_steps,
         ema_config.timescale,
         ema_config.initial_momentum,
+        ema_config.peak_steps,
     )
     assert 0 <= momentum <= 1.0
     return momentum
