@@ -6,14 +6,17 @@ fit:
   float32_matmul_precision: medium
 
   trainer:
-    # Train on GPU 1 in BF16 mixed precision for 50k steps, validating every 10 epochs.
+    # Train on 3 GPUs in BF16 mixed precision for 25k steps, validating every 20 epochs.
     # Sanity validation steps are recommended to trigger torch.compile of the model in inference mode.
     accelerator: gpu
-    devices: [1]
+    devices: 3
     precision: "bf16-mixed"
-    max_steps: 100000
+    max_steps: 25000
     num_sanity_val_steps: 2
-    check_val_every_n_epoch: 10
+    check_val_every_n_epoch: 20
+
+    gradient_clip_val: 1.0
+    gradient_clip_algorithm: norm
 
     default_root_dir: /mnt/flash/mit-ub
 
@@ -80,17 +83,17 @@ fit:
 
       jepa_config:
         # Reciprocal square root EMA momentum schedule, from `initial_momentum` to `momentum` during warmup,
-        # and ending at `initial_momentum` after cooldown. If `stopped_steps` is set, the schedule will run at
-        # `initial_momentum` for the final `stopped_steps` steps.
+        # held at `momentum` during the peak steps, and ending at `initial_momentum` after cooldown.
+        # If `stopped_steps` is set, the schedule will run at `initial_momentum` for the final `stopped_steps` steps.
         # We match these roughly against the LR schedule as a good initial hyperparameter guess.
         ema_config: 
-          momentum: 0.95
+          momentum: 0.98
           initial_momentum: 1.0
-          warmup_steps: 1000
-          stopped_steps: 15000
-          cooldown_steps: 15000
-          timescale: 8000
-          sync_interval: 100
+          warmup_steps: 500
+          peak_steps: 5000
+          cooldown_steps: 2500
+          stopped_steps: 5000
+          timescale: 2000
 
         # Optional final weight decay for the backbone
         # NOTE: Using a weight decay schedule breaks the infinite LR schedule provided by the reciprocal square root scheduler.
@@ -119,7 +122,7 @@ fit:
         scale: 2
 
         # Use a simple linear layer on the JEPA predictor output projection
-        mlp_tower: false
+        mlp_tower: true
         tower_input_norm: false
 
       # Use SOAP optimizer and a reciplrocal square root learning rate schedule.
@@ -129,20 +132,21 @@ fit:
       optimizer_init:
         class_path: pytorch_optimizer.SOAP
         init_args:
-          lr: 0.0005
-          weight_decay: 0.05
+          lr: 0.001
+          weight_decay: 0.1
           betas: [0.85, 0.999]
           precondition_frequency: 10
       lr_interval: "step"
       lr_scheduler_init:
         class_path: deep_helpers.optim.ReciprocalSquareRootLR
         init_args:
-          warmup_steps: 5000
-          cooldown_steps: 25000
+          warmup_steps: 1000
+          cooldown_steps: 7500
           total_steps: ${fit.trainer.max_steps}
-          timescale: 10000
-          initial_lr: 0.0001
+          timescale: 1000
+          initial_lr: 0.0002
           initial_momentum: 0.95
+          peak_steps: 5000
 
       # Override optimizer parameters for special parameter groups
       # NOTE: For parameters that match multiple groups, they are assigned to the first group that matches.
@@ -171,6 +175,7 @@ fit:
           weight_decay: 0.0
         # Linear probe (higher weight decay)
         - params:
+            - "jepa_head"
             - "linear_probe"
           weight_decay: 1.0
 
@@ -178,7 +183,7 @@ fit:
     class_path: mit_ub.data.CIFAR10DataModule
     init_args:
       root: /mnt/data/cifar10/cifar-10-batches-py
-      batch_size: 512
+      batch_size: 1024
       num_workers: 24 # Recommended setting is (num cpu cores) / (num gpus)
       pin_memory: true
 
