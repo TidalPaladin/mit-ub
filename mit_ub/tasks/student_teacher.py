@@ -3,9 +3,12 @@ from typing import Any, Final, Iterator, List
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from deep_helpers.optim.rsqrt import get_momentum
 from torch import Tensor
 from torch.distributed import ReduceOp, all_reduce
+
+from ..model.helpers import compile_is_disabled
 
 
 BUCKET_SIZE_MB: Final = 25
@@ -285,3 +288,37 @@ def synchronize_teacher(teacher: nn.Module, world_size: int) -> None:
     # Collect the reduction results
     for bucket in buckets:
         bucket.join()
+
+
+@torch.compile(mode="reduce-overhead", disable=compile_is_disabled())
+def contrastive_loss(pred: Tensor, target: Tensor, margin: float = 0.0) -> Tensor:
+    r"""Computes a contrastive cosine similarity loss between `pred` and `target`.
+
+    Args:
+        pred: The predicted tensor.
+        target: The target tensor.
+        margin: The margin for the contrastive loss.
+
+    Shapes:
+        pred: :math:`(N, D)`
+        target: :math:`(N, D)`
+
+    Returns:
+        The contrastive loss.
+    """
+    N = pred.shape[0]
+    pred = pred.view(N, 1, -1).expand(-1, N, -1)
+    target = target.view(1, N, -1).expand(N, -1, -1)
+    cos = F.cosine_similarity(pred, target, dim=-1)
+
+    # Apply margin
+    loss = F.relu(cos - margin)
+
+    # Fill diagonal with 0 in autograd supported way.
+    # Diagonal is same-token pairs which cant be contrasted
+    off_diag_mask = ~torch.eye(N, device=loss.device, dtype=torch.bool)
+    loss = loss[off_diag_mask]
+
+    # Compute mean loss, accounting for diagonal mask
+    loss = loss.sum() / (N * (N - 1))
+    return loss
