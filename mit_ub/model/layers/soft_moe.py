@@ -184,8 +184,10 @@ class SoftMoE(nn.Module):
             nn.init.zeros_(self.b_k_combine)
         for expert in self.experts:
             expert.reset_parameters()
-        self.pre_norm.reset_parameters()
-        self.layer_scale.reset_parameters()
+        if not isinstance(self.pre_norm, nn.Identity):
+            self.pre_norm.reset_parameters()
+        if not isinstance(self.layer_scale, nn.Identity):
+            self.layer_scale.reset_parameters()
 
     @property
     def num_slots(self) -> int:
@@ -197,7 +199,7 @@ class SoftMoE(nn.Module):
 
     @property
     def norm(self) -> bool:
-        return self.dispatch.norm
+        return not isinstance(self.pre_norm, nn.Identity)
 
     def extra_repr(self) -> str:
         return f"num_experts={self.num_experts}, " f"num_slots={self.num_slots}, "
