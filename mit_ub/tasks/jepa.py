@@ -197,7 +197,7 @@ class JEPA(Task):
         )
 
         # Optional contrastive pooling layers
-        if self.jepa_config.contrastive_weight is not None:
+        if self.jepa_config.contrastive_weight:
             self.contrastive_pooling = self.backbone.create_head(
                 self.backbone.config.dim,
                 pool_type=PoolType.SIMPLE_ATTENTION,
