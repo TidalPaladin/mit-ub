@@ -67,6 +67,11 @@ fit:
           layer_scale: 0.1 # Layer scale can stabilize early training
           qk_norm: false
 
+          # This MoE config does comparable to the default config
+          #moe_layers: [15]
+          #num_experts: 32
+          #num_slots: 32
+
       # Configure the probe head
       classification_config:
         num_classes: 10
