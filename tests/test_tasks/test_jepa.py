@@ -178,3 +178,20 @@ class TestJEPA:
             logger=logger,
         )
         trainer.fit(task, datamodule=cifar10_datamodule)
+
+    @pytest.fixture
+    def task_contrastive(self, optimizer_init, backbone):
+        config = JEPAConfig()
+        config.scale = 1
+        config.contrastive_weight = 0.5
+        config.contrastive_margin = 0.5
+        return JEPA(backbone, optimizer_init=optimizer_init, jepa_config=config)
+
+    def test_fit_contrastive(self, task_contrastive, cifar10_datamodule, logger):
+        task_contrastive.weight_decay_final = 4.0
+        trainer = pl.Trainer(
+            accelerator="cpu",
+            fast_dev_run=True,
+            logger=logger,
+        )
+        trainer.fit(task_contrastive, datamodule=cifar10_datamodule)

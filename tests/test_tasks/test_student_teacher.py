@@ -5,10 +5,17 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.multiprocessing import spawn  # type: ignore
 from torch.testing import assert_close
 
-from mit_ub.tasks.student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
+from mit_ub.tasks.student_teacher import (
+    EMAConfig,
+    contrastive_loss,
+    get_ema_momentum,
+    synchronize_teacher,
+    update_teacher,
+)
 
 
 def run_ema_sync(rank, world_size, device):
@@ -377,3 +384,28 @@ def test_update_and_sync_big_model(device):
     total = total.detach()
 
     spawn(run_update_and_sync_big_model, args=(2, device, total), nprocs=2, join=True)
+
+
+@pytest.mark.parametrize("margin", [0.0, 0.5, 1.0])
+def test_contrastive_loss(margin) -> None:
+    N = 16
+    D = 32
+    pred = torch.randn(N, D)
+    target = torch.randn(N, D)
+
+    actual = contrastive_loss(pred, target, margin=margin)
+
+    pred = pred.view(N, 1, D).expand(-1, N, -1).flatten(0, 1)
+    target = target.view(1, N, D).expand(N, -1, -1).flatten(0, 1)
+    cls = torch.full((N * N,), -1)
+    expected = F.cosine_embedding_loss(pred, target, cls, margin=margin, reduction="none")
+    expected = expected[~torch.eye(N, dtype=torch.bool).flatten()].sum() / (N * (N - 1))
+    assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("margin", [0.0, 0.5, 1.0])
+def test_contrastive_loss_orthogonal(margin) -> None:
+    pred = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
+    target = pred.clone()
+    loss = contrastive_loss(pred, target, margin=margin)
+    assert_close(loss, torch.tensor(0.0))
