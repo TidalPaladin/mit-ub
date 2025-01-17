@@ -26,6 +26,7 @@ from ..data.noise import (
     RandomNoise,
 )
 from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, ExampleSimilarity, TokenSimilarity
+from ..metrics.distance import ExampleRMSDistance, RMSPairwiseDistance, TokenRMSDistance
 from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
 from ..model import AdaptiveViT, AdaptiveViTConfig, ViT, ViTConfig
 from ..model.layers.layer_scale import has_layer_scale
@@ -227,6 +228,9 @@ class JEPA(Task):
                 "example_sim": ExampleSimilarity(self.backbone.config.dim),
                 "micro_token_sim": TokenSimilarity(self.backbone.config.dim),
                 "macro_token_sim": AveragePairwiseCosineSimilarity(self.backbone.config.dim),
+                "example_rms": ExampleRMSDistance(self.backbone.config.dim),
+                "micro_token_rms": TokenRMSDistance(self.backbone.config.dim),
+                "macro_token_rms": RMSPairwiseDistance(self.backbone.config.dim),
                 "jepa_loss": tm.MeanMetric(),
             }
         )
@@ -442,8 +446,11 @@ class JEPA(Task):
                 torch.cuda.nvtx.range_push("metrics")
                 metrics["jepa_loss"].update(loss_jepa)
                 metrics["example_sim"].update(full_target)
-                metrics["micro_token_sim"].update(pred)
+                metrics["example_rms"].update(full_target)
+                metrics["micro_token_sim"].update(full_target)
+                metrics["micro_token_rms"].update(full_target)
                 metrics["macro_token_sim"].update(full_target)
+                metrics["macro_token_rms"].update(full_target)
 
                 if "layer_scale_mean" in metrics:
                     metrics["layer_scale_mean"].update(self.backbone)

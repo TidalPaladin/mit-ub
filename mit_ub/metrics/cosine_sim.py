@@ -12,7 +12,7 @@ from ..model import compile_is_disabled
 EPS: Final = 1e-8
 
 
-@torch.compile(fullgraph=True, disable=compile_is_disabled())
+@torch.compile(fullgraph=True, mode="reduce-overhead", disable=compile_is_disabled())
 def average_pairwise_cosine_similarity(x: Tensor, pairwise_dim: int, embed_dim: int, eps: float = EPS) -> Tensor:
     r"""Compute the average pairwise cosine similarity without manifesting the full pairwise matrix.
 
