@@ -68,7 +68,15 @@ class TestJEPA:
     )
     def test_create_metrics(self, task, state):
         metrics = task.create_metrics(state)
-        base_keys = {"example_sim", "micro_token_sim", "macro_token_sim", "jepa_loss"}
+        base_keys = {
+            "example_sim",
+            "micro_token_sim",
+            "macro_token_sim",
+            "jepa_loss",
+            "example_rms",
+            "micro_token_rms",
+            "macro_token_rms",
+        }
         train_keys = (
             {"layer_scale_mean", "layer_scale_max", "ema_momentum"}
             if has_layer_scale(task.backbone)
