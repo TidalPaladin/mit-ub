@@ -21,7 +21,7 @@ def add_noise(alphas_cumprod: Tensor, x: Tensor, t: Tensor, noise: Tensor) -> Tu
     Returns:
         Tuple of (noised image, noise)
     """
-    alphas_cumprod_t = alphas_cumprod[t].view(-1, 1, 1, 1)
+    alphas_cumprod_t = alphas_cumprod[t].view(-1, *([1] * len(x.shape[1:])))
     noised_x = torch.sqrt(alphas_cumprod_t) * x + torch.sqrt(1 - alphas_cumprod_t) * noise
     return noised_x, noise
 
@@ -39,7 +39,7 @@ def subtract_noise(alphas_cumprod: Tensor, x: Tensor, t: Tensor, noise: Tensor) 
     Returns:
         Denoised image tensor
     """
-    alphas_cumprod_t = alphas_cumprod[t].view(-1, 1, 1, 1)
+    alphas_cumprod_t = alphas_cumprod[t].view(-1, *([1] * len(x.shape[1:])))
     denoised_x = (x - torch.sqrt(1 - alphas_cumprod_t) * noise) / torch.sqrt(alphas_cumprod_t)
     return denoised_x
 
@@ -57,10 +57,10 @@ def subtract_noise_one_step(alphas: Tensor, alphas_cumprod: Tensor, x: Tensor, t
     Returns:
         Denoised image tensor
     """
-    alpha_t = alphas[t].view(-1, 1, 1, 1)
-    alpha_cumprod_t = alphas_cumprod[t].view(-1, 1, 1, 1)
+    alpha_t = alphas[t].view(-1, *([1] * len(x.shape[1:])))
+    alpha_cumprod_t = alphas_cumprod[t].view(-1, *([1] * len(x.shape[1:])))
     alpha_cumprod_prev_t = torch.where(
-        (t > 0).view(-1, 1, 1, 1), alphas_cumprod[t.clip(min=1) - 1].view(-1, 1, 1, 1), torch.ones_like(alpha_cumprod_t)
+        (t > 0).view(-1, *([1] * len(x.shape[1:]))), alphas_cumprod[t.clip(min=1) - 1].view(-1, *([1] * len(x.shape[1:]))), torch.ones_like(alpha_cumprod_t)
     )
 
     # Compute the mean for the reverse process
@@ -70,7 +70,7 @@ def subtract_noise_one_step(alphas: Tensor, alphas_cumprod: Tensor, x: Tensor, t
     variance = torch.sqrt((1 - alpha_cumprod_prev_t) / (1 - alpha_cumprod_t) * (1 - alpha_t))
 
     # If t > 0, add noise to the mean for stochastic sampling; otherwise return the mean as the final output
-    result = torch.where((t > 0).view(-1, 1, 1, 1), mean + variance * torch.randn_like(mean), mean)
+    result = torch.where((t > 0).view(-1, *([1] * len(x.shape[1:]))), mean + variance * torch.randn_like(mean), mean)
 
     return result
 

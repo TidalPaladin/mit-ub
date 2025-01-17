@@ -34,6 +34,7 @@ from ..model.layers.pos_enc import RelativeFactorizedPosition
 from ..model.layers.transformer import TransformerDecoderLayer
 from ..tokens import apply_mask, create_mask, generate_non_overlapping_mask, mask_is_ragged
 from .student_teacher import EMAConfig, contrastive_loss, get_ema_momentum, synchronize_teacher, update_teacher
+from .diffusion import DiffusionSchedule
 
 
 @dataclass
@@ -89,8 +90,15 @@ class JEPAConfig:
     self_attn: bool = False
     mlp_tower: bool = False
     tower_input_norm: bool = False
+
+    # Contrastive options
     contrastive_weight: float = 0.0
     contrastive_margin: float = 0.5
+
+    # Diffusion options
+    num_timesteps: int = 0
+    beta_start: float = 0.0001
+    beta_end: float = 0.02
 
     def __post_init__(self) -> None:
         if not 0 < self.context_ratio <= 1:
@@ -176,11 +184,12 @@ class JEPA(Task):
         self.teacher_backbone.eval()
 
         # Position encoding / initialization for prediction queries.
-        self.pos_enc = RelativeFactorizedPosition(
-            len(self.backbone.stem.patch_size),
-            self.backbone.config.dim,
-            dropout=0.1,
-        )
+        if self.jepa_config.num_timesteps == 0:
+            self.pos_enc = RelativeFactorizedPosition(
+                len(self.backbone.stem.patch_size),
+                self.backbone.config.dim,
+                dropout=0.1,
+            )
 
         # JEPA predictor
         self.jepa_predictor = nn.ModuleList(
@@ -204,6 +213,15 @@ class JEPA(Task):
                 use_mlp=self.jepa_config.mlp_tower,
                 input_norm=self.jepa_config.tower_input_norm,
             )
+
+        # Diffusion related stuff
+        if self.jepa_config.num_timesteps > 0:
+            self.diffusion_schedule = DiffusionSchedule(
+                self.jepa_config.num_timesteps,
+                self.jepa_config.beta_start,
+                self.jepa_config.beta_end,
+            )
+            self.time_embed = nn.Embedding(self.jepa_config.num_timesteps, self.backbone.config.dim)
 
         self.save_hyperparameters()
 
@@ -240,7 +258,7 @@ class JEPA(Task):
 
         return metrics
 
-    def forward(self, x: Tensor, context_mask: Tensor, target_mask: Tensor) -> Dict[str, Tensor | None]:
+    def forward(self, x: Tensor, context_mask: Tensor, target_mask: Tensor, noised_target: Tensor | None = None, timestep: Tensor | None = None) -> Dict[str, Tensor | None]:
         # Run encoder on context
         torch.cuda.nvtx.range_push("context_backbone")
         context: Tensor = self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
@@ -262,18 +280,28 @@ class JEPA(Task):
                 batch_size=B,
                 device=context.device,
             )
-            context = apply_mask(subsample_mask, context, fill_value=None)
+            subcontext = apply_mask(subsample_mask, context, fill_value=None)
+        else:
+            subcontext = context
 
-        # Prepare positional encoding for target queries
-        tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
-        query = self.pos_enc(tokenized_size).expand(B, -1, -1)
-        query = apply_mask(target_mask, query, fill_value=None)
+        # Prepare target queries
+        if noised_target is not None:
+            # Target queries are noised targets
+            assert timestep is not None
+            time_embed = self.time_embed(timestep).view(B, 1, -1)
+            query = noised_target
+            subcontext = subcontext + time_embed
+        else:
+            # Target queries are positional encodings
+            tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
+            query = self.pos_enc(tokenized_size).expand(B, -1, -1)
+            query = apply_mask(target_mask, query, fill_value=None)
 
         # Run query and context through predictor
         torch.cuda.nvtx.range_push("jepa_predictor")
         for block in self.jepa_predictor:
             block = cast(TransformerDecoderLayer, block)
-            query = block(query, context)
+            query = block(query, subcontext)
         torch.cuda.nvtx.range_pop()
 
         pred = self.jepa_head(query)
@@ -419,12 +447,21 @@ class JEPA(Task):
 
             target = apply_mask(target_mask, full_target, fill_value=None)
 
+            # Apply diffusion if enabled
+            if self.jepa_config.num_timesteps > 0:
+                noised_target, noise, timestep = self.diffusion_schedule(target)
+            else:
+                noised_target = timestep = None
+
         # generate predictions by encoding the context and then running the encoded context
         # plus the positional target queries through the predictor
-        pred_dict = self(x, context_mask, target_mask)
+        pred_dict = self(x, context_mask, target_mask, noised_target, timestep)
         pred: Tensor = pred_dict["jepa"]
         context: Tensor = pred_dict["jepa_context"]
         pooled: Tensor | None = pred_dict["pooled"]
+
+        # Target is the original target if no noise was applied, otherwise it is the noise
+        target = target if noised_target is None else noise
 
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"

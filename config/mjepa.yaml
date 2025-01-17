@@ -42,7 +42,7 @@ fit:
       init_args:
         save_dir: ${fit.trainer.default_root_dir}
         project: mit-ub
-        name: mjepa
+        name: mjepa-diffusion
 
   model:
     # Use the MJEPA task with a linear probe
@@ -129,6 +129,8 @@ fit:
         # Use a simple linear layer on the JEPA predictor output projection
         mlp_tower: true
         tower_input_norm: false
+
+        num_timesteps: 1000
 
       # Use SOAP optimizer and a reciplrocal square root learning rate schedule.
       # SOAP is empirically much faster than AdamW for this task.
