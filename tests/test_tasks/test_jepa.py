@@ -76,6 +76,7 @@ class TestJEPA:
             "example_rms",
             "micro_token_rms",
             "macro_token_rms",
+            "siglip_loss",
         }
         train_keys = (
             {"layer_scale_mean", "layer_scale_max", "ema_momentum"}
@@ -188,18 +189,17 @@ class TestJEPA:
         trainer.fit(task, datamodule=cifar10_datamodule)
 
     @pytest.fixture
-    def task_contrastive(self, optimizer_init, backbone):
+    def task_siglip(self, optimizer_init, backbone):
         config = JEPAConfig()
         config.scale = 1
-        config.contrastive_weight = 0.5
-        config.contrastive_margin = 0.5
+        config.siglip_weight = 0.5
         return JEPA(backbone, optimizer_init=optimizer_init, jepa_config=config)
 
-    def test_fit_contrastive(self, task_contrastive, cifar10_datamodule, logger):
-        task_contrastive.weight_decay_final = 4.0
+    def test_fit_siglip(self, task_siglip, cifar10_datamodule, logger):
+        task_siglip.weight_decay_final = 4.0
         trainer = pl.Trainer(
             accelerator="cpu",
             fast_dev_run=True,
             logger=logger,
         )
-        trainer.fit(task_contrastive, datamodule=cifar10_datamodule)
+        trainer.fit(task_siglip, datamodule=cifar10_datamodule)

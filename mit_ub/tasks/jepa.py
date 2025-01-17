@@ -34,7 +34,7 @@ from ..model.layers.pool import PoolType
 from ..model.layers.pos_enc import RelativeFactorizedPosition
 from ..model.layers.transformer import TransformerDecoderLayer
 from ..tokens import apply_mask, create_mask, generate_non_overlapping_mask, mask_is_ragged
-from .student_teacher import EMAConfig, contrastive_loss, get_ema_momentum, synchronize_teacher, update_teacher
+from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
 
 
 @dataclass
@@ -90,8 +90,7 @@ class JEPAConfig:
     self_attn: bool = False
     mlp_tower: bool = False
     tower_input_norm: bool = False
-    contrastive_weight: float = 0.0
-    contrastive_margin: float = 0.5
+    siglip_weight: float = 0.0
 
     def __post_init__(self) -> None:
         if not 0 < self.context_ratio <= 1:
@@ -108,10 +107,8 @@ class JEPAConfig:
             raise ValueError("predictor_depth must be at least 1")
         if self.weight_decay_final is not None and not 0 <= self.weight_decay_final:
             raise ValueError("weight_decay_final must be non-negative")
-        if self.contrastive_weight < 0:
-            raise ValueError("contrastive_weight must be non-negative")
-        if not -1 <= self.contrastive_margin <= 1:
-            raise ValueError("contrastive_margin must be in the range [-1, 1]")
+        if self.siglip_weight < 0:
+            raise ValueError("siglip_weight must be non-negative")
 
 
 class JEPA(Task):
@@ -197,14 +194,13 @@ class JEPA(Task):
             input_norm=self.jepa_config.tower_input_norm,
         )
 
-        # Optional contrastive pooling layers
-        if self.jepa_config.contrastive_weight:
-            self.contrastive_pooling = self.backbone.create_head(
-                self.backbone.config.dim,
-                pool_type=PoolType.SIMPLE_ATTENTION,
-                use_mlp=self.jepa_config.mlp_tower,
-                input_norm=self.jepa_config.tower_input_norm,
-            )
+        # SigLIP pooling layer
+        self.pool = self.backbone.create_head(
+            self.backbone.config.dim,
+            pool_type=PoolType.SIMPLE_ATTENTION,
+            use_mlp=self.jepa_config.mlp_tower,
+            input_norm=self.jepa_config.tower_input_norm,
+        )
 
         self.save_hyperparameters()
 
@@ -232,6 +228,7 @@ class JEPA(Task):
                 "micro_token_rms": TokenRMSDistance(self.backbone.config.dim),
                 "macro_token_rms": RMSPairwiseDistance(self.backbone.config.dim),
                 "jepa_loss": tm.MeanMetric(),
+                "siglip_loss": tm.MeanMetric(),
             }
         )
         if has_layer_scale(self.backbone) and state.mode == Mode.TRAIN:
@@ -239,24 +236,15 @@ class JEPA(Task):
             metrics["layer_scale_mean"] = MeanLayerScale()
         if state.mode == Mode.TRAIN:
             metrics["ema_momentum"] = tm.MeanMetric()
-        if self.jepa_config.contrastive_weight:
-            metrics["contrastive_loss"] = tm.MeanMetric()
 
         return metrics
 
-    def forward(self, x: Tensor, context_mask: Tensor, target_mask: Tensor) -> Dict[str, Tensor | None]:
+    def forward(self, x: Tensor, context_mask: Tensor, target_mask: Tensor) -> Dict[str, Tensor]:
         # Run encoder on context
         torch.cuda.nvtx.range_push("context_backbone")
         context: Tensor = self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
         torch.cuda.nvtx.range_pop()
         B, L, _ = context.shape
-
-        # If doing contrastive pooling, apply that now
-        pooled: Tensor | None = None
-        if self.jepa_config.contrastive_weight:
-            torch.cuda.nvtx.range_push("contrastive_pooling")
-            pooled = self.contrastive_pooling(context)
-            torch.cuda.nvtx.range_pop()
 
         # Sample a subset of the context as input to the predictor and project
         if self.jepa_config.context_subsample_ratio < 1.0:
@@ -267,6 +255,11 @@ class JEPA(Task):
                 device=context.device,
             )
             context = apply_mask(subsample_mask, context, fill_value=None)
+
+        # Pooling layer. When siglip_weight is 0, a stop gradient is applied to the context.
+        torch.cuda.nvtx.range_push("pool")
+        pooled = self.pool(context if self.jepa_config.siglip_weight else context.detach())
+        torch.cuda.nvtx.range_pop()
 
         # Prepare positional encoding for target queries
         tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
@@ -402,6 +395,7 @@ class JEPA(Task):
             torch.cuda.nvtx.range_push("ema_backbone")
             full_target: Tensor = self.teacher_backbone(x, reshape=False)
             torch.cuda.nvtx.range_pop()
+            siglip_target = torch.eye(full_target.shape[0], device=full_target.device, dtype=torch.float32)
 
             # apply random noise
             if self.training and self.jepa_config.use_noise:
@@ -417,6 +411,7 @@ class JEPA(Task):
                 )
                 x = mixup(x, mixup_weight)
                 full_target = mixup(full_target, mixup_weight)
+                siglip_target = mixup(siglip_target, mixup_weight)
                 torch.cuda.nvtx.range_pop()
             else:
                 mixup_weight = None
@@ -428,23 +423,26 @@ class JEPA(Task):
         pred_dict = self(x, context_mask, target_mask)
         pred: Tensor = pred_dict["jepa"]
         context: Tensor = pred_dict["jepa_context"]
-        pooled: Tensor | None = pred_dict["pooled"]
+        pooled: Tensor = pred_dict["pooled"]
 
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
         loss_jepa = F.smooth_l1_loss(pred, target)
 
-        # compute optional contrastive loss
-        if pooled is not None:
-            loss_contrastive = contrastive_loss(pooled, pooled, self.jepa_config.contrastive_margin)
-        else:
-            loss_contrastive = None
+        # compute pooled similarity logits
+        pred_pooled_norm = F.normalize(pooled, dim=1)
+        with torch.no_grad():
+            target_pooled_norm = F.normalize(self.pool(full_target), dim=1)
+
+        logits = torch.matmul(pred_pooled_norm, target_pooled_norm.T)
+        loss_siglip = F.binary_cross_entropy_with_logits(logits, siglip_target)
 
         # Compute metrics
         if metrics is not None:
             with torch.no_grad():
                 torch.cuda.nvtx.range_push("metrics")
                 metrics["jepa_loss"].update(loss_jepa)
+                metrics["siglip_loss"].update(loss_siglip)
                 metrics["example_sim"].update(full_target)
                 metrics["example_rms"].update(full_target)
                 metrics["micro_token_sim"].update(full_target)
@@ -458,20 +456,12 @@ class JEPA(Task):
 
                 if "ema_momentum" in metrics:
                     metrics["ema_momentum"].update(self.get_ema_momentum())
-                if self.jepa_config.contrastive_weight:
-                    metrics["contrastive_loss"].update(loss_contrastive)
                 torch.cuda.nvtx.range_pop()
-
-        # Compute total loss
-        loss = loss_jepa
-        if self.jepa_config.contrastive_weight:
-            assert loss_contrastive is not None
-            loss = loss + self.jepa_config.contrastive_weight * loss_contrastive
-        assert isinstance(loss, Tensor)
 
         output = {
             "log": {
-                "loss_jepa": loss,
+                "loss_jepa": loss_jepa,
+                "loss_siglip": loss_siglip * (self.jepa_config.siglip_weight or 1.0),
             },
             "context": context,
             "jepa_pred": pred,
