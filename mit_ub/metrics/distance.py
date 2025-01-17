@@ -11,7 +11,7 @@ from ..model import compile_is_disabled
 EPS: Final = 1e-8
 
 
-@torch.compile(fullgraph=True, disable=compile_is_disabled())
+@torch.compile(fullgraph=True, mode="reduce-overhead", disable=compile_is_disabled())
 def rms_pairwise_distance(x: Tensor, pairwise_dim: int, embed_dim: int, p: float = 2) -> Tensor:
     """Compute the average pairwise Lp distance without manifesting the full pairwise matrix.
 

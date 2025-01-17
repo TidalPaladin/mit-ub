@@ -446,8 +446,11 @@ class JEPA(Task):
                 torch.cuda.nvtx.range_push("metrics")
                 metrics["jepa_loss"].update(loss_jepa)
                 metrics["example_sim"].update(full_target)
-                metrics["micro_token_sim"].update(pred)
+                metrics["example_rms"].update(full_target)
+                metrics["micro_token_sim"].update(full_target)
+                metrics["micro_token_rms"].update(full_target)
                 metrics["macro_token_sim"].update(full_target)
+                metrics["macro_token_rms"].update(full_target)
 
                 if "layer_scale_mean" in metrics:
                     metrics["layer_scale_mean"].update(self.backbone)
