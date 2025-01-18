@@ -1,7 +1,7 @@
 from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, cast
 
 import torch
 import torch.nn as nn
@@ -254,7 +254,7 @@ class ClassificationTask(Task):
 
         self.classification_head = self.backbone.create_head(
             out_dim=self.config.num_classes if not self.config.is_binary else 1,
-            pool_type=classification_config.pool_type,
+            pool_type=cast(PoolType | None, self.config.pool_type),
             use_mlp=self.config.mlp_tower,
             input_norm=self.config.tower_input_norm,
         )
@@ -350,7 +350,7 @@ class JEPAWithClassification(JEPAWithProbe):
     def create_probe_head(self) -> nn.Module:
         return self.backbone.create_head(
             out_dim=self.classification_config.num_classes if not self.classification_config.is_binary else 1,
-            pool_type=self.classification_config.pool_type,
+            pool_type=cast(PoolType | None, self.classification_config.pool_type),
             use_mlp=self.classification_config.mlp_tower,
             input_norm=self.classification_config.tower_input_norm,
         )
@@ -429,7 +429,7 @@ class DistillationWithClassification(DistillationWithProbe):
     def create_probe_head(self) -> nn.Module:
         return self.backbone.create_head(
             out_dim=self.classification_config.num_classes if not self.classification_config.is_binary else 1,
-            pool_type=self.classification_config.pool_type,
+            pool_type=cast(PoolType | None, self.classification_config.pool_type),
             use_mlp=self.classification_config.mlp_tower,
             input_norm=self.classification_config.tower_input_norm,
         )

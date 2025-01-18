@@ -25,6 +25,7 @@ def _run_exchange(rank: int, world_size: int):
     try:
         # Create tensor with value equal to rank
         tensor = torch.tensor(float(rank))
+        exchanged = torch.zeros_like(tensor)
         total = torch.tensor(0.0)
 
         # Verify each exchanged tensor matches expected value
@@ -91,11 +92,11 @@ def test_compute_siglip_loss(world_size):
     b = torch.tensor(0.0)
 
     # First compute an expected loss locally
+    B, D = 32, 64
     x1_list = []
     x2_list = []
     for i in range(world_size):
         torch.random.manual_seed(i)
-        B, D = 32, 64
         x1 = torch.randn(B, D)
         x2 = torch.randn(B, D)
         x1 = F.normalize(x1, dim=-1, eps=1e-12)
