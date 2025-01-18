@@ -1,17 +1,113 @@
 import math
 import os
+from datetime import timedelta
 from unittest.mock import MagicMock
 
 import pytest
 import pytorch_lightning as pl
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from deep_helpers.structs import Mode, State
 from torch.multiprocessing import spawn  # type: ignore
 from torch.testing import assert_close
 
 from mit_ub.model.layers import has_layer_scale
-from mit_ub.tasks.jepa import JEPA, EMAConfig, JEPAConfig
+from mit_ub.tasks.jepa import JEPA, EMAConfig, JEPAConfig, compute_siglip_loss, ring_exchange_all
+
+
+def _run_exchange(rank: int, world_size: int):
+    # Initialize process group
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12358"
+    dist.init_process_group(backend="gloo", rank=rank, world_size=world_size, timeout=timedelta(seconds=10))
+
+    try:
+        # Create tensor with value equal to rank
+        tensor = torch.tensor(float(rank))
+        total = torch.tensor(0.0)
+
+        # Verify each exchanged tensor matches expected value
+        print("Beginning ring exchange")
+        for i, exchanged in enumerate(ring_exchange_all(tensor, rank, world_size)):
+            print(f"Rank {rank} received {exchanged} on iteration {i}, total now {total}")
+            total += exchanged
+
+        expected = torch.arange(world_size, dtype=torch.float32).sum()
+        assert_close(total, expected, msg=f"Rank {rank} total {total} does not match expected {expected}")
+        assert_close(exchanged, tensor, msg=f"Final exchange {exchanged} does not match initial tensor {tensor}")
+
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("world_size", [1, 2, 3, 4])
+def test_ring_exchange(world_size):
+    spawn(_run_exchange, nprocs=world_size, args=(world_size,))
+
+
+def test_compute_siglip_loss_local():
+    torch.random.manual_seed(0)
+    B, D = 32, 64
+    x1 = torch.randn(B, D)
+    x2 = torch.randn(B, D)
+    target = torch.eye(B, dtype=torch.float32)
+    t = torch.tensor(1.0)
+    b = torch.tensor(0.0)
+    rank = 0
+    world_size = 1
+    loss = compute_siglip_loss(x1, x2, target, t, b, rank, world_size, eps=1e-12)
+    x1 = F.normalize(x1, dim=-1, eps=1e-12)
+    x2 = F.normalize(x2, dim=-1, eps=1e-12)
+    expected = F.binary_cross_entropy_with_logits(torch.matmul(x1, x2.T) * t.exp() + b, target)
+    assert_close(loss, expected)
+
+
+def _compute_siglip_loss(rank: int, world_size: int, expected: float, B: int, D: int):
+    # Initialize process group
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12369"
+    dist.init_process_group(backend="gloo", rank=rank, world_size=world_size, timeout=timedelta(seconds=10))
+
+    try:
+        t = torch.tensor(1.0)
+        b = torch.tensor(0.0)
+        torch.random.manual_seed(rank)
+        x1 = torch.randn(B, D)
+        x2 = torch.randn(B, D)
+        target = torch.eye(B, dtype=torch.float32)
+        loss = compute_siglip_loss(x1, x2, target, t, b, rank, world_size)
+        torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.SUM)
+        loss = loss / world_size
+        assert_close(loss, loss.new_tensor(expected))
+
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("world_size", [1, 2, 3, 4])
+def test_compute_siglip_loss(world_size):
+    t = torch.tensor(1.0)
+    b = torch.tensor(0.0)
+
+    # First compute an expected loss locally
+    x1_list = []
+    x2_list = []
+    for i in range(world_size):
+        torch.random.manual_seed(i)
+        B, D = 32, 64
+        x1 = torch.randn(B, D)
+        x2 = torch.randn(B, D)
+        x1 = F.normalize(x1, dim=-1, eps=1e-12)
+        x2 = F.normalize(x2, dim=-1, eps=1e-12)
+        x1_list.append(x1)
+        x2_list.append(x2)
+
+    x1 = torch.cat(x1_list, 0)
+    x2 = torch.cat(x2_list, 0)
+    target = torch.eye(x1.shape[0], dtype=torch.float32)
+    expected = F.binary_cross_entropy_with_logits(torch.matmul(x1, x2.T) * t.exp() + b, target).float().item()
+    spawn(_compute_siglip_loss, nprocs=world_size, args=(world_size, expected, B, D))
 
 
 def run_ema_sync(rank, world_size, backbone, optimizer_init):

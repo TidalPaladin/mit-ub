@@ -3,9 +3,10 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, Iterator, List, Optional, Tuple, cast
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics as tm
@@ -36,6 +37,82 @@ from ..model.layers.pos_enc import RelativeFactorizedPosition
 from ..model.layers.transformer import TransformerDecoderLayer
 from ..tokens import apply_mask, create_mask, generate_non_overlapping_mask, mask_is_ragged
 from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
+
+
+@torch.no_grad()
+def ring_exchange(tensor: Tensor, rank: int, world_size: int) -> Tensor:
+    r"""Run one iteration of ring exchange.
+
+    The exchange sends to the next rank, and receives from the previous rank.
+
+    Args:
+        tensor: The tensor to exchange.
+        rank: The rank of the current process.
+        world_size: The number of processes in the distributed group.
+
+    Returns:
+        The exchanged tensor
+    """
+    if world_size == 1 or not torch.distributed.is_initialized():
+        return tensor
+    recv_tensor = torch.zeros_like(tensor)
+    send_op = dist.P2POp(dist.isend, tensor, (rank + 1) % world_size)
+    recv_op = dist.P2POp(dist.irecv, recv_tensor, (rank - 1 + world_size) % world_size)
+    reqs = dist.batch_isend_irecv([send_op, recv_op])
+    for req in reqs:
+        req.wait()
+    return recv_tensor
+
+
+@torch.no_grad()
+def ring_exchange_all(tensor: Tensor, rank: int, world_size: int) -> Iterator[Tensor]:
+    r"""Run ring exchange across all ranks.
+
+    The final tensor received in the exchange is the local tensor (i.e. ``tensor``).
+
+    Args:
+        tensor: The tensor to exchange.
+        rank: The rank of the current process.
+        world_size: The number of processes in the distributed group.
+
+    Returns:
+        An iterator over the tensors exchanged at each round of the ring exchange.
+    """
+    for _ in range(world_size):
+        tensor = ring_exchange(tensor, rank, world_size)
+        yield tensor
+
+
+def compute_siglip_loss(
+    x1: Tensor,
+    x2: Tensor,
+    target: Tensor,
+    t: Tensor,
+    b: Tensor,
+    rank: int,
+    world_size: int,
+    eps: float = 1e-12,
+) -> Tensor:
+    # Apply normalization
+    x1 = F.normalize(x1, dim=-1, eps=eps)
+    assert not x2.requires_grad
+    with torch.no_grad():
+        x2 = F.normalize(x2, dim=-1, eps=eps)
+
+    # Pre-transpose x2 so we don't repeat it after exchange
+    x2 = x2.T.contiguous()
+
+    loss = x1.new_zeros(())
+    for i, x2_global in enumerate(ring_exchange_all(x2, rank, world_size)):
+        # The SigLIP target will be all 0 unless we are on the last iteration of ring exchange.
+        # In the last iteration, x2_global should match x2 (i.e. the local target).
+        _target = target if i == world_size - 1 else torch.zeros_like(target)
+
+        logits = torch.matmul(x1, x2_global) * t.exp() + b
+        _loss = F.binary_cross_entropy_with_logits(logits, _target, reduction="sum")
+        loss += _loss / (target.numel() * world_size)
+
+    return loss
 
 
 @dataclass
@@ -434,18 +511,25 @@ class JEPA(Task):
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
         loss_jepa = F.smooth_l1_loss(pred, target)
 
-        # compute pooled similarity logits
-        assert pooled.ndim == 2, f"Pooled shape {pooled.shape} does not match expected shape (B, D)"
-        pred_pooled_norm = F.normalize(pooled, dim=-1)
+        # Compute siglip loss across all ranks, starting with the local rank
         with torch.no_grad():
-            target_pooled_norm = F.normalize(self.pool(full_target), dim=-1)
+            self.pool.eval()
+            full_target_pooled = self.pool(full_target)
+            self.pool.train(mode=self.backbone.training)
 
-        logits = torch.matmul(pred_pooled_norm, target_pooled_norm.T) * self.siglip_t.exp() + self.siglip_b
-        loss_siglip = F.binary_cross_entropy_with_logits(logits, siglip_target)
+        loss_siglip = compute_siglip_loss(
+            pooled,
+            full_target_pooled,
+            siglip_target,
+            self.siglip_t,
+            self.siglip_b,
+            self.trainer.global_rank,
+            self.trainer.world_size,
+        )
 
         # Compute metrics
         if metrics is not None:
-            with torch.no_grad():
+            with torch.inference_mode():
                 torch.cuda.nvtx.range_push("metrics")
                 metrics["jepa_loss"].update(loss_jepa)
                 metrics["siglip_loss"].update(loss_siglip)
@@ -470,6 +554,8 @@ class JEPA(Task):
                 "loss_siglip": loss_siglip * (self.jepa_config.siglip_weight or 1.0),
             },
             "context": context,
+            "pooled": pooled,
+            "full_target_pooled": full_target_pooled,
             "jepa_pred": pred,
             "target": target,
             "full_target": full_target,
