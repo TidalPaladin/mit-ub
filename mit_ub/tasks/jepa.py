@@ -31,6 +31,7 @@ from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, ExampleSimilar
 from ..metrics.distance import ExampleRMSDistance, RMSPairwiseDistance, TokenRMSDistance
 from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
 from ..model import AdaptiveViT, AdaptiveViTConfig, ViT, ViTConfig
+from ..model.helpers import compile_backend, compile_is_disabled, max_autotune
 from ..model.layers.layer_scale import has_layer_scale
 from ..model.layers.pool import PoolType
 from ..model.layers.pos_enc import RelativeFactorizedPosition
@@ -83,6 +84,39 @@ def ring_exchange_all(tensor: Tensor, rank: int, world_size: int) -> Iterator[Te
         yield tensor
 
 
+@torch.compile(
+    fullgraph=True,
+    backend=compile_backend(),
+    options={
+        "epilogue_fusion": True,
+        "shape_padding": True,
+        "triton.cudagraph_trees": max_autotune(),
+    },
+    disable=compile_is_disabled(),
+)
+def _prepare_x1_x2(x1: Tensor, x2: Tensor, eps: float = 1e-12) -> Tuple[Tensor, Tensor]:
+    # Apply normalization
+    x1 = F.normalize(x1, dim=-1, eps=eps)
+    x2 = F.normalize(x2, dim=-1, eps=eps)
+    x2 = x2.T.contiguous()
+    return x1, x2
+
+
+@torch.compile(
+    fullgraph=True,
+    backend=compile_backend(),
+    options={
+        "max_autotune": max_autotune(),
+        "epilogue_fusion": True,
+        "shape_padding": True,
+        "triton.cudagraph_trees": max_autotune(),
+    },
+    disable=compile_is_disabled(),
+)
+def compute_siglip_logits(x1: Tensor, x2: Tensor, t: Tensor, b: Tensor) -> Tensor:
+    return torch.matmul(x1, x2) * t.exp() + b
+
+
 def compute_siglip_loss(
     x1: Tensor,
     x2: Tensor,
@@ -93,14 +127,7 @@ def compute_siglip_loss(
     world_size: int,
     eps: float = 1e-12,
 ) -> Tensor:
-    # Apply normalization
-    x1 = F.normalize(x1, dim=-1, eps=eps)
-    assert not x2.requires_grad
-    with torch.no_grad():
-        x2 = F.normalize(x2, dim=-1, eps=eps)
-
-    # Pre-transpose x2 so we don't repeat it after exchange
-    x2 = x2.T.contiguous()
+    x1, x2 = _prepare_x1_x2(x1, x2, eps)
 
     loss = x1.new_zeros(())
     for i, x2_global in enumerate(ring_exchange_all(x2, rank, world_size)):
@@ -108,7 +135,7 @@ def compute_siglip_loss(
         # In the last iteration, x2_global should match x2 (i.e. the local target).
         _target = target if i == world_size - 1 else torch.zeros_like(target)
 
-        logits = torch.matmul(x1, x2_global) * t.exp() + b
+        logits = compute_siglip_logits(x1, x2_global, t, b)
         _loss = F.binary_cross_entropy_with_logits(logits, _target, reduction="sum")
         loss += _loss / (target.numel() * world_size)
 
@@ -512,11 +539,7 @@ class JEPA(Task):
         loss_jepa = F.smooth_l1_loss(pred, target)
 
         # Compute siglip loss across all ranks, starting with the local rank
-        with torch.no_grad():
-            self.pool.eval()
-            full_target_pooled = self.pool(full_target)
-            self.pool.train(mode=self.backbone.training)
-
+        full_target_pooled = self.pool(full_target)
         loss_siglip = compute_siglip_loss(
             pooled,
             full_target_pooled,
