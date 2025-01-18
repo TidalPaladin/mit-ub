@@ -1,3 +1,4 @@
+import math
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -201,6 +202,10 @@ class JEPA(Task):
             use_mlp=self.jepa_config.mlp_tower,
             input_norm=self.jepa_config.tower_input_norm,
         )
+        self.siglip_t = nn.Parameter(torch.empty(1))
+        self.siglip_b = nn.Parameter(torch.empty(1))
+        nn.init.constant_(self.siglip_t, math.log(10))
+        nn.init.constant_(self.siglip_b, -10)
 
         self.save_hyperparameters()
 
@@ -430,11 +435,12 @@ class JEPA(Task):
         loss_jepa = F.smooth_l1_loss(pred, target)
 
         # compute pooled similarity logits
-        pred_pooled_norm = F.normalize(pooled, dim=1)
+        assert pooled.ndim == 2, f"Pooled shape {pooled.shape} does not match expected shape (B, D)"
+        pred_pooled_norm = F.normalize(pooled, dim=-1)
         with torch.no_grad():
-            target_pooled_norm = F.normalize(self.pool(full_target), dim=1)
+            target_pooled_norm = F.normalize(self.pool(full_target), dim=-1)
 
-        logits = torch.matmul(pred_pooled_norm, target_pooled_norm.T)
+        logits = torch.matmul(pred_pooled_norm, target_pooled_norm.T) * self.siglip_t.exp() + self.siglip_b
         loss_siglip = F.binary_cross_entropy_with_logits(logits, siglip_target)
 
         # Compute metrics

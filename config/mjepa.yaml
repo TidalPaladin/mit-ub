@@ -130,6 +130,11 @@ fit:
         mlp_tower: true
         tower_input_norm: false
 
+        # A SigLIP style predictor is used between the student context and teacher output.
+        # When this weight is zero, there is a stop gradient applied to the SigLIP pathway.
+        # Otherwise, the SigLIP predictor can influence backbone updates.
+        siglip_weight: 0.2
+
       # Use SOAP optimizer and a reciplrocal square root learning rate schedule.
       # SOAP is empirically much faster than AdamW for this task.
       # The reciprocal square root scheduler is an "infinite" schedule in that the schedule can be resumed from
@@ -167,6 +172,7 @@ fit:
             - "b_v"
             - "b_norm"
             - "b_qk_norm"
+            - "siglip_b"
           weight_decay: 0.0
         # LayerScale (no weight decay)
         - params:
@@ -177,11 +183,13 @@ fit:
             - "LayerNorm"
             - "w_norm"
             - "w_qk_norm"
+            - "siglip_t"
           weight_decay: 0.0
         # Linear probe (higher weight decay)
         - params:
             - "jepa_head"
             - "linear_probe"
+            - "pool"
           weight_decay: 1.0
 
   data:
