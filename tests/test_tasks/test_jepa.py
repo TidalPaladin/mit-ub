@@ -61,7 +61,7 @@ def test_compute_siglip_loss_local():
     loss = compute_siglip_loss(x1, x2, target, t, b, rank, world_size, eps=1e-12)
     x1 = F.normalize(x1, dim=-1, eps=1e-12)
     x2 = F.normalize(x2, dim=-1, eps=1e-12)
-    expected = sigmoid_focal_loss(torch.matmul(x1, x2.T) * t.exp() + b, target)
+    expected = sigmoid_focal_loss(torch.matmul(x1, x2.T) * t.exp() + b, target, reduction="mean")
     assert_close(loss, expected)
 
 
@@ -108,7 +108,7 @@ def test_compute_siglip_loss(world_size):
     x1 = torch.cat(x1_list, 0)
     x2 = torch.cat(x2_list, 0)
     target = torch.eye(x1.shape[0], dtype=torch.float32)
-    expected = sigmoid_focal_loss(torch.matmul(x1, x2.T) * t.exp() + b, target)
+    expected = sigmoid_focal_loss(torch.matmul(x1, x2.T) * t.exp() + b, target, reduction="mean")
 
     spawn(
         _compute_siglip_loss,
