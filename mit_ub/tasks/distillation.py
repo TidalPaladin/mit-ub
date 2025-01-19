@@ -245,6 +245,7 @@ class DistillationWithProbe(Distillation, ABC):
             parameter_groups,
         )
         self.linear_probe = self.create_probe_head()
+        self.probe_key = probe_key
 
     @abstractmethod
     def create_probe_head(self) -> nn.Module:
