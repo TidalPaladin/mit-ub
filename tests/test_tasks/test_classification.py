@@ -114,6 +114,7 @@ class TestJEPAWithClassification:
             "example_rms",
             "micro_token_rms",
             "macro_token_rms",
+            "siglip_loss",
         }
         train_keys = (
             {"layer_scale_mean", "layer_scale_max", "ema_momentum"}
@@ -148,6 +149,7 @@ class TestJEPAWithClassification:
             "example_rms",
             "micro_token_rms",
             "macro_token_rms",
+            "siglip_loss",
         }
         train_keys = (
             {"layer_scale_mean", "layer_scale_max", "ema_momentum"}

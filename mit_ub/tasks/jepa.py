@@ -1,10 +1,12 @@
+import math
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, Iterator, List, Optional, Tuple, cast
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics as tm
@@ -12,6 +14,7 @@ from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
 from torch import Tensor
 from torch.optim.optimizer import Optimizer
+from torchvision.ops import sigmoid_focal_loss
 
 from ..data.mixup import mixup, sample_mixup_parameters
 from ..data.noise import (
@@ -29,12 +32,149 @@ from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, ExampleSimilar
 from ..metrics.distance import ExampleRMSDistance, RMSPairwiseDistance, TokenRMSDistance
 from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
 from ..model import AdaptiveViT, AdaptiveViTConfig, ViT, ViTConfig
+from ..model.helpers import compile_backend, compile_is_disabled, max_autotune
 from ..model.layers.layer_scale import has_layer_scale
 from ..model.layers.pool import PoolType
 from ..model.layers.pos_enc import RelativeFactorizedPosition
 from ..model.layers.transformer import TransformerDecoderLayer
 from ..tokens import apply_mask, create_mask, generate_non_overlapping_mask, mask_is_ragged
-from .student_teacher import EMAConfig, contrastive_loss, get_ema_momentum, synchronize_teacher, update_teacher
+from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
+
+
+sigmoid_focal_loss = torch.compile(
+    sigmoid_focal_loss,
+    fullgraph=True,
+    backend=compile_backend(),
+)
+
+
+@torch.no_grad()
+def ring_exchange(tensor: Tensor, rank: int, world_size: int) -> Tensor:
+    r"""Run one iteration of ring exchange.
+
+    The exchange sends to the next rank, and receives from the previous rank.
+
+    Args:
+        tensor: The tensor to exchange.
+        rank: The rank of the current process.
+        world_size: The number of processes in the distributed group.
+
+    Returns:
+        The exchanged tensor
+    """
+    if world_size == 1 or not torch.distributed.is_initialized():
+        return tensor
+    recv_tensor = torch.zeros_like(tensor)
+    send_op = dist.P2POp(dist.isend, tensor, (rank + 1) % world_size)
+    recv_op = dist.P2POp(dist.irecv, recv_tensor, (rank - 1 + world_size) % world_size)
+    reqs = dist.batch_isend_irecv([send_op, recv_op])
+    for req in reqs:
+        req.wait()
+    return recv_tensor
+
+
+@torch.no_grad()
+def ring_exchange_all(tensor: Tensor, rank: int, world_size: int) -> Iterator[Tensor]:
+    r"""Run ring exchange across all ranks.
+
+    The final tensor received in the exchange is the local tensor (i.e. ``tensor``).
+
+    Args:
+        tensor: The tensor to exchange.
+        rank: The rank of the current process.
+        world_size: The number of processes in the distributed group.
+
+    Returns:
+        An iterator over the tensors exchanged at each round of the ring exchange.
+    """
+    for _ in range(world_size):
+        tensor = ring_exchange(tensor, rank, world_size)
+        yield tensor
+
+
+@torch.compile(
+    fullgraph=True,
+    backend=compile_backend(),
+    options={
+        "max_autotune": max_autotune(),
+        "epilogue_fusion": True,
+        "shape_padding": True,
+        "triton.cudagraph_trees": max_autotune(),
+    },
+    disable=compile_is_disabled(),
+)
+def compute_siglip_logits(x1: Tensor, x2: Tensor, t: Tensor, b: Tensor) -> Tensor:
+    r"""Compute the logits for the SigLIP loss.
+
+    Logits are computed as:
+
+    .. math::
+        \text{logits} = \text{x1} \cdot \text{x2}^\top \cdot \text{t} + \text{b}
+
+    Args:
+        x1: The first set of embeddings.
+        x2: The second set of embeddings.
+        t: The temperature parameter.
+        b: The bias parameter.
+
+    Returns:
+        The logits for the SigLIP loss.
+    """
+    return torch.matmul(x1, x2) * t.exp() + b
+
+
+def compute_siglip_loss(
+    x1: Tensor,
+    x2: Tensor,
+    target: Tensor,
+    t: Tensor,
+    b: Tensor,
+    rank: int,
+    world_size: int,
+    eps: float = 1e-12,
+) -> Tensor:
+    r"""Compute the SigLIP loss across all ranks.
+
+    Args:
+        x1: The first set of embeddings.
+        x2: The second set of embeddings.
+        target: The target embeddings.
+        t: The temperature parameter.
+        b: The bias parameter.
+        rank: The rank of the current process.
+        world_size: The number of processes in the distributed group.
+        eps: The epsilon value to use for normalization.
+
+    Returns:
+        The SigLIP loss.
+    """
+    x1 = F.normalize(x1, dim=-1, eps=eps)
+    x2 = F.normalize(x2, dim=-1, eps=eps)
+
+    x2_globals = ring_exchange_all(x2, rank, world_size)
+    x1_globals = ring_exchange_all(x1, rank, world_size)
+
+    # Target is all 0 when crossing ranks
+    null_target = torch.zeros_like(target)
+
+    loss = x1.new_zeros(())
+    for i, (x1_global, x2_global) in enumerate(zip(x1_globals, x2_globals)):
+        # The SigLIP target will be all 0 unless we are on the last iteration of ring exchange.
+        # In the last iteration, x2_global should match x2 (i.e. the local target).
+        _target = target if i == world_size - 1 else null_target
+
+        # We want to ensure gradients flow through both x1 and x2. However, gradients do not
+        # flow through the ring exchange operations. To overcome this, we exchange both x1 and x2,
+        # compute the loss using the local counterpart of the exchanged tensor, and then combine
+        # the losses for the two permutations.
+        logits_x1 = compute_siglip_logits(x1, x2_global.mT, t, b)
+        logits_x2 = compute_siglip_logits(x1_global, x2.mT, t, b)
+
+        loss_x1 = sigmoid_focal_loss(logits_x1, _target, reduction="sum")
+        loss_x2 = sigmoid_focal_loss(logits_x2, _target, reduction="sum")
+        loss += (loss_x1 + loss_x2) / (target.numel() * world_size * 2)
+
+    return loss
 
 
 @dataclass
@@ -67,8 +207,7 @@ class JEPAConfig:
         tower_input_norm: If True, apply input normalization to the tower.
             Input normalization should not be necessary for backbones that already have an output normalization layer.
             Only has an effect if ``mlp_tower`` is ``True``.
-        contrastive_weight: Weight of the contrastive loss.
-        contrastive_margin: Margin for the contrastive loss.
+        siglip_weight: Weight of the SigLIP loss. If 0, SigLIP does not contribute to the backbone gradients.
     """
 
     context_ratio: float = 0.5
@@ -90,8 +229,7 @@ class JEPAConfig:
     self_attn: bool = False
     mlp_tower: bool = False
     tower_input_norm: bool = False
-    contrastive_weight: float = 0.0
-    contrastive_margin: float = 0.5
+    siglip_weight: float = 0.0
 
     def __post_init__(self) -> None:
         if not 0 < self.context_ratio <= 1:
@@ -108,10 +246,8 @@ class JEPAConfig:
             raise ValueError("predictor_depth must be at least 1")
         if self.weight_decay_final is not None and not 0 <= self.weight_decay_final:
             raise ValueError("weight_decay_final must be non-negative")
-        if self.contrastive_weight < 0:
-            raise ValueError("contrastive_weight must be non-negative")
-        if not -1 <= self.contrastive_margin <= 1:
-            raise ValueError("contrastive_margin must be in the range [-1, 1]")
+        if self.siglip_weight < 0:
+            raise ValueError("siglip_weight must be non-negative")
 
 
 class JEPA(Task):
@@ -197,14 +333,17 @@ class JEPA(Task):
             input_norm=self.jepa_config.tower_input_norm,
         )
 
-        # Optional contrastive pooling layers
-        if self.jepa_config.contrastive_weight:
-            self.contrastive_pooling = self.backbone.create_head(
-                self.backbone.config.dim,
-                pool_type=PoolType.SIMPLE_ATTENTION,
-                use_mlp=self.jepa_config.mlp_tower,
-                input_norm=self.jepa_config.tower_input_norm,
-            )
+        # SigLIP pooling layer
+        self.pool = self.backbone.create_head(
+            self.backbone.config.dim,
+            pool_type=PoolType.SIMPLE_ATTENTION,
+            use_mlp=self.jepa_config.mlp_tower,
+            input_norm=self.jepa_config.tower_input_norm,
+        )
+        self.siglip_t = nn.Parameter(torch.empty(1))
+        self.siglip_b = nn.Parameter(torch.empty(1))
+        nn.init.constant_(self.siglip_t, math.log(10))
+        nn.init.constant_(self.siglip_b, -10)
 
         self.save_hyperparameters()
 
@@ -232,6 +371,7 @@ class JEPA(Task):
                 "micro_token_rms": TokenRMSDistance(self.backbone.config.dim),
                 "macro_token_rms": RMSPairwiseDistance(self.backbone.config.dim),
                 "jepa_loss": tm.MeanMetric(),
+                "siglip_loss": tm.MeanMetric(),
             }
         )
         if has_layer_scale(self.backbone) and state.mode == Mode.TRAIN:
@@ -239,24 +379,15 @@ class JEPA(Task):
             metrics["layer_scale_mean"] = MeanLayerScale()
         if state.mode == Mode.TRAIN:
             metrics["ema_momentum"] = tm.MeanMetric()
-        if self.jepa_config.contrastive_weight:
-            metrics["contrastive_loss"] = tm.MeanMetric()
 
         return metrics
 
-    def forward(self, x: Tensor, context_mask: Tensor, target_mask: Tensor) -> Dict[str, Tensor | None]:
+    def forward(self, x: Tensor, context_mask: Tensor, target_mask: Tensor) -> Dict[str, Tensor]:
         # Run encoder on context
         torch.cuda.nvtx.range_push("context_backbone")
         context: Tensor = self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
         torch.cuda.nvtx.range_pop()
         B, L, _ = context.shape
-
-        # If doing contrastive pooling, apply that now
-        pooled: Tensor | None = None
-        if self.jepa_config.contrastive_weight:
-            torch.cuda.nvtx.range_push("contrastive_pooling")
-            pooled = self.contrastive_pooling(context)
-            torch.cuda.nvtx.range_pop()
 
         # Sample a subset of the context as input to the predictor and project
         if self.jepa_config.context_subsample_ratio < 1.0:
@@ -267,6 +398,11 @@ class JEPA(Task):
                 device=context.device,
             )
             context = apply_mask(subsample_mask, context, fill_value=None)
+
+        # Pooling layer. When siglip_weight is 0, a stop gradient is applied to the context.
+        torch.cuda.nvtx.range_push("pool")
+        pooled = self.pool(context if self.jepa_config.siglip_weight else context.detach())
+        torch.cuda.nvtx.range_pop()
 
         # Prepare positional encoding for target queries
         tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
@@ -402,6 +538,7 @@ class JEPA(Task):
             torch.cuda.nvtx.range_push("ema_backbone")
             full_target: Tensor = self.teacher_backbone(x, reshape=False)
             torch.cuda.nvtx.range_pop()
+            siglip_target = torch.eye(full_target.shape[0], device=full_target.device, dtype=torch.float32)
 
             # apply random noise
             if self.training and self.jepa_config.use_noise:
@@ -417,6 +554,7 @@ class JEPA(Task):
                 )
                 x = mixup(x, mixup_weight)
                 full_target = mixup(full_target, mixup_weight)
+                siglip_target = mixup(siglip_target, mixup_weight)
                 torch.cuda.nvtx.range_pop()
             else:
                 mixup_weight = None
@@ -428,23 +566,30 @@ class JEPA(Task):
         pred_dict = self(x, context_mask, target_mask)
         pred: Tensor = pred_dict["jepa"]
         context: Tensor = pred_dict["jepa_context"]
-        pooled: Tensor | None = pred_dict["pooled"]
+        pooled: Tensor = pred_dict["pooled"]
 
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
         loss_jepa = F.smooth_l1_loss(pred, target)
 
-        # compute optional contrastive loss
-        if pooled is not None:
-            loss_contrastive = contrastive_loss(pooled, pooled, self.jepa_config.contrastive_margin)
-        else:
-            loss_contrastive = None
+        # Compute siglip loss across all ranks
+        full_target_pooled = self.pool(full_target)
+        loss_siglip = compute_siglip_loss(
+            pooled,
+            full_target_pooled,
+            siglip_target,
+            self.siglip_t,
+            self.siglip_b,
+            self.trainer.global_rank,
+            self.trainer.world_size,
+        )
 
         # Compute metrics
         if metrics is not None:
-            with torch.no_grad():
+            with torch.inference_mode():
                 torch.cuda.nvtx.range_push("metrics")
                 metrics["jepa_loss"].update(loss_jepa)
+                metrics["siglip_loss"].update(loss_siglip)
                 metrics["example_sim"].update(full_target)
                 metrics["example_rms"].update(full_target)
                 metrics["micro_token_sim"].update(full_target)
@@ -458,28 +603,28 @@ class JEPA(Task):
 
                 if "ema_momentum" in metrics:
                     metrics["ema_momentum"].update(self.get_ema_momentum())
-                if self.jepa_config.contrastive_weight:
-                    metrics["contrastive_loss"].update(loss_contrastive)
                 torch.cuda.nvtx.range_pop()
-
-        # Compute total loss
-        loss = loss_jepa
-        if self.jepa_config.contrastive_weight:
-            assert loss_contrastive is not None
-            loss = loss + self.jepa_config.contrastive_weight * loss_contrastive
-        assert isinstance(loss, Tensor)
 
         output = {
             "log": {
-                "loss_jepa": loss,
+                "loss_jepa": loss_jepa,
+                "loss_siglip": loss_siglip * (self.jepa_config.siglip_weight or 1.0),
             },
             "context": context,
+            "pooled": pooled,
+            "full_target_pooled": full_target_pooled,
             "jepa_pred": pred,
             "target": target,
             "full_target": full_target,
             "mixup_weight": mixup_weight,
         }
         return output
+
+    def on_after_backward(self, *args, **kwargs):
+        if self.global_step == 0:
+            for name, param in self.named_parameters():
+                if param.grad is None and param.requires_grad:
+                    raise RuntimeError(f"Gradient is None for parameter {name}")
 
     @torch.no_grad()
     def predict_step(self, batch: Any, *args, **kwargs) -> Dict[str, Any]:
@@ -494,6 +639,7 @@ class JEPAWithProbe(JEPA, ABC):
         self,
         backbone_config: ViTConfig | AdaptiveViTConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
+        probe_key: str = "full_target",
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -519,6 +665,7 @@ class JEPAWithProbe(JEPA, ABC):
             log_train_metrics_on_epoch,
             parameter_groups,
         )
+        self.probe_key = probe_key
         self.linear_probe = self.create_probe_head()
 
     @abstractmethod
@@ -533,7 +680,7 @@ class JEPAWithProbe(JEPA, ABC):
         raise NotImplementedError  # pragma: no cover
 
     def get_probe_features_from_output(self, output: Dict[str, Any]) -> Tensor:
-        features: Tensor = output["full_target"].detach()
+        features: Tensor = output[self.probe_key].detach()
         return features
 
     def step(

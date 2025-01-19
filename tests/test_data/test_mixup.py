@@ -151,3 +151,15 @@ def test_is_mixed_with_unknown_categorical():
     mixed_label = mixup_dense_label(label, weight, num_classes=num_classes)
     assert (mixed_label[result].sum(-1) == 1).all()
     assert (mixed_label[~result].sum(-1) < 1).all()
+
+
+def test_mixup_siglip():
+    torch.random.manual_seed(0)
+    B = 8
+    label = torch.eye(B)
+    weight = sample_mixup_parameters(B, 0.8, 1.0)
+
+    mixed_label = mixup(label, weight)
+    assert mixed_label.max() <= 1.0
+    assert mixed_label.min() >= 0.0
+    assert (mixed_label.sum(-1) == 1).all()
