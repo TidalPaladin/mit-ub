@@ -14,6 +14,7 @@ from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
 from torch import Tensor
 from torch.optim.optimizer import Optimizer
+from torchvision.ops import sigmoid_focal_loss
 
 from ..data.mixup import mixup, sample_mixup_parameters
 from ..data.noise import (
@@ -38,6 +39,13 @@ from ..model.layers.pos_enc import RelativeFactorizedPosition
 from ..model.layers.transformer import TransformerDecoderLayer
 from ..tokens import apply_mask, create_mask, generate_non_overlapping_mask, mask_is_ragged
 from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
+
+
+sigmoid_focal_loss = torch.compile(
+    sigmoid_focal_loss,
+    fullgraph=True,
+    backend=compile_backend(),
+)
 
 
 @torch.no_grad()
@@ -88,24 +96,6 @@ def ring_exchange_all(tensor: Tensor, rank: int, world_size: int) -> Iterator[Te
     fullgraph=True,
     backend=compile_backend(),
     options={
-        "epilogue_fusion": True,
-        "shape_padding": True,
-        "triton.cudagraph_trees": max_autotune(),
-    },
-    disable=compile_is_disabled(),
-)
-def _prepare_x1_x2(x1: Tensor, x2: Tensor, eps: float = 1e-12) -> Tuple[Tensor, Tensor]:
-    # Apply normalization
-    x1 = F.normalize(x1, dim=-1, eps=eps)
-    x2 = F.normalize(x2, dim=-1, eps=eps)
-    x2 = x2.T.contiguous()
-    return x1, x2
-
-
-@torch.compile(
-    fullgraph=True,
-    backend=compile_backend(),
-    options={
         "max_autotune": max_autotune(),
         "epilogue_fusion": True,
         "shape_padding": True,
@@ -114,6 +104,22 @@ def _prepare_x1_x2(x1: Tensor, x2: Tensor, eps: float = 1e-12) -> Tuple[Tensor, 
     disable=compile_is_disabled(),
 )
 def compute_siglip_logits(x1: Tensor, x2: Tensor, t: Tensor, b: Tensor) -> Tensor:
+    r"""Compute the logits for the SigLIP loss.
+
+    Logits are computed as:
+
+    .. math::
+        \text{logits} = \text{x1} \cdot \text{x2}^\top \cdot \text{t} + \text{b}
+
+    Args:
+        x1: The first set of embeddings.
+        x2: The second set of embeddings.
+        t: The temperature parameter.
+        b: The bias parameter.
+
+    Returns:
+        The logits for the SigLIP loss.
+    """
     return torch.matmul(x1, x2) * t.exp() + b
 
 
@@ -127,17 +133,46 @@ def compute_siglip_loss(
     world_size: int,
     eps: float = 1e-12,
 ) -> Tensor:
-    x1, x2 = _prepare_x1_x2(x1, x2, eps)
+    r"""Compute the SigLIP loss across all ranks.
+
+    Args:
+        x1: The first set of embeddings.
+        x2: The second set of embeddings.
+        target: The target embeddings.
+        t: The temperature parameter.
+        b: The bias parameter.
+        rank: The rank of the current process.
+        world_size: The number of processes in the distributed group.
+        eps: The epsilon value to use for normalization.
+
+    Returns:
+        The SigLIP loss.
+    """
+    x1 = F.normalize(x1, dim=-1, eps=eps)
+    x2 = F.normalize(x2, dim=-1, eps=eps)
+
+    x2_globals = ring_exchange_all(x2, rank, world_size)
+    x1_globals = ring_exchange_all(x1, rank, world_size)
+
+    # Target is all 0 when crossing ranks
+    null_target = torch.zeros_like(target)
 
     loss = x1.new_zeros(())
-    for i, x2_global in enumerate(ring_exchange_all(x2, rank, world_size)):
+    for i, (x1_global, x2_global) in enumerate(zip(x1_globals, x2_globals)):
         # The SigLIP target will be all 0 unless we are on the last iteration of ring exchange.
         # In the last iteration, x2_global should match x2 (i.e. the local target).
-        _target = target if i == world_size - 1 else torch.zeros_like(target)
+        _target = target if i == world_size - 1 else null_target
 
-        logits = compute_siglip_logits(x1, x2_global, t, b)
-        _loss = F.binary_cross_entropy_with_logits(logits, _target, reduction="sum")
-        loss += _loss / (target.numel() * world_size)
+        # We want to ensure gradients flow through both x1 and x2. However, gradients do not
+        # flow through the ring exchange operations. To overcome this, we exchange both x1 and x2,
+        # compute the loss using the local counterpart of the exchanged tensor, and then combine
+        # the losses for the two permutations.
+        logits_x1 = compute_siglip_logits(x1, x2_global.mT, t, b)
+        logits_x2 = compute_siglip_logits(x1_global, x2.mT, t, b)
+
+        loss_x1 = sigmoid_focal_loss(logits_x1, _target, reduction="sum")
+        loss_x2 = sigmoid_focal_loss(logits_x2, _target, reduction="sum")
+        loss += (loss_x1 + loss_x2) / (target.numel() * world_size * 2)
 
     return loss
 
@@ -172,8 +207,7 @@ class JEPAConfig:
         tower_input_norm: If True, apply input normalization to the tower.
             Input normalization should not be necessary for backbones that already have an output normalization layer.
             Only has an effect if ``mlp_tower`` is ``True``.
-        contrastive_weight: Weight of the contrastive loss.
-        contrastive_margin: Margin for the contrastive loss.
+        siglip_weight: Weight of the SigLIP loss. If 0, SigLIP does not contribute to the backbone gradients.
     """
 
     context_ratio: float = 0.5
@@ -538,7 +572,7 @@ class JEPA(Task):
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
         loss_jepa = F.smooth_l1_loss(pred, target)
 
-        # Compute siglip loss across all ranks, starting with the local rank
+        # Compute siglip loss across all ranks
         full_target_pooled = self.pool(full_target)
         loss_siglip = compute_siglip_loss(
             pooled,
@@ -586,6 +620,12 @@ class JEPA(Task):
         }
         return output
 
+    def on_after_backward(self, *args, **kwargs):
+        if self.global_step == 0:
+            for name, param in self.named_parameters():
+                if param.grad is None and param.requires_grad:
+                    raise RuntimeError(f"Gradient is None for parameter {name}")
+
     @torch.no_grad()
     def predict_step(self, batch: Any, *args, **kwargs) -> Dict[str, Any]:
         pred = self(batch["img"])
@@ -599,6 +639,7 @@ class JEPAWithProbe(JEPA, ABC):
         self,
         backbone_config: ViTConfig | AdaptiveViTConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
+        probe_key: str = "full_target",
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -624,6 +665,7 @@ class JEPAWithProbe(JEPA, ABC):
             log_train_metrics_on_epoch,
             parameter_groups,
         )
+        self.probe_key = probe_key
         self.linear_probe = self.create_probe_head()
 
     @abstractmethod
@@ -638,7 +680,7 @@ class JEPAWithProbe(JEPA, ABC):
         raise NotImplementedError  # pragma: no cover
 
     def get_probe_features_from_output(self, output: Dict[str, Any]) -> Tensor:
-        features: Tensor = output["full_target"].detach()
+        features: Tensor = output[self.probe_key].detach()
         return features
 
     def step(

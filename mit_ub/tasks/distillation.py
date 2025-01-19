@@ -216,6 +216,7 @@ class DistillationWithProbe(Distillation, ABC):
         teacher_config: AnyModelConfig,
         teacher_checkpoint: Path,
         distillation_config: DistillationConfig = DistillationConfig(),
+        probe_key: str = "pred",
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
@@ -257,7 +258,7 @@ class DistillationWithProbe(Distillation, ABC):
         raise NotImplementedError  # pragma: no cover
 
     def get_probe_features_from_output(self, output: Dict[str, Any]) -> Tensor:
-        features: Tensor = output["pred"].detach()
+        features: Tensor = output[self.probe_key].detach()
         return features
 
     def step(

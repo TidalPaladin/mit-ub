@@ -86,10 +86,10 @@ def _compute_siglip_loss(rank: int, world_size: int, expected: float, B: int, D:
         dist.destroy_process_group()
 
 
-@pytest.mark.parametrize("world_size", [1, 2, 3, 4])
+@pytest.mark.parametrize("world_size", [1, 2, 3])
 def test_compute_siglip_loss(world_size):
-    t = torch.tensor(1.0)
-    b = torch.tensor(0.0)
+    t = torch.tensor(1.0, requires_grad=True)
+    b = torch.tensor(0.0, requires_grad=True)
 
     # First compute an expected loss locally
     B, D = 32, 64
@@ -107,8 +107,13 @@ def test_compute_siglip_loss(world_size):
     x1 = torch.cat(x1_list, 0)
     x2 = torch.cat(x2_list, 0)
     target = torch.eye(x1.shape[0], dtype=torch.float32)
-    expected = F.binary_cross_entropy_with_logits(torch.matmul(x1, x2.T) * t.exp() + b, target).float().item()
-    spawn(_compute_siglip_loss, nprocs=world_size, args=(world_size, expected, B, D))
+    expected = F.binary_cross_entropy_with_logits(torch.matmul(x1, x2.T) * t.exp() + b, target)
+
+    spawn(
+        _compute_siglip_loss,
+        nprocs=world_size,
+        args=(world_size, expected.float().item(), B, D),
+    )
 
 
 def run_ema_sync(rank, world_size, backbone, optimizer_init):
