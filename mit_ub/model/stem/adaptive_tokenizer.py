@@ -66,7 +66,6 @@ def adaptive_patch_embed_forward(
 
     # Project and patch
     x = F.linear(x, w_patch, b_patch)
-    x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
 
     # Add position encoding
     pos = relative_factorized_position_forward(
@@ -90,6 +89,9 @@ def adaptive_patch_embed_forward(
 
     x = rearrange(x, "b ... d -> b (...) d")
     pooled = rearrange(pooled, "b d ... -> b (...) d")
+
+    x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
+    pooled = F.layer_norm(pooled, pooled.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
     return pooled, x
 
 
@@ -115,7 +117,7 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         self.b_in = nn.Parameter(torch.empty(embed_dim))
         self.w_norm = nn.Parameter(torch.empty(embed_dim))
         self.b_norm = nn.Parameter(torch.empty(embed_dim))
-        self.pos_enc = RelativeFactorizedPosition(2, embed_dim, dropout=dropout, activation=activation)
+        self.pos_enc = RelativeFactorizedPosition(2, embed_dim, dropout=dropout, activation=activation, norm=False)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -201,7 +203,7 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         self.b_in = nn.Parameter(torch.empty(embed_dim))
         self.w_norm = nn.Parameter(torch.empty(embed_dim))
         self.b_norm = nn.Parameter(torch.empty(embed_dim))
-        self.pos_enc = RelativeFactorizedPosition(3, embed_dim, dropout=dropout, activation=activation)
+        self.pos_enc = RelativeFactorizedPosition(3, embed_dim, dropout=dropout, activation=activation, norm=False)
         self.reset_parameters()
 
     def reset_parameters(self):
