@@ -321,9 +321,10 @@ class JEPA(Task):
         )
 
         # JEPA predictor
+        self.jepa_norm = nn.LayerNorm(self.backbone.config.dim)
         self.jepa_predictor = nn.ModuleList(
             [
-                self.backbone.create_decoder_layer(i, self_attn=self.jepa_config.self_attn)
+                self.backbone.create_decoder_layer(i, self_attn=self.jepa_config.self_attn, kv_norm=False)
                 for i in range(self.jepa_config.predictor_depth)
             ]
         )
@@ -398,11 +399,17 @@ class JEPA(Task):
                 batch_size=B,
                 device=context.device,
             )
-            context = apply_mask(subsample_mask, context, fill_value=None)
+            sub_context = apply_mask(subsample_mask, context, fill_value=None)
+        else:
+            sub_context = context
+
+        # Context comes out of backbone unnormalized. Decoder won't apply normalization on the KV branch.
+        # So we apply normalization here.
+        sub_context = self.jepa_norm(sub_context)
 
         # Pooling layer. When siglip_weight is 0, a stop gradient is applied to the context.
         torch.cuda.nvtx.range_push("pool")
-        pooled = self.pool(context if self.jepa_config.siglip_weight else context.detach())
+        pooled = self.pool(sub_context if self.jepa_config.siglip_weight else sub_context.detach())
         torch.cuda.nvtx.range_pop()
 
         # Prepare positional encoding for target queries
@@ -414,7 +421,7 @@ class JEPA(Task):
         torch.cuda.nvtx.range_push("jepa_predictor")
         for block in self.jepa_predictor:
             block = cast(TransformerDecoderLayer, block)
-            query = block(query, context)
+            query = block(query, sub_context)
         torch.cuda.nvtx.range_pop()
 
         pred = self.jepa_head(query)
@@ -571,7 +578,10 @@ class JEPA(Task):
 
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
-        loss_jepa = F.smooth_l1_loss(pred, target)
+        loss_jepa = F.smooth_l1_loss(
+            F.normalize(pred, dim=-1),
+            F.normalize(target, dim=-1),
+        ) * (target.numel() / target.shape[-1])
 
         # Compute siglip loss across all ranks
         full_target_pooled = self.pool(full_target)
