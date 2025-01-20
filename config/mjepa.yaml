@@ -73,9 +73,10 @@ fit:
           #num_slots: 32
 
       # Configure the probe head
+      probe_key: "target_cls_token" # Probe predicts using the CLS token of the teacher (full context)
       classification_config:
         num_classes: 10
-        pool_type: simple-attention # Use multi-head attention pooling followed by linear projection to output logits
+        pool_type: null
         mlp_tower: true
         tower_input_norm: false
 
@@ -161,6 +162,10 @@ fit:
       # Override optimizer parameters for special parameter groups
       # NOTE: For parameters that match multiple groups, they are assigned to the first group that matches.
       parameter_groups:
+        # Embeddings (no weight decay)
+        - params:
+            - "cls_token"
+          weight_decay: 0.0
         # Biases (no weight decay)
         - params:
             - "bias"
@@ -185,11 +190,12 @@ fit:
             - "w_qk_norm"
             - "siglip_t"
           weight_decay: 0.0
-        # Linear probe (higher weight decay)
+        # Output projections (higher weight decay)
         - params:
             - "jepa_head"
             - "linear_probe"
-            - "pool"
+            - "siglip_pred"
+            - "siglip_target"
           weight_decay: 1.0
 
   data:

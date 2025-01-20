@@ -9,7 +9,6 @@ import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.structs import State
 from deep_helpers.tasks import Task
-from einops import rearrange
 from torch import Tensor
 
 from ..data import is_mixed, is_mixed_with_unknown, mixup, mixup_dense_label, sample_mixup_parameters
@@ -177,7 +176,7 @@ class ClassificationConfig:
     mixup_prob: float = 0.2
     freeze_backbone: bool = False
     # TODO: jsonargparse can't handle the strenum it seems
-    pool_type: str | PoolType | None = "attention"
+    pool_type: str | PoolType | None = None
     label_key: str = "label"
     mlp_tower: bool = False
     tower_input_norm: bool = False
@@ -286,15 +285,11 @@ class ClassificationTask(Task):
 
         # forward backbone
         with torch.set_grad_enabled(not self.config.freeze_backbone and self.training):
-            features = self.backbone(x)
-
-        # reshape features if needed to sequence style
-        if features.ndim > 3 or features.shape[-1] != self.backbone.config.dim:
-            features = rearrange(features, "b c ... -> b (...) c")
+            features, cls_token = self.backbone(x)
 
         # step from features
         output = step_classification_from_features(
-            features,
+            cls_token,
             y,
             self.classification_head,
             self.config,
@@ -320,7 +315,7 @@ class JEPAWithClassification(JEPAWithProbe):
         backbone_config: ViTConfig | AdaptiveViTConfig,
         classification_config: ClassificationConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
-        probe_key: str = "full_target",
+        probe_key: str = "target_cls_token",
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",

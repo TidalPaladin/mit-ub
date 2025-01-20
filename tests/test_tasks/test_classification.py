@@ -10,20 +10,19 @@ from mit_ub.tasks.classification import (
     DistillationWithClassification,
     JEPAWithClassification,
 )
+from mit_ub.tasks.distillation import DistillationConfig
 from mit_ub.tasks.jepa import JEPAConfig
 
 
 class TestClassificationTask:
-    @pytest.fixture(params=["attention", "avg"])
-    def task(self, optimizer_init, backbone, request):
-        pool_type = request.param
-        config = ClassificationConfig(num_classes=10, pool_type=pool_type)
+    @pytest.fixture
+    def task(self, optimizer_init, backbone):
+        config = ClassificationConfig(num_classes=10, pool_type=None)
         return ClassificationTask(backbone, classification_config=config, optimizer_init=optimizer_init)
 
-    @pytest.fixture(params=["attention", "avg"])
-    def binary_task(self, optimizer_init, backbone, request):
-        pool_type = request.param
-        config = ClassificationConfig(num_classes=2, pool_type=pool_type)
+    @pytest.fixture
+    def binary_task(self, optimizer_init, backbone):
+        config = ClassificationConfig(num_classes=2, pool_type=None)
         return ClassificationTask(backbone, classification_config=config, optimizer_init=optimizer_init)
 
     @pytest.mark.parametrize(
@@ -72,22 +71,20 @@ class TestClassificationTask:
 
 
 class TestJEPAWithClassification:
-    @pytest.fixture(params=["attention", "avg"])
-    def task(self, optimizer_init, backbone, request):
-        pool_type = request.param
+    @pytest.fixture
+    def task(self, optimizer_init, backbone):
         config = JEPAConfig()
         config.scale = 1
-        classification_config = ClassificationConfig(num_classes=10, pool_type=pool_type)
+        classification_config = ClassificationConfig(num_classes=10, pool_type=None)
         return JEPAWithClassification(
             backbone, classification_config=classification_config, optimizer_init=optimizer_init, jepa_config=config
         )
 
-    @pytest.fixture(params=["attention", "avg"])
-    def binary_task(self, optimizer_init, backbone, request):
-        pool_type = request.param
+    @pytest.fixture
+    def binary_task(self, optimizer_init, backbone):
         config = JEPAConfig()
         config.scale = 1
-        classification_config = ClassificationConfig(num_classes=2, pool_type=pool_type)
+        classification_config = ClassificationConfig(num_classes=2, pool_type=None)
         return JEPAWithClassification(
             backbone, classification_config=classification_config, optimizer_init=optimizer_init, jepa_config=config
         )
@@ -179,43 +176,51 @@ class TestJEPAWithClassification:
 
 
 class TestDistillationWithClassification:
-    @pytest.fixture(params=["attention", "avg"])
-    def task(self, tmp_path, vit_distillation, convnext_distillation, optimizer_init, request):
-        pool_type = request.param
+    @pytest.fixture
+    def task(self, tmp_path, vit_distillation, convnext_distillation, optimizer_init):
         student_config = convnext_distillation
         teacher_config = vit_distillation
+        distillation_config = DistillationConfig(
+            student_pool_type="avg",
+            teacher_pool_type=None,
+        )
 
         teacher_checkpoint = tmp_path / "teacher.pth"
         model = teacher_config.instantiate()
         torch.save(model.state_dict(), teacher_checkpoint)
 
-        classification_config = ClassificationConfig(num_classes=10, pool_type=pool_type)
+        classification_config = ClassificationConfig(num_classes=10, pool_type="avg")
 
         return DistillationWithClassification(
             student_config,
             teacher_config,
             teacher_checkpoint,
             classification_config=classification_config,
+            distillation_config=distillation_config,
             optimizer_init=optimizer_init,
         )
 
-    @pytest.fixture(params=["attention", "avg"])
-    def binary_task(self, tmp_path, vit_distillation, convnext_distillation, optimizer_init, request):
-        pool_type = request.param
+    @pytest.fixture
+    def binary_task(self, tmp_path, vit_distillation, convnext_distillation, optimizer_init):
         student_config = convnext_distillation
         teacher_config = vit_distillation
+        distillation_config = DistillationConfig(
+            student_pool_type="avg",
+            teacher_pool_type=None,
+        )
 
         teacher_checkpoint = tmp_path / "teacher.pth"
         model = teacher_config.instantiate()
         torch.save(model.state_dict(), teacher_checkpoint)
 
-        classification_config = ClassificationConfig(num_classes=2, pool_type=pool_type)
+        classification_config = ClassificationConfig(num_classes=2, pool_type="avg")
 
         return DistillationWithClassification(
             student_config,
             teacher_config,
             teacher_checkpoint,
             classification_config=classification_config,
+            distillation_config=distillation_config,
             optimizer_init=optimizer_init,
         )
 
@@ -230,7 +235,7 @@ class TestDistillationWithClassification:
     )
     def test_create_metrics(self, task, state):
         metrics = task.create_metrics(state)
-        base_keys = {"distill_loss", "ce_loss", "acc", "macro_acc"}
+        base_keys = {"distill_loss", "distill_loss_cls", "ce_loss", "acc", "macro_acc"}
         train_keys = {"layer_scale_mean", "layer_scale_max"} if has_layer_scale(task.backbone) else set()
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
@@ -248,7 +253,7 @@ class TestDistillationWithClassification:
     )
     def test_create_metrics_binary(self, binary_task, state):
         metrics = binary_task.create_metrics(state)
-        base_keys = {"distill_loss", "bce_loss", "acc", "macro_acc", "auroc"}
+        base_keys = {"distill_loss", "distill_loss_cls", "bce_loss", "acc", "macro_acc", "auroc"}
         train_keys = {"layer_scale_mean", "layer_scale_max"} if has_layer_scale(binary_task.backbone) else set()
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys

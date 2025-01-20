@@ -181,7 +181,7 @@ class AdaptiveViT(ViT):
         reshape: bool = True,
         mask: Tensor | None = None,
         mask_fill_value: float | Tensor | None = None,
-    ) -> Tensor:
+    ) -> Tuple[Tensor, Tensor]:
         B, C, *original_size = x.shape
         dynamic_tokenized_size = self.stem.tokenized_size(cast(Any, tuple(original_size)))
         fixed_tokenized_size = self.stem.target_tokenized_shape
@@ -195,10 +195,17 @@ class AdaptiveViT(ViT):
             fixed_tokens = apply_mask(fixed_mask, fixed_tokens, fill_value=mask_fill_value)
             dynamic_tokens = apply_mask(mask, dynamic_tokens, fill_value=mask_fill_value)
 
+        # Add CLS token (fixed pathway only)
+        fixed_tokens = torch.cat([self.cls_token.expand(B, -1, -1), fixed_tokens], dim=1)
+
         # Run the backbone
         for block, dynamic_block in zip(self.blocks, self.dynamic_blocks):
             fixed_tokens = block(fixed_tokens, dynamic_tokens)
             dynamic_tokens = dynamic_block(dynamic_tokens, fixed_tokens)
+
+        # Extract CLS token (fixed pathway only)
+        cls_token = fixed_tokens[:, 0, :].contiguous()
+        fixed_tokens = fixed_tokens[:, 1:, :].contiguous()
 
         # Upsample fixed tokens and add to dynamic tokens
         if mask is not None and fixed_mask is not None:
@@ -213,6 +220,7 @@ class AdaptiveViT(ViT):
 
         # Output norm
         dynamic_tokens = self.embedding_norm(dynamic_tokens)
+        cls_token = self.embedding_norm(cls_token)
 
         # Reshape to original grid if requested
         if reshape and mask is not None and mask_fill_value is None:
@@ -222,7 +230,7 @@ class AdaptiveViT(ViT):
         elif reshape:
             dynamic_tokens = tokens_to_grid(dynamic_tokens, dynamic_tokenized_size)
 
-        return dynamic_tokens
+        return dynamic_tokens, cls_token
 
     @classmethod
     def from_args(cls, *args, **kwargs) -> Self:

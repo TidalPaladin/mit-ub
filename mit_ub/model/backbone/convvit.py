@@ -1,6 +1,7 @@
 from dataclasses import dataclass
-from typing import Any, Dict, Self, cast
+from typing import Any, Dict, Self, Tuple, cast
 
+import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.nn import functional as F
@@ -88,7 +89,7 @@ class ConvViT(AdaptiveViT):
             set_checkpointing(layer, self.config.checkpoint)
         return layer
 
-    def forward(self, x: Tensor, reshape: bool = True) -> Tensor:
+    def forward(self, x: Tensor, reshape: bool = True) -> Tuple[Tensor, Tensor]:
         B, C, *original_size = x.shape
         dynamic_tokenized_size = self.stem.tokenized_size(cast(Any, tuple(original_size)))
         fixed_tokenized_size = self.stem.target_tokenized_shape
@@ -96,10 +97,17 @@ class ConvViT(AdaptiveViT):
         # Tokenize to fixed and dynamic tokens
         fixed_tokens, dynamic_tokens = self.stem(x)
 
+        # Add CLS token (fixed pathway only)
+        fixed_tokens = torch.cat([self.cls_token.expand(B, -1, -1), fixed_tokens], dim=1)
+
         # Run the backbone
         for block, dynamic_block in zip(self.blocks, self.dynamic_blocks):
             fixed_tokens = block(fixed_tokens, dynamic_tokens)
             dynamic_tokens = dynamic_block(dynamic_tokens, fixed_tokens, size=dynamic_tokenized_size)
+
+        # Extract CLS token (fixed pathway only)
+        cls_token = fixed_tokens[:, 0, :].contiguous()
+        fixed_tokens = fixed_tokens[:, 1:, :].contiguous()
 
         # Upsample fixed tokens and add to dynamic tokens
         fixed_tokens = tokens_to_grid(fixed_tokens, fixed_tokenized_size)
@@ -110,12 +118,13 @@ class ConvViT(AdaptiveViT):
 
         # Output norm
         dynamic_tokens = self.embedding_norm(dynamic_tokens)
+        cls_token = self.embedding_norm(cls_token)
 
         # Reshape to original grid if requested
         if reshape:
             dynamic_tokens = tokens_to_grid(dynamic_tokens, dynamic_tokenized_size)
 
-        return dynamic_tokens
+        return dynamic_tokens, cls_token
 
     @classmethod
     def from_args(cls, *args, **kwargs) -> Self:

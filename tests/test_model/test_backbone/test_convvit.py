@@ -86,8 +86,9 @@ class TestConvViT:
         x = torch.randn(1, 3, 224, 224, device=device)
         model = ConvViT(config).to(device)
         with torch.autocast(device_type=device, dtype=dtype, enabled=True):
-            out = model(x)
+            out, cls_token = model(x)
         assert out.shape[:2] == (1, 128)
+        assert cls_token.shape == (1, 128)
 
     @pytest.mark.parametrize(
         "device",
@@ -104,9 +105,8 @@ class TestConvViT:
         model = ConvViT(config).to(device)
 
         with torch.autocast(device_type=device, dtype=dtype):
-            out = model(x)
-            out = out.sum()
-        out.sum().backward()
+            out, cls_token = model(x)
+        (out.sum() + cls_token.sum()).backward()
         for name, param in model.named_parameters():
             assert param.grad is not None, f"{name} has no gradient"
             assert not param.grad.isnan().any(), f"{name} has nan gradient"
@@ -118,15 +118,17 @@ class TestConvViT:
 
         model.train()
         with torch.autocast(device_type="cpu", dtype=torch.float16):
-            out1 = model(x)
-            out2 = model(x)
+            out1, cls_token1 = model(x)
+            out2, cls_token2 = model(x)
         assert not torch.allclose(out1, out2)
+        assert not torch.allclose(cls_token1, cls_token2)
 
         model.eval()
         with torch.autocast(device_type="cpu", dtype=torch.float16):
-            out1 = model(x)
-            out2 = model(x)
+            out1, cls_token1 = model(x)
+            out2, cls_token2 = model(x)
         assert torch.allclose(out1, out2)
+        assert torch.allclose(cls_token1, cls_token2)
 
     def test_load_from_adaptive_vit(self, config):
         baseline = AdaptiveViT(config)
@@ -156,9 +158,10 @@ class TestConvViT:
         model.eval()
         baseline.eval()
         x = torch.randn(1, C, H, W)
-        y = model(x)
-        y_baseline = baseline(x)
+        y, cls_token = model(x)
+        y_baseline, cls_token_baseline = baseline(x)
         assert_close(y, y_baseline)
+        assert_close(cls_token, cls_token_baseline)
 
     @pytest.mark.parametrize(
         "device",
@@ -174,7 +177,7 @@ class TestConvViT:
         model = ConvViT(config).to(device)
         head = model.create_head(out_dim=10, pool_type=pool_type).to(device)
         with torch.autocast(device_type=device, dtype=dtype, enabled=True):
-            features = model(x, reshape=False)
+            features, _ = model(x, reshape=False)
             out = head(features)
         exp = (1, 1, 10) if pool_type is not None else (1, 196, 10)
         assert out.shape == exp

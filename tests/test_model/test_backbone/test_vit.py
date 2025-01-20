@@ -86,8 +86,9 @@ class TestViT:
         x = torch.randn(1, 3, 224, 224, device=device)
         model = ViT(config).to(device)
         with torch.autocast(device_type=device, dtype=dtype, enabled=True):
-            out = model(x)
+            out, cls_token = model(x)
         assert out.shape[:2] == (1, 128)
+        assert cls_token.shape == (1, 128)
 
     @pytest.mark.parametrize(
         "device",
@@ -103,9 +104,8 @@ class TestViT:
         config = replace(config, checkpoint=checkpoint)
         model = ViT(config).to(device)
         with torch.autocast(device_type=device, dtype=dtype):
-            out = model(x)
-            out = out.sum()
-        out.sum().backward()
+            out, cls_token = model(x)
+        (out.sum() + cls_token.sum()).backward()
         for name, param in model.named_parameters():
             assert param.grad is not None, f"{name} has no gradient"
             assert not param.grad.isnan().any(), f"{name} has nan gradient"
@@ -127,8 +127,8 @@ class TestViT:
         x = torch.randn(B, C, H, W, device=device)
         mask = model.create_mask(x, unmasked_ratio=0.25, scale=1)
         with torch.autocast(device_type=device, dtype=torch.float16):
-            out1 = model(x, reshape=False)
-            out2 = model(x, mask=mask, reshape=False)
+            out1, _ = model(x, reshape=False)
+            out2, _ = model(x, mask=mask, reshape=False)
         assert out1.shape != out2.shape
 
     def test_forward_deterministic(self, config):
@@ -138,15 +138,17 @@ class TestViT:
 
         model.train()
         with torch.autocast(device_type="cpu", dtype=torch.float16):
-            out1 = model(x)
-            out2 = model(x)
+            out1, cls1 = model(x)
+            out2, cls2 = model(x)
         assert not torch.allclose(out1, out2)
+        assert not torch.allclose(cls1, cls2)
 
         model.eval()
         with torch.autocast(device_type="cpu", dtype=torch.float16):
-            out1 = model(x)
-            out2 = model(x)
+            out1, cls1 = model(x)
+            out2, cls2 = model(x)
         assert torch.allclose(out1, out2)
+        assert torch.allclose(cls1, cls2)
 
     def test_trivial_token_mask(self, config):
         torch.random.manual_seed(0)
@@ -158,8 +160,8 @@ class TestViT:
         mask = create_mask(mask_size, batch_size=B, mask_ratio=0.25, scale=1)
         mask = torch.ones_like(mask).bool()
         x = torch.randn(B, C, H, W)
-        out1 = model(x, reshape=False)
-        out2 = model(x, mask=mask, reshape=False)
+        out1, _ = model(x, reshape=False)
+        out2, _ = model(x, mask=mask, reshape=False)
         assert_close(out1, out2)
 
     @pytest.mark.parametrize(
@@ -176,7 +178,7 @@ class TestViT:
         model = ViT(config).to(device)
         head = model.create_head(out_dim=10, pool_type=pool_type).to(device)
         with torch.autocast(device_type=device, dtype=dtype, enabled=True):
-            features = model(x, reshape=False)
+            features, _ = model(x, reshape=False)
             out = head(features)
         exp = (1, 1, 10) if pool_type is not None else (1, 196, 10)
         assert out.shape == exp

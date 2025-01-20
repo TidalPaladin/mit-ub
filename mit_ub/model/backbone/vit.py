@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
-from typing import Any, Dict, Self, Sequence, cast
+from typing import Any, Dict, Self, Sequence, Tuple, cast
 
+import torch
 import torch.nn as nn
 from torch import Tensor
 
@@ -48,6 +49,9 @@ class ViT(nn.Module):
     def __init__(self, config: ViTConfig):
         super().__init__()
         self._config = config
+
+        # CLS token
+        self.cls_token = nn.Parameter(torch.randn(1, 1, config.dim))
 
         # Stem tokenizer
         stem_type = PatchEmbed2d if isinstance(config.patch_size, int) or len(config.patch_size) == 2 else PatchEmbed3d
@@ -260,7 +264,7 @@ class ViT(nn.Module):
         reshape: bool = True,
         mask: Tensor | None = None,
         mask_fill_value: float | Tensor | None = None,
-    ) -> Tensor:
+    ) -> Tuple[Tensor, Tensor]:
         B, C, *original_size = x.shape
         tokenized_size = self.stem.tokenized_size(cast(Any, tuple(original_size)))
 
@@ -269,10 +273,17 @@ class ViT(nn.Module):
         if mask is not None:
             x = apply_mask(mask, x, fill_value=mask_fill_value)
 
+        # Add CLS token
+        x = torch.cat([self.cls_token.expand(B, -1, -1), x], dim=1)
+
         # Transformer blocks and output norm
         for block in self.blocks:
             x = block(x)
         x = self.embedding_norm(x)
+
+        # Extract CLS token
+        cls_token = x[:, 0, :].contiguous()
+        x = x[:, 1:, :].contiguous()
 
         # Reshape to original grid if requested
         if reshape and mask is not None and mask_fill_value is None:
@@ -282,7 +293,7 @@ class ViT(nn.Module):
         elif reshape:
             x = tokens_to_grid(x, tokenized_size)
 
-        return x
+        return x, cls_token
 
     @classmethod
     def from_args(cls, *args, **kwargs) -> Self:

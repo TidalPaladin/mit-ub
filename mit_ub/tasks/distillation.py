@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -25,9 +25,10 @@ from ..data.noise import (
     RandomNoise,
 )
 from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
-from ..model import AnyModelConfig
+from ..model import AnyModelConfig, ViT
 from ..model.helpers import grid_to_tokens
 from ..model.layers import has_layer_scale
+from ..model.layers.pool import PoolType
 from .jepa import mixup
 
 
@@ -45,6 +46,10 @@ class DistillationConfig:
         noise_prob: Probability of applying a given noise transform.
         noise_clip: If True, clip the noise to the range [0, 1].
         salt_pepper_prob: Proportion of salt and pepper noise to apply to the input.
+        student_pool_type: Type of pooling to use for the student backbone.
+        student_pool_input_norm: If True, apply input normalization to the student pool.
+        teacher_pool_type: Type of pooling to use for the teacher backbone.
+        teacher_pool_input_norm: If True, apply input normalization to the teacher pool.
     """
 
     mixup_alpha: float = 1.0
@@ -56,6 +61,10 @@ class DistillationConfig:
     noise_clip: bool = True
     salt_pepper_prob: float = SALT_PEPPER_NOISE_PROB
     salt_pepper_pixel_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX)
+    student_pool_type: str | PoolType | None = None
+    student_pool_input_norm: bool = False
+    teacher_pool_type: str | PoolType | None = None
+    teacher_pool_input_norm: bool = False
 
     def __post_init__(self) -> None:
         if not 0 < self.mixup_alpha:
@@ -104,10 +113,22 @@ class Distillation(Task):
         # Teacher backbone
         teacher_backbone = teacher_config.instantiate()
         self.teacher_backbone = teacher_backbone
+        if not isinstance(self.teacher_backbone, ViT):
+            raise ValueError("Teacher backbone must be a ViT")
 
         student_dim = backbone.config.dim
         teacher_dim = teacher_backbone.config.dim
         self.proj = nn.Linear(student_dim, teacher_dim) if student_dim != teacher_dim else nn.Identity()
+        self.student_pool = self.backbone.create_head(
+            out_dim=teacher_dim,
+            pool_type=cast(PoolType | None, self.config.student_pool_type),
+            input_norm=self.config.student_pool_input_norm,
+        )
+        self.teacher_pool = self.teacher_backbone.create_head(
+            out_dim=teacher_dim,
+            pool_type=cast(PoolType | None, self.config.teacher_pool_type),
+            input_norm=self.config.teacher_pool_input_norm,
+        )
 
         # Load teacher checkpoint and freeze parameters
         self.teacher_backbone = self.load_teacher_checkpoint(teacher_checkpoint)
@@ -136,7 +157,12 @@ class Distillation(Task):
 
     def create_metrics(self, state: State) -> tm.MetricCollection:
         r"""Gets a MetricCollection for a given state"""
-        metrics = tm.MetricCollection({"distill_loss": tm.MeanMetric()})
+        metrics = tm.MetricCollection(
+            {
+                "distill_loss": tm.MeanMetric(),
+                "distill_loss_cls": tm.MeanMetric(),
+            }
+        )
 
         if has_layer_scale(self.backbone) and state.mode == Mode.TRAIN:
             metrics["layer_scale_max"] = MaxLayerScale()
@@ -145,10 +171,18 @@ class Distillation(Task):
         return metrics
 
     def forward(self, x: Tensor) -> Dict[str, Tensor]:
-        pred = self.backbone(x)
-        pred = grid_to_tokens(pred)
+        # ViTs
+        if isinstance(self.backbone, ViT):
+            pred, pred_cls_token = self.backbone(x, reshape=False)
+            pred_cls_token = self.student_pool(pred_cls_token)
+        # CNNs
+        else:
+            pred = self.backbone(x)
+            pred = grid_to_tokens(pred)
+            pred_cls_token = self.student_pool(pred)
+
         pred_proj = self.proj(pred)
-        return {"distill_pred": pred, "distill_pred_proj": pred_proj}
+        return {"distill_pred": pred, "distill_pred_proj": pred_proj, "distill_pred_cls_token": pred_cls_token}
 
     def step(
         self,
@@ -163,7 +197,7 @@ class Distillation(Task):
         with torch.no_grad():
             # generate ground truth with forward pass of teacher backbone
             self.teacher_backbone.eval()
-            target: Tensor = self.teacher_backbone(x, reshape=False)
+            target, target_cls_token = cast(Tuple[Tensor, Tensor], self.teacher_backbone(x, reshape=False))
 
             if self.training and self.config.use_noise:
                 x = self.random_noise.apply_batched(x)
@@ -175,26 +209,37 @@ class Distillation(Task):
                 )
                 x = mixup(x, mixup_weight)
                 target = mixup(target, mixup_weight)
+                target_cls_token = mixup(target_cls_token, mixup_weight)
             else:
                 mixup_weight = None
 
         pred_dict = self(x)
         pred: Tensor = pred_dict["distill_pred"]
         pred_proj: Tensor = pred_dict["distill_pred_proj"]
+        pred_cls_token: Tensor = pred_dict["distill_pred_cls_token"]
 
-        # compute loss between target and student predictions
+        # compute loss between target and student grid predictions
         assert (
             pred_proj.shape == target.shape
         ), f"Prediction shape {pred_proj.shape} does not match target shape {target.shape}"
         loss = F.smooth_l1_loss(pred_proj, target)
 
+        # compute loss between target and student cls token predictions
+        target_cls_token = self.teacher_pool(target_cls_token)
+        assert (
+            pred_cls_token.shape == target_cls_token.shape
+        ), f"Prediction shape {pred_cls_token.shape} does not match target shape {target_cls_token.shape}"
+        loss_cls_token = F.smooth_l1_loss(pred_cls_token, target_cls_token)
+
         if metrics is not None:
-            with torch.no_grad():
+            with torch.inference_mode():
                 metrics["distill_loss"].update(loss)
+                metrics["distill_loss_cls"].update(loss_cls_token)
 
         output = {
             "log": {
                 "loss_distill": loss,
+                "loss_distill_cls_token": loss_cls_token,
             },
             "pred": pred,
             "pred_proj": pred_proj,
