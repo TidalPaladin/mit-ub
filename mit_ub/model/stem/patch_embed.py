@@ -91,11 +91,11 @@ def patch_embed_forward(
         raise ValueError(f"Invalid input dimension: {x.ndim}")
 
     x = F.linear(x, w_patch, b_patch)
-    x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
     pos = relative_factorized_position_forward(
         dims, w1_pos, b1_pos, w2_pos, b2_pos, w_pos_norm, b_pos_norm, activation, dropout=dropout, training=training
     )
-    return x + pos
+    x = x + pos
+    return F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
 
 
 def _init_patch_embed(layer: nn.Module) -> None:
@@ -123,7 +123,7 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Dims2D]):
         self.b_in = nn.Parameter(torch.empty(embed_dim))
         self.w_norm = nn.Parameter(torch.empty(embed_dim))
         self.b_norm = nn.Parameter(torch.empty(embed_dim))
-        self.pos_enc = RelativeFactorizedPosition(2, embed_dim, dropout=dropout, activation=activation)
+        self.pos_enc = RelativeFactorizedPosition(2, embed_dim, dropout=dropout, activation=activation, norm=False)
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -189,7 +189,7 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Dims3D]):
         self.b_in = nn.Parameter(torch.empty(embed_dim))
         self.w_norm = nn.Parameter(torch.empty(embed_dim))
         self.b_norm = nn.Parameter(torch.empty(embed_dim))
-        self.pos_enc = RelativeFactorizedPosition(3, embed_dim, dropout=dropout, activation=activation)
+        self.pos_enc = RelativeFactorizedPosition(3, embed_dim, dropout=dropout, activation=activation, norm=False)
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
