@@ -211,9 +211,6 @@ class AdaptiveViT(ViT):
         assert fixed_tokens.shape == dynamic_tokens.shape
         dynamic_tokens = self.dynamic_output_scale(dynamic_tokens) + fixed_tokens
 
-        # Output norm
-        dynamic_tokens = self.embedding_norm(dynamic_tokens)
-
         # Reshape to original grid if requested
         if reshape and mask is not None and mask_fill_value is None:
             raise ValueError(

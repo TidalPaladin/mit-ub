@@ -55,9 +55,9 @@ class ViT(nn.Module):
 
         # Transformer blocks
         self.blocks = nn.ModuleList([self.create_encoder_layer(i) for i in range(config.depth)])
-        self.embedding_norm = (
-            nn.LayerNorm(config.dim) if config.norm_type == NormType.LAYER_NORM else nn.RMSNorm(config.dim)
-        )
+        # self.embedding_norm = (
+        #    nn.LayerNorm(config.dim) if config.norm_type == NormType.LAYER_NORM else nn.RMSNorm(config.dim)
+        # )
         if config.checkpoint:
             set_checkpointing(self, config.checkpoint)
 
@@ -272,7 +272,7 @@ class ViT(nn.Module):
         # Transformer blocks and output norm
         for block in self.blocks:
             x = block(x)
-        x = self.embedding_norm(x)
+        # x = self.embedding_norm(x)
 
         # Reshape to original grid if requested
         if reshape and mask is not None and mask_fill_value is None:
