@@ -4,20 +4,36 @@ import torch
 from deep_helpers.structs import Mode, State
 
 from mit_ub.model.layers.layer_scale import has_layer_scale
-from mit_ub.tasks.distillation import Distillation
+from mit_ub.tasks.distillation import Distillation, DistillationConfig
 
 
 class TestDistillation:
-    @pytest.fixture
-    def task(self, tmp_path, vit_distillation, convnext_distillation, optimizer_init):
-        student_config = convnext_distillation
-        teacher_config = vit_distillation
+    @pytest.fixture(params=["vit->conv", "vit->vit"])
+    def task(self, request, tmp_path, vit_distillation, convnext_distillation, optimizer_init):
+        if request.param == "vit->conv":
+            student_config = convnext_distillation
+            teacher_config = vit_distillation
+            distillation_config = DistillationConfig(
+                student_pool_type="avg",
+                teacher_pool_type=None,
+            )
+        elif request.param == "vit->vit":
+            student_config = vit_distillation
+            teacher_config = vit_distillation
+            distillation_config = DistillationConfig(
+                student_pool_type=None,
+                teacher_pool_type=None,
+            )
+        else:
+            raise ValueError(f"Unsupported task: {request.param}")
 
         teacher_checkpoint = tmp_path / "teacher.pth"
         model = teacher_config.instantiate()
         torch.save(model.state_dict(), teacher_checkpoint)
 
-        return Distillation(student_config, teacher_config, teacher_checkpoint, optimizer_init=optimizer_init)
+        return Distillation(
+            student_config, teacher_config, teacher_checkpoint, distillation_config, optimizer_init=optimizer_init
+        )
 
     @pytest.mark.parametrize(
         "state",
@@ -30,7 +46,7 @@ class TestDistillation:
     )
     def test_create_metrics(self, task, state):
         metrics = task.create_metrics(state)
-        base_keys = {"distill_loss"}
+        base_keys = {"distill_loss", "distill_loss_cls"}
         train_keys = {"layer_scale_mean", "layer_scale_max"} if has_layer_scale(task.backbone) else set()
 
         if state.mode == Mode.TRAIN:

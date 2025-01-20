@@ -28,13 +28,12 @@ from ..data.noise import (
     UNIFORM_NOISE_MIN,
     RandomNoise,
 )
-from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, ExampleSimilarity, TokenSimilarity
-from ..metrics.distance import ExampleRMSDistance, RMSPairwiseDistance, TokenRMSDistance
+from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, TokenSimilarity
+from ..metrics.distance import RMSPairwiseDistance, TokenRMSDistance
 from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
 from ..model import AdaptiveViT, AdaptiveViTConfig, ViT, ViTConfig
 from ..model.helpers import compile_backend, compile_is_disabled, max_autotune
 from ..model.layers.layer_scale import has_layer_scale
-from ..model.layers.pool import PoolType
 from ..model.layers.pos_enc import RelativeFactorizedPosition
 from ..model.layers.transformer import TransformerDecoderLayer
 from ..tokens import apply_mask, create_mask, generate_non_overlapping_mask, mask_is_ragged
@@ -45,6 +44,7 @@ sigmoid_focal_loss = torch.compile(
     sigmoid_focal_loss,
     fullgraph=True,
     backend=compile_backend(),
+    disable=compile_is_disabled(),
 )
 
 
@@ -323,7 +323,7 @@ class JEPA(Task):
         # JEPA predictor
         self.jepa_predictor = nn.ModuleList(
             [
-                self.backbone.create_decoder_layer(i, self_attn=self.jepa_config.self_attn)
+                self.backbone.create_decoder_layer(i, self_attn=self.jepa_config.self_attn, kv_norm=False)
                 for i in range(self.jepa_config.predictor_depth)
             ]
         )
@@ -335,11 +335,17 @@ class JEPA(Task):
         )
 
         # SigLIP pooling layer
-        self.pool = self.backbone.create_head(
+        self.siglip_pred = self.backbone.create_head(
             self.backbone.config.dim,
-            pool_type=PoolType.SIMPLE_ATTENTION,
-            use_mlp=self.jepa_config.mlp_tower,
-            input_norm=self.jepa_config.tower_input_norm,
+            pool_type=None,
+            use_mlp=False,
+            input_norm=False,
+        )
+        self.siglip_target = self.backbone.create_head(
+            self.backbone.config.dim,
+            pool_type=None,
+            use_mlp=False,
+            input_norm=False,
         )
         self.siglip_t = nn.Parameter(torch.empty(1))
         self.siglip_b = nn.Parameter(torch.empty(1))
@@ -365,10 +371,10 @@ class JEPA(Task):
         r"""Gets a MetricCollection for a given state"""
         metrics = tm.MetricCollection(
             {
-                "example_sim": ExampleSimilarity(self.backbone.config.dim),
+                "example_sim": AveragePairwiseCosineSimilarity(self.backbone.config.dim),
                 "micro_token_sim": TokenSimilarity(self.backbone.config.dim),
                 "macro_token_sim": AveragePairwiseCosineSimilarity(self.backbone.config.dim),
-                "example_rms": ExampleRMSDistance(self.backbone.config.dim),
+                "example_rms": RMSPairwiseDistance(self.backbone.config.dim),
                 "micro_token_rms": TokenRMSDistance(self.backbone.config.dim),
                 "macro_token_rms": RMSPairwiseDistance(self.backbone.config.dim),
                 "jepa_loss": tm.MeanMetric(),
@@ -386,9 +392,11 @@ class JEPA(Task):
     def forward(self, x: Tensor, context_mask: Tensor, target_mask: Tensor) -> Dict[str, Tensor]:
         # Run encoder on context
         torch.cuda.nvtx.range_push("context_backbone")
-        context: Tensor = self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
+        context, cls_token = cast(
+            Tuple[Tensor, Tensor], self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
+        )
         torch.cuda.nvtx.range_pop()
-        B, L, _ = context.shape
+        B, L, D = context.shape
 
         # Sample a subset of the context as input to the predictor and project
         if self.jepa_config.context_subsample_ratio < 1.0:
@@ -399,11 +407,11 @@ class JEPA(Task):
                 device=context.device,
             )
             context = apply_mask(subsample_mask, context, fill_value=None)
+            L = context.shape[1]
 
-        # Pooling layer. When siglip_weight is 0, a stop gradient is applied to the context.
-        torch.cuda.nvtx.range_push("pool")
-        pooled = self.pool(context if self.jepa_config.siglip_weight else context.detach())
-        torch.cuda.nvtx.range_pop()
+        # Add CLS token to context
+        context = torch.cat([cls_token.view(B, 1, -1).expand(B, -1, -1), context], dim=1)
+        assert context.shape == (B, L + 1, D)
 
         # Prepare positional encoding for target queries
         tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
@@ -418,7 +426,7 @@ class JEPA(Task):
         torch.cuda.nvtx.range_pop()
 
         pred = self.jepa_head(query)
-        return {"jepa": pred, "jepa_context": context, "pooled": pooled}
+        return {"jepa": pred, "jepa_context": context, "jepa_cls_token": cls_token}
 
     @property
     def fraction_complete(self) -> float | None:
@@ -537,7 +545,7 @@ class JEPA(Task):
         with torch.no_grad():
             self.teacher_backbone.eval()
             torch.cuda.nvtx.range_push("ema_backbone")
-            full_target: Tensor = self.teacher_backbone(x, reshape=False)
+            full_target, target_cls_token = cast(Tuple[Tensor, Tensor], self.teacher_backbone(x, reshape=False))
             torch.cuda.nvtx.range_pop()
             siglip_target = torch.eye(full_target.shape[0], device=full_target.device, dtype=torch.float32)
 
@@ -555,6 +563,7 @@ class JEPA(Task):
                 )
                 x = mixup(x, mixup_weight)
                 full_target = mixup(full_target, mixup_weight)
+                target_cls_token = mixup(target_cls_token, mixup_weight)
                 siglip_target = mixup(siglip_target, mixup_weight)
                 torch.cuda.nvtx.range_pop()
             else:
@@ -566,18 +575,19 @@ class JEPA(Task):
         # plus the positional target queries through the predictor
         pred_dict = self(x, context_mask, target_mask)
         pred: Tensor = pred_dict["jepa"]
+        pred_cls_token = pred_dict["jepa_cls_token"]
         context: Tensor = pred_dict["jepa_context"]
-        pooled: Tensor = pred_dict["pooled"]
 
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
         loss_jepa = F.smooth_l1_loss(pred, target)
 
         # Compute siglip loss across all ranks
-        full_target_pooled = self.pool(full_target)
+        siglip_pred_token = self.siglip_pred(pred_cls_token)
+        siglip_target_token = self.siglip_target(target_cls_token)
         loss_siglip = compute_siglip_loss(
-            pooled,
-            full_target_pooled,
+            siglip_pred_token,
+            siglip_target_token,
             siglip_target,
             self.siglip_t,
             self.siglip_b,
@@ -591,8 +601,8 @@ class JEPA(Task):
                 torch.cuda.nvtx.range_push("metrics")
                 metrics["jepa_loss"].update(loss_jepa)
                 metrics["siglip_loss"].update(loss_siglip)
-                metrics["example_sim"].update(full_target)
-                metrics["example_rms"].update(full_target)
+                metrics["example_sim"].update(target_cls_token)
+                metrics["example_rms"].update(target_cls_token)
                 metrics["micro_token_sim"].update(full_target)
                 metrics["micro_token_rms"].update(full_target)
                 metrics["macro_token_sim"].update(full_target)
@@ -612,8 +622,8 @@ class JEPA(Task):
                 "loss_siglip": loss_siglip * (self.jepa_config.siglip_weight or 1.0),
             },
             "context": context,
-            "pooled": pooled,
-            "full_target_pooled": full_target_pooled,
+            "cls_token": pred_cls_token,
+            "target_cls_token": target_cls_token,
             "jepa_pred": pred,
             "target": target,
             "full_target": full_target,
@@ -640,7 +650,7 @@ class JEPAWithProbe(JEPA, ABC):
         self,
         backbone_config: ViTConfig | AdaptiveViTConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
-        probe_key: str = "full_target",
+        probe_key: str = "target_cls_token",
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
