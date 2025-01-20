@@ -104,7 +104,8 @@ def relative_factorized_position_forward(
     y = activation(y)
     y = F.dropout(y, p=dropout, training=training, inplace=True)
     y = F.linear(y, w2, b2)
-    y = F.layer_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm, bias=b_norm)
+    if w_norm is not None:
+        y = F.layer_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm, bias=b_norm)
     return y
 
 
@@ -137,6 +138,7 @@ class RelativeFactorizedPosition(nn.Module):
         dropout: float = 0.0,
         activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
         dim_feedforward: int | None = None,
+        norm: bool = False,
     ):
         super().__init__()
         self._dim_feedforward = dim_feedforward or int(4 * d_out)
@@ -146,8 +148,12 @@ class RelativeFactorizedPosition(nn.Module):
         self.w_out = nn.Parameter(torch.empty(d_out, self.dim_feedforward))
         self.b_in = nn.Parameter(torch.empty(self.dim_feedforward))
         self.b_out = nn.Parameter(torch.empty(d_out))
-        self.w_norm = nn.Parameter(torch.empty(d_out))
-        self.b_norm = nn.Parameter(torch.empty(d_out))
+        if norm:
+            self.w_norm = nn.Parameter(torch.empty(d_out))
+            self.b_norm = nn.Parameter(torch.empty(d_out))
+        else:
+            self.register_parameter("w_norm", None)
+            self.register_parameter("b_norm", None)
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -158,7 +164,8 @@ class RelativeFactorizedPosition(nn.Module):
             if bias is not None:
                 nn.init.zeros_(bias)
 
-        nn.init.ones_(self.w_norm)
+        if self.w_norm is not None:
+            nn.init.ones_(self.w_norm)
 
     @property
     def d_in(self) -> int:
@@ -178,7 +185,8 @@ class RelativeFactorizedPosition(nn.Module):
             f"hidden={self.dim_feedforward}, "
             f"out={self.d_out}, "
             f"dropout={self.dropout}, "
-            f"act={self.activation.__name__}"
+            f"act={self.activation.__name__}, "
+            f"norm={self.w_norm is not None}"
         )
 
     def forward(self, dims: Sequence[int]) -> Tensor:

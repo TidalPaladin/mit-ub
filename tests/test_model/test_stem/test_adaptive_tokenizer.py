@@ -92,7 +92,7 @@ class TestAdaptiveTokenizer2d:
     def test_extra_repr(self):
         layer = AdaptiveTokenizer2d(3, 64, (4, 4), (8, 8))
         result = str(layer)
-        exp = "AdaptiveTokenizer2d(\n  in=3, embed=64, patch_size=(4, 4), target_shape=(8, 8)\n  (pos_enc): RelativeFactorizedPosition(in=2, hidden=256, out=64, dropout=0.0, act=relu2)\n)"
+        exp = "AdaptiveTokenizer2d(\n  in=3, embed=64, patch_size=(4, 4), target_shape=(8, 8)\n  (pos_enc): RelativeFactorizedPosition(in=2, hidden=256, out=64, dropout=0.0, act=relu2, norm=False)\n)"
         assert result == exp
 
 
@@ -180,5 +180,5 @@ class TestAdaptiveTokenizer3d:
     def test_extra_repr(self):
         layer = AdaptiveTokenizer3d(3, 64, (4, 4, 4), (8, 8, 8))
         result = str(layer)
-        exp = "AdaptiveTokenizer3d(\n  in=3, embed=64, patch_size=(4, 4, 4), target_shape=(8, 8, 8)\n  (pos_enc): RelativeFactorizedPosition(in=3, hidden=256, out=64, dropout=0.0, act=relu2)\n)"
+        exp = "AdaptiveTokenizer3d(\n  in=3, embed=64, patch_size=(4, 4, 4), target_shape=(8, 8, 8)\n  (pos_enc): RelativeFactorizedPosition(in=3, hidden=256, out=64, dropout=0.0, act=relu2, norm=False)\n)"
         assert result == exp

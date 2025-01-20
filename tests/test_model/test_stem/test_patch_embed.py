@@ -24,7 +24,6 @@ class TestPatchEmbed2d:
         b = layer.b_in
         expected = F.conv2d(x, w, b, stride=(4, 4))
         expected = expected.view(B, D_model, -1).movedim(1, 2)
-        expected = F.layer_norm(expected, expected.shape[-1:], weight=layer.w_norm, bias=layer.b_norm)
         pos = relative_factorized_position_forward(
             (H // 4, W // 4),
             layer.pos_enc.w_in,
@@ -36,6 +35,7 @@ class TestPatchEmbed2d:
             layer.pos_enc.activation,
         )
         expected += pos
+        expected = F.layer_norm(expected, expected.shape[-1:], weight=layer.w_norm, bias=layer.b_norm)
         assert_close(actual, expected)
 
     @pytest.mark.parametrize(
@@ -87,7 +87,7 @@ class TestPatchEmbed2d:
     def test_extra_repr(self):
         layer = PatchEmbed2d(3, 64, (4, 4))
         result = str(layer)
-        exp = "PatchEmbed2d(\n  in=3, embed=64, patch_size=(4, 4)\n  (pos_enc): RelativeFactorizedPosition(in=2, hidden=256, out=64, dropout=0.0, act=relu2)\n)"
+        exp = "PatchEmbed2d(\n  in=3, embed=64, patch_size=(4, 4)\n  (pos_enc): RelativeFactorizedPosition(in=2, hidden=256, out=64, dropout=0.0, act=relu2, norm=False)\n)"
         assert result == exp
 
 
@@ -142,5 +142,5 @@ class TestPatchEmbed3d:
     def test_extra_repr(self):
         layer = PatchEmbed3d(3, 64, (4, 4, 4))
         result = str(layer)
-        exp = "PatchEmbed3d(\n  in=3, embed=64, patch_size=(4, 4, 4)\n  (pos_enc): RelativeFactorizedPosition(in=3, hidden=256, out=64, dropout=0.0, act=relu2)\n)"
+        exp = "PatchEmbed3d(\n  in=3, embed=64, patch_size=(4, 4, 4)\n  (pos_enc): RelativeFactorizedPosition(in=3, hidden=256, out=64, dropout=0.0, act=relu2, norm=False)\n)"
         assert result == exp
