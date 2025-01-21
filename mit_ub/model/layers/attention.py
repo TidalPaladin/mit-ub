@@ -186,7 +186,7 @@ class MultiHeadAttention(nn.Module, Checkpointable):
 
         # Register optional parameters
         for prefix in ("w", "b"):
-            for suffix in ("_in", "_q", "_k", "_v", "_out", "_qk_norm", "_norm"):
+            for suffix in ("_q", "_k", "_v", "_out", "_qk_norm", "_norm"):
                 param = f"{prefix}{suffix}"
                 self.register_parameter(param, None)
 
@@ -198,18 +198,12 @@ class MultiHeadAttention(nn.Module, Checkpointable):
             else:
                 self.register_parameter("b_norm", None)
 
-        # Packed QKV projection
-        if kdim is None and vdim is None:
-            self.w_in = nn.Parameter(torch.empty(embed_dim + 2 * self.kv_dim, embed_dim))
-            self.b_in = nn.Parameter(torch.empty(embed_dim + 2 * self.kv_dim)) if bias else None
-        # Unpacked QKV projection
-        else:
-            self.w_q = nn.Parameter(torch.empty(embed_dim, embed_dim))
-            self.w_k = nn.Parameter(torch.empty(self.kv_dim, kdim or embed_dim))
-            self.w_v = nn.Parameter(torch.empty(self.kv_dim, vdim or embed_dim))
-            self.b_q = nn.Parameter(torch.empty(embed_dim)) if bias else None
-            self.b_k = nn.Parameter(torch.empty(self.kv_dim)) if bias else None
-            self.b_v = nn.Parameter(torch.empty(self.kv_dim)) if bias else None
+        self.w_q = nn.Parameter(torch.empty(embed_dim, embed_dim))
+        self.w_k = nn.Parameter(torch.empty(self.kv_dim, kdim or embed_dim))
+        self.w_v = nn.Parameter(torch.empty(self.kv_dim, vdim or embed_dim))
+        self.b_q = nn.Parameter(torch.empty(embed_dim)) if bias else None
+        self.b_k = nn.Parameter(torch.empty(self.kv_dim)) if bias else None
+        self.b_v = nn.Parameter(torch.empty(self.kv_dim)) if bias else None
 
         # QK normalization
         if qk_norm:
@@ -250,9 +244,7 @@ class MultiHeadAttention(nn.Module, Checkpointable):
         Any layer of `src` that is incompatible with `self` is ignored. The copy includes noramlization
         layers and the output projection layer.
         """
-        # Booleans for packed/unpacked and compatibility
-        self_is_packed = self.w_in is not None
-        src_is_packed = src.w_in is not None
+        # Booleans for compatibility
         attn_compatible = (
             self.embed_dim == src.embed_dim
             and self.head_dim == src.head_dim
@@ -262,14 +254,8 @@ class MultiHeadAttention(nn.Module, Checkpointable):
         )
         embed_compatible = self.embed_dim == src.embed_dim
 
-        # Both are packed
-        if self_is_packed and src_is_packed and attn_compatible:
-            self.w_in.data = src.w_in.data
-            if self.b_in is not None and src.b_in is not None:
-                self.b_in.data = src.b_in.data
-
         # Both are unpacked
-        elif not self_is_packed and not src_is_packed and attn_compatible:
+        if attn_compatible:
             self.w_q.data = src.w_q.data
             self.w_k.data = src.w_k.data
             self.w_v.data = src.w_v.data
@@ -279,21 +265,6 @@ class MultiHeadAttention(nn.Module, Checkpointable):
                 self.b_k.data = src.b_k.data
             if self.b_v is not None and src.b_v is not None:
                 self.b_v.data = src.b_v.data
-
-        # src is packed, self is unpacked
-        elif self_is_packed and not src_is_packed and attn_compatible:
-            self.w_in.data = torch.cat([src.w_q, src.w_k, src.w_v], dim=0)
-            if self.b_in is not None and src.b_q is not None:
-                assert src.b_k is not None and src.b_v is not None
-                self.b_in.data = torch.cat([src.b_q, src.b_k, src.b_v], dim=0)
-
-        # self is packed, src is unpacked
-        elif not self_is_packed and src_is_packed and attn_compatible:
-            self.w_q.data = src.w_in.data[: self.num_heads * self.head_dim]
-            self.w_k.data = src.w_in.data[
-                self.num_heads * self.head_dim : self.num_heads * self.head_dim + self.num_kv_heads * self.head_dim
-            ]
-            self.w_v.data = src.w_in.data[self.num_heads * self.head_dim + self.num_kv_heads * self.head_dim :]
 
         # Norm and projection
         if embed_compatible and self.w_norm is not None and src.w_norm is not None:
@@ -342,7 +313,7 @@ class MultiHeadAttention(nn.Module, Checkpointable):
 
     @property
     def bias(self) -> bool:
-        return self.b_in is not None
+        return self.b_q is not None
 
     @property
     def w_layer_scale(self) -> Tensor | None:
@@ -373,12 +344,14 @@ class MultiHeadAttention(nn.Module, Checkpointable):
             indices = None
 
         is_self_attn = q is k and k is v
+        is_packable = (self.w_q.shape == self.w_k.shape) and (self.w_q.shape == self.w_v.shape)
         q = apply_stochastic_depth(q, indices, training=self.training) if indices is not None else q
 
         # Self attention
-        if is_self_attn:
-            assert self.w_in is not None
+        if is_self_attn and is_packable:
             _k = _v = None
+        elif is_self_attn:
+            _k = _v = q
         # Cross attention
         else:
             _k = k
@@ -387,13 +360,22 @@ class MultiHeadAttention(nn.Module, Checkpointable):
                 _k = apply_stochastic_depth(_k, indices, training=self.training)
                 _v = apply_stochastic_depth(_v, indices, training=self.training)
 
-        # Handle selection of packed or unpacked QKV
-        w_q = self.w_q if self.w_in is None else self.w_in
-        w_k = self.w_k if self.w_in is None else None
-        w_v = self.w_v if self.w_in is None else None
-        b_q = self.b_q if self.b_in is None else self.b_in
-        b_k = self.b_k if self.b_in is None else None
-        b_v = self.b_v if self.b_in is None else None
+        # Pack weights
+        if is_self_attn and is_packable:
+            w_q = torch.cat([self.w_q, self.w_k, self.w_v], dim=0)
+            w_k = w_v = None
+            b_k = b_v = None
+            if self.b_q is not None and self.b_k is not None and self.b_v is not None:
+                b_q = torch.cat([self.b_q, self.b_k, self.b_v], dim=0)
+            else:
+                b_q = None
+        else:
+            w_q = self.w_q
+            w_k = self.w_k
+            w_v = self.w_v
+            b_q = self.b_q
+            b_k = self.b_k
+            b_v = self.b_v
 
         if self.checkpoint and torch.is_grad_enabled():
             # Workaround for checkpointing with compile + DDP
