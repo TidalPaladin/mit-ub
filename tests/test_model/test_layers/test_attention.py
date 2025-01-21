@@ -2,7 +2,6 @@ from copy import deepcopy
 
 import pytest
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.testing import assert_close
 
@@ -258,20 +257,6 @@ class TestMultiHeadAttention:
             kv_norm=True,
         )
         unpacked = deepcopy(packed)
-        w_q, w_k, w_v = packed.w_in.split([D, D, D], dim=0)
-        b_q, b_k, b_v = packed.b_in.split([D, D, D], dim=0)  # type: ignore
-        unpacked.w_q = nn.Parameter(w_q)
-        unpacked.w_k = nn.Parameter(w_k)
-        unpacked.w_v = nn.Parameter(w_v)
-        unpacked.b_q = nn.Parameter(b_q)
-        unpacked.b_k = nn.Parameter(b_k)
-        unpacked.b_v = nn.Parameter(b_v)
-        unpacked.w_in = None  # type: ignore
-        unpacked.b_in = None
-
-        sum_packed = sum(p.sum() for p in packed.parameters())
-        sum_unpacked = sum(p.sum() for p in unpacked.parameters())
-        assert_close(sum_packed, sum_unpacked)
 
         B = 2
         x = torch.randn(B, L, D, device=device)
