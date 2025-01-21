@@ -194,7 +194,7 @@ class Distillation(Task):
         torch.compiler.cudagraph_mark_step_begin()
         x: Tensor = batch["img"]
 
-        with torch.no_grad():
+        with torch.inference_mode():
             # generate ground truth with forward pass of teacher backbone
             self.teacher_backbone.eval()
             target, target_cls_token = cast(Tuple[Tensor, Tensor], self.teacher_backbone(x, reshape=False))
@@ -212,6 +212,12 @@ class Distillation(Task):
                 target_cls_token = mixup(target_cls_token, mixup_weight)
             else:
                 mixup_weight = None
+
+        if self.training:
+            target = target.clone()
+            target_cls_token = target_cls_token.clone()
+            if mixup_weight is not None:
+                mixup_weight = mixup_weight.clone()
 
         pred_dict = self(x)
         pred: Tensor = pred_dict["distill_pred"]

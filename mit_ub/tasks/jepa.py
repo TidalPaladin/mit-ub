@@ -542,7 +542,7 @@ class JEPA(Task):
         torch.cuda.nvtx.range_pop()
 
         # generate ground truth with forward pass of ema backbone on unmasked image
-        with torch.no_grad():
+        with torch.inference_mode():
             self.teacher_backbone.eval()
             torch.cuda.nvtx.range_push("ema_backbone")
             full_target, target_cls_token = cast(Tuple[Tensor, Tensor], self.teacher_backbone(x, reshape=False))
@@ -570,6 +570,14 @@ class JEPA(Task):
                 mixup_weight = None
 
             target = apply_mask(target_mask, full_target, fill_value=None)
+
+        # clone inference tensors if training for use with autograd
+        if self.training:
+            target = target.clone()
+            siglip_target = siglip_target.clone()
+            target_cls_token = target_cls_token.clone()
+            if mixup_weight is not None:
+                mixup_weight = mixup_weight.clone()
 
         # generate predictions by encoding the context and then running the encoded context
         # plus the positional target queries through the predictor
