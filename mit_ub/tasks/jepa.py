@@ -573,6 +573,7 @@ class JEPA(Task):
 
         # clone inference tensors if training for use with autograd
         if self.training:
+            x = x.clone()
             target = target.clone()
             siglip_target = siglip_target.clone()
             target_cls_token = target_cls_token.clone()

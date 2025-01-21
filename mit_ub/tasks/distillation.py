@@ -214,6 +214,7 @@ class Distillation(Task):
                 mixup_weight = None
 
         if self.training:
+            x = x.clone()
             target = target.clone()
             target_cls_token = target_cls_token.clone()
             if mixup_weight is not None:
