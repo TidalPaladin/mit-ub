@@ -51,7 +51,7 @@ class ViT(nn.Module):
         self._config = config
 
         # CLS token
-        self.cls_token = nn.Parameter(torch.randn(1, 1, config.dim))
+        self.cls_token = nn.Parameter(torch.randn(config.dim))
 
         # Stem tokenizer
         stem_type = PatchEmbed2d if isinstance(config.patch_size, int) or len(config.patch_size) == 2 else PatchEmbed3d
@@ -274,7 +274,7 @@ class ViT(nn.Module):
             x = apply_mask(mask, x, fill_value=mask_fill_value)
 
         # Add CLS token
-        x = torch.cat([self.cls_token.expand(B, -1, -1), x], dim=1)
+        x = torch.cat([self.cls_token.view(1, 1, -1).expand(B, -1, -1), x], dim=1)
 
         # Transformer blocks and output norm
         for block in self.blocks:

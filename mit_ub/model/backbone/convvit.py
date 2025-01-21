@@ -98,7 +98,7 @@ class ConvViT(AdaptiveViT):
         fixed_tokens, dynamic_tokens = self.stem(x)
 
         # Add CLS token (fixed pathway only)
-        fixed_tokens = torch.cat([self.cls_token.expand(B, -1, -1), fixed_tokens], dim=1)
+        fixed_tokens = torch.cat([self.cls_token.view(1, 1, -1).expand(B, -1, -1), fixed_tokens], dim=1)
 
         # Run the backbone
         for block, dynamic_block in zip(self.blocks, self.dynamic_blocks):
