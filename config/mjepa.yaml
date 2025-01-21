@@ -145,7 +145,7 @@ fit:
         init_args:
           lr: 0.001
           weight_decay: 0.1
-          betas: [0.85, 0.999]
+          betas: [0.85, 0.95]
           precondition_frequency: 10
       lr_interval: "step"
       lr_scheduler_init:
@@ -194,8 +194,7 @@ fit:
         - params:
             - "jepa_head"
             - "linear_probe"
-            - "siglip_pred"
-            - "siglip_target"
+            - "siglip_proj"
           weight_decay: 1.0
 
   data:

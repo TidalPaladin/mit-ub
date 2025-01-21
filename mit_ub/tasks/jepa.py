@@ -135,6 +135,8 @@ def compute_siglip_loss(
 ) -> Tensor:
     r"""Compute the SigLIP loss across all ranks.
 
+    This implementation ensures that gradients flow through both x1 and x2.
+
     Args:
         x1: The first set of embeddings.
         x2: The second set of embeddings.
@@ -304,7 +306,7 @@ class JEPA(Task):
         )
         self.jepa_config = jepa_config
 
-        # Backbone and EMA weights
+        # Student and teacher backbones
         backbone = backbone_config.instantiate()
         assert isinstance(backbone, (ViT, AdaptiveViT))
         self.backbone = backbone
@@ -334,23 +336,22 @@ class JEPA(Task):
             input_norm=self.jepa_config.tower_input_norm,
         )
 
-        # SigLIP pooling layer
-        self.siglip_pred = self.backbone.create_head(
+        # SigLIP parameters
+        self.siglip_proj = self.backbone.create_head(
             self.backbone.config.dim,
             pool_type=None,
-            use_mlp=False,
-            input_norm=False,
-        )
-        self.siglip_target = self.backbone.create_head(
-            self.backbone.config.dim,
-            pool_type=None,
-            use_mlp=False,
-            input_norm=False,
+            use_mlp=self.jepa_config.mlp_tower,
+            input_norm=self.jepa_config.tower_input_norm,
         )
         self.siglip_t = nn.Parameter(torch.empty(1))
         self.siglip_b = nn.Parameter(torch.empty(1))
         nn.init.constant_(self.siglip_t, math.log(10))
         nn.init.constant_(self.siglip_b, -10)
+
+        # Teacher SigLIP projection
+        self.siglip_teacher_proj = deepcopy(self.siglip_proj)
+        self.siglip_teacher_proj.requires_grad_(False)
+        self.siglip_teacher_proj.eval()
 
         self.save_hyperparameters()
 
@@ -452,7 +453,7 @@ class JEPA(Task):
 
     @torch.no_grad()
     def update_ema(self, batch_idx: int) -> None:
-        """Update the Exponential Moving Average (EMA) of the backbone parameters."""
+        """Update the Exponential Moving Average (EMA) of the teacher parameters."""
         momentum = self.get_ema_momentum()
 
         # NOTE: This also handles synchronization of EMA weights across processes
@@ -460,6 +461,16 @@ class JEPA(Task):
         update_teacher(
             self.backbone,
             self.teacher_backbone,
+            momentum,
+            batch_idx,
+            self.trainer.global_step,
+            self.trainer.accumulate_grad_batches,
+            self.trainer.world_size,
+            self.jepa_config.ema_config.sync_interval,
+        )
+        update_teacher(
+            self.siglip_proj,
+            self.siglip_teacher_proj,
             momentum,
             batch_idx,
             self.trainer.global_step,
@@ -592,8 +603,11 @@ class JEPA(Task):
         loss_jepa = F.smooth_l1_loss(pred, target)
 
         # Compute siglip loss across all ranks
-        siglip_pred_token = self.siglip_pred(pred_cls_token)
-        siglip_target_token = self.siglip_target(target_cls_token)
+        siglip_pred_token = self.siglip_proj(pred_cls_token)
+        with torch.no_grad():
+            self.siglip_teacher_proj.eval()
+            siglip_target_token = self.siglip_teacher_proj(target_cls_token)
+
         loss_siglip = compute_siglip_loss(
             siglip_pred_token,
             siglip_target_token,
