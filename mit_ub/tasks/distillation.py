@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -50,6 +50,9 @@ class DistillationConfig:
         student_pool_input_norm: If True, apply input normalization to the student pool.
         teacher_pool_type: Type of pooling to use for the teacher backbone.
         teacher_pool_input_norm: If True, apply input normalization to the teacher pool.
+        teacher_resolution: If provided, resize the teacher input to this resolution.
+            The user must ensure that the teacher backbone is compatible with this resolution,
+            and that the size of the student's and teacher's outputs are equal under this resolution.
     """
 
     mixup_alpha: float = 1.0
@@ -65,6 +68,7 @@ class DistillationConfig:
     student_pool_input_norm: bool = False
     teacher_pool_type: str | PoolType | None = None
     teacher_pool_input_norm: bool = False
+    teacher_resolution: Sequence[int] | None = None
 
     def __post_init__(self) -> None:
         if not 0 < self.mixup_alpha:
@@ -128,6 +132,13 @@ class Distillation(Task):
             out_dim=teacher_dim,
             pool_type=cast(PoolType | None, self.config.teacher_pool_type),
             input_norm=self.config.teacher_pool_input_norm,
+        )
+
+        # Resize teacher input if necessary
+        self.teacher_resize = (
+            nn.UpsamplingBilinear2d(cast(Any, self.config.teacher_resolution))
+            if self.config.teacher_resolution
+            else nn.Identity()
         )
 
         # Load teacher checkpoint and freeze parameters
@@ -197,7 +208,10 @@ class Distillation(Task):
         with torch.inference_mode():
             # generate ground truth with forward pass of teacher backbone
             self.teacher_backbone.eval()
-            target, target_cls_token = cast(Tuple[Tensor, Tensor], self.teacher_backbone(x, reshape=False))
+            target, target_cls_token = cast(
+                Tuple[Tensor, Tensor],
+                self.teacher_backbone(self.teacher_resize(x), reshape=False),
+            )
 
             if self.training and self.config.use_noise:
                 x = self.random_noise.apply_batched(x)
