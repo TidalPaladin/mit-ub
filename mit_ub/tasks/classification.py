@@ -12,7 +12,8 @@ from deep_helpers.tasks import Task
 from torch import Tensor
 
 from ..data import is_mixed, is_mixed_with_unknown, mixup, mixup_dense_label, sample_mixup_parameters
-from ..model import AdaptiveViTConfig, AnyModelConfig, ViTConfig
+from ..model import AdaptiveViTConfig, AnyModelConfig, ViT, ViTConfig
+from ..model.helpers import grid_to_tokens
 from ..model.layers.pool import PoolType
 from .distillation import DistillationConfig, DistillationWithProbe
 from .jepa import JEPAConfig, JEPAWithProbe
@@ -264,8 +265,17 @@ class ClassificationTask(Task):
 
     def forward(self, x: Tensor) -> Dict[str, Tensor]:
         with torch.set_grad_enabled(not self.config.freeze_backbone):
-            x = self.backbone(x, reshape=False)
-        cls = self.classification_head(x)
+            # ViTs
+            if isinstance(self.backbone, ViT):
+                _, cls_token = self.backbone(x, reshape=False)
+                pred = cls_token
+            # CNNs
+            else:
+                pred = self.backbone(x)
+                pred = grid_to_tokens(pred)
+                pred = self.student_pool(pred)
+
+        cls = self.classification_head(pred)
         return {"pred": cls.view(-1, 1)}
 
     def step(
@@ -284,12 +294,22 @@ class ClassificationTask(Task):
             mixup_weight = None
 
         # forward backbone
+        # NOTE: We don't use forward() here because step_classification_from_features()
+        # handles pooling and the head projection
         with torch.set_grad_enabled(not self.config.freeze_backbone and self.training):
-            features, cls_token = self.backbone(x)
+            # ViTs
+            if isinstance(self.backbone, ViT):
+                _, cls_token = self.backbone(x, reshape=False)
+                pred = cls_token
+            # CNNs
+            else:
+                pred = self.backbone(x)
+                pred = grid_to_tokens(pred)
+                pred = self.student_pool(pred)
 
         # step from features
         output = step_classification_from_features(
-            cls_token,
+            pred,
             y,
             self.classification_head,
             self.config,
