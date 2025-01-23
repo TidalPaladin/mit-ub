@@ -255,6 +255,7 @@ class TransformerConvEncoderLayer(TransformerEncoderLayer):
             bias=bias,
             layer_scale=layer_scale,
             stochastic_depth=stochastic_depth,
+            norm_type=norm_type,
         )
 
     def forward(self, x: Tensor, size: Tuple[int, ...]) -> Tensor:
@@ -314,6 +315,7 @@ class TransformerConvDecoderLayer(TransformerDecoderLayer):
             bias=bias,
             layer_scale=layer_scale,
             stochastic_depth=stochastic_depth,
+            norm_type=norm_type,
         )
 
     def forward(self, q: Tensor, kv: Tensor, size: Tuple[int, ...]) -> Tensor:

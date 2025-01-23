@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch.testing import assert_close
 
-from mit_ub.model.layers.mlp import mlp_forward
+from mit_ub.model.layers.mlp import NormType, mlp_forward
 from mit_ub.model.layers.pos_enc import RelativeFactorizedPosition, create_grid, relative_factorized_position_forward
 
 
@@ -56,10 +56,12 @@ class TestRelativeFactorizedPosition:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
-    def test_forward(self, device):
+    @pytest.mark.parametrize("norm", [False, True])
+    @pytest.mark.parametrize("norm_type", [NormType.LAYER_NORM, NormType.RMS_NORM])
+    def test_forward(self, device, norm, norm_type):
         C, D = 2, 16
         torch.random.manual_seed(0)
-        layer = RelativeFactorizedPosition(C, D).to(device)
+        layer = RelativeFactorizedPosition(C, D, norm=norm, norm_type=norm_type).to(device)
         out = layer((8, 8))
         L = 64
         assert out.shape == (1, L, D)
@@ -98,11 +100,15 @@ class TestRelativeFactorizedPosition:
         out2 = layer((8, 8))
         assert torch.allclose(out1, out2)
 
-    def test_reset_parameters(self, mocker):
+    @pytest.mark.parametrize("norm_type", [NormType.LAYER_NORM, NormType.RMS_NORM])
+    def test_reset_parameters(self, mocker, norm_type):
         C, D = 2, 16
         spy = mocker.spy(RelativeFactorizedPosition, "reset_parameters")
-        layer = RelativeFactorizedPosition(C, D, dropout=0.1)
+        layer = RelativeFactorizedPosition(C, D, dropout=0.1, norm=True, norm_type=norm_type)
         spy.assert_called_once()
+        if norm_type == NormType.LAYER_NORM:
+            assert layer.b_norm is not None
+
         weights_original = {name: param.clone() for name, param in layer.named_parameters()}
         layer.reset_parameters()
         weights_reset = {name: param for name, param in layer.named_parameters()}
@@ -116,4 +122,7 @@ class TestRelativeFactorizedPosition:
     def test_extra_repr(self):
         layer = RelativeFactorizedPosition(2, 16)
         result = str(layer)
-        assert result == "RelativeFactorizedPosition(in=2, hidden=64, out=16, dropout=0.0, act=relu2, norm=False)"
+        assert (
+            result
+            == "RelativeFactorizedPosition(in=2, hidden=64, out=16, dropout=0.0, act=relu2, norm=False, norm_type=layernorm)"
+        )

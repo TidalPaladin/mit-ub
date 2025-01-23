@@ -8,6 +8,7 @@ from torch import Tensor
 
 from ..activations import DEFAULT_POS_ENC_ACTIVATION, Activation
 from ..helpers import compile_backend, compile_is_disabled, max_autotune
+from .mlp import NormType
 
 
 @torch.compile(fullgraph=True, backend=compile_backend(), disable=compile_is_disabled())
@@ -57,6 +58,7 @@ def relative_factorized_position_forward(
     w_norm: Tensor | None,
     b_norm: Tensor | None,
     activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
+    norm_type: NormType = NormType.LAYER_NORM,
     dropout: float = 0.0,
     training: bool = False,
 ) -> Tensor:
@@ -80,6 +82,8 @@ def relative_factorized_position_forward(
             The bias tensor for the layer normalization
         activation:
             The activation function to be applied after the first linear layer
+        norm_type:
+            The type of normalization to be applied
         dropout:
             The dropout probability
 
@@ -105,7 +109,10 @@ def relative_factorized_position_forward(
     y = F.dropout(y, p=dropout, training=training, inplace=True)
     y = F.linear(y, w2, b2)
     if w_norm is not None:
-        y = F.layer_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm, bias=b_norm)
+        if norm_type == NormType.RMS_NORM:
+            y = F.rms_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm)
+        else:
+            y = F.layer_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm, bias=b_norm)
     return y
 
 
@@ -139,6 +146,7 @@ class RelativeFactorizedPosition(nn.Module):
         activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
         dim_feedforward: int | None = None,
         norm: bool = False,
+        norm_type: NormType = NormType.LAYER_NORM,
     ):
         super().__init__()
         self._dim_feedforward = dim_feedforward or int(4 * d_out)
@@ -148,9 +156,13 @@ class RelativeFactorizedPosition(nn.Module):
         self.w_out = nn.Parameter(torch.empty(d_out, self.dim_feedforward))
         self.b_in = nn.Parameter(torch.empty(self.dim_feedforward))
         self.b_out = nn.Parameter(torch.empty(d_out))
+        self.norm_type = norm_type
         if norm:
             self.w_norm = nn.Parameter(torch.empty(d_out))
-            self.b_norm = nn.Parameter(torch.empty(d_out))
+            if norm_type == NormType.RMS_NORM:
+                self.register_parameter("b_norm", None)
+            else:
+                self.b_norm = nn.Parameter(torch.empty(d_out))
         else:
             self.register_parameter("w_norm", None)
             self.register_parameter("b_norm", None)
@@ -186,7 +198,8 @@ class RelativeFactorizedPosition(nn.Module):
             f"out={self.d_out}, "
             f"dropout={self.dropout}, "
             f"act={self.activation.__name__}, "
-            f"norm={self.w_norm is not None}"
+            f"norm={self.w_norm is not None}, "
+            f"norm_type={self.norm_type}"
         )
 
     def forward(self, dims: Sequence[int]) -> Tensor:
@@ -199,6 +212,7 @@ class RelativeFactorizedPosition(nn.Module):
             self.w_norm,
             self.b_norm,
             self.activation,
+            self.norm_type,
             dropout=self.dropout,
             training=self.training,
         )
