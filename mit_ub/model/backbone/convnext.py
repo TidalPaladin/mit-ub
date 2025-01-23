@@ -124,14 +124,17 @@ class ConvNext(nn.Module):
             ]
         )
 
-        self.embedding_norm = (
-            nn.LayerNorm(self.config.dim)
-            if self.config.norm_type == NormType.LAYER_NORM
-            else nn.RMSNorm(self.config.dim)
-        )
+        self.embedding_norm = self.create_norm()
 
         if config.checkpoint:
             set_checkpointing(self, config.checkpoint)
+
+    def create_norm(self, **kwargs) -> nn.Module:
+        return (
+            nn.LayerNorm(self.config.dim, **kwargs)
+            if self.config.norm_type == NormType.LAYER_NORM
+            else nn.RMSNorm(self.config.dim, **kwargs)
+        )
 
     def create_head(
         self,
@@ -167,7 +170,7 @@ class ConvNext(nn.Module):
 
         # Input norm
         if input_norm and (pool_type is not None or use_mlp):
-            layer.add_module("input_norm", nn.LayerNorm(self.config.dim))
+            layer.add_module("input_norm", self.create_norm())
 
         # Pooling layer
         if pool_type is not None:
@@ -198,7 +201,7 @@ class ConvNext(nn.Module):
             layer.add_module("mlp", mlp)
 
         # Output norm
-        layer.add_module("output_norm", nn.LayerNorm(self.config.dim))
+        layer.add_module("output_norm", self.create_norm())
 
         # Output linear
         linear = nn.Linear(self.config.dim, out_dim)

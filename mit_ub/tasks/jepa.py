@@ -318,6 +318,7 @@ class JEPA(Task):
             self.backbone.config.dim,
             dropout=0.1,
             norm=True,
+            norm_type=self.backbone.config.norm_type,
         )
 
         # JEPA predictor

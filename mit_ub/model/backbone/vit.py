@@ -59,9 +59,7 @@ class ViT(nn.Module):
 
         # Transformer blocks
         self.blocks = nn.ModuleList([self.create_encoder_layer(i) for i in range(config.depth)])
-        self.embedding_norm = (
-            nn.LayerNorm(config.dim) if config.norm_type == NormType.LAYER_NORM else nn.RMSNorm(config.dim)
-        )
+        self.embedding_norm = self.create_norm()
         if config.checkpoint:
             set_checkpointing(self, config.checkpoint)
 
@@ -146,6 +144,13 @@ class ViT(nn.Module):
             set_checkpointing(layer, self.config.checkpoint)
         return layer
 
+    def create_norm(self, **kwargs) -> nn.Module:
+        return (
+            nn.LayerNorm(self.config.dim, **kwargs)
+            if self.config.norm_type == NormType.LAYER_NORM
+            else nn.RMSNorm(self.config.dim, **kwargs)
+        )
+
     def create_head(
         self,
         out_dim: int,
@@ -180,7 +185,7 @@ class ViT(nn.Module):
 
         # Input norm
         if input_norm and (pool_type is not None or use_mlp):
-            layer.add_module("input_norm", nn.LayerNorm(self.config.dim))
+            layer.add_module("input_norm", self.create_norm())
 
         # Pooling layer
         if pool_type is not None:
@@ -211,7 +216,7 @@ class ViT(nn.Module):
             layer.add_module("mlp", mlp)
 
         # Output norm
-        layer.add_module("output_norm", nn.LayerNorm(self.config.dim))
+        layer.add_module("output_norm", self.create_norm())
 
         # Output linear
         linear = nn.Linear(self.config.dim, out_dim)

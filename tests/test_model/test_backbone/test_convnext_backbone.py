@@ -3,13 +3,14 @@ from dataclasses import replace
 
 import pytest
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import yaml
 
 from mit_ub.model import ConvNext
 from mit_ub.model.activations import relu2
 from mit_ub.model.backbone.convnext import ConvNextConfig
-from mit_ub.model.layers.mlp import MLP
+from mit_ub.model.layers.mlp import MLP, NormType
 from mit_ub.model.layers.pool import PoolType
 
 
@@ -220,3 +221,16 @@ class TestConvNext:
 
         # Ensure this is present for targeting weight decay
         assert isinstance(head.get_submodule("mlp"), MLP)
+
+    @pytest.mark.parametrize("norm_type, exp", [(NormType.LAYER_NORM, nn.LayerNorm), (NormType.RMS_NORM, nn.RMSNorm)])
+    def test_norms(self, config, norm_type, exp):
+        config = replace(config, norm_type=norm_type)
+        model = ConvNext(config)
+        assert isinstance(model.embedding_norm, exp), f"Embedding norm is not {exp}"
+        for layer in model.modules():
+            if hasattr(layer, "norm_type"):
+                assert layer.norm_type == norm_type, f"Layer norm type is not {norm_type}"
+
+        head = model.create_head(out_dim=10, pool_type=PoolType.ATTENTION)
+        assert isinstance(head.get_submodule("input_norm"), exp), f"Head input norm is not {exp}"
+        assert isinstance(head.get_submodule("output_norm"), exp), f"Head output norm is not {exp}"
