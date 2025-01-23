@@ -138,7 +138,7 @@ class MLP(nn.Module, Checkpointable):
 
         if norm:
             self.w_norm = nn.Parameter(torch.empty(in_features))
-            if norm_type == NormType.RMS_NORM:
+            if norm_type == NormType.LAYER_NORM:
                 self.b_norm = nn.Parameter(torch.empty(in_features))
             else:
                 self.register_parameter("b_norm", None)

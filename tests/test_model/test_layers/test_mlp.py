@@ -76,12 +76,17 @@ class TestMLP:
 
     @pytest.mark.parametrize("gate_activation", [None, F.relu])
     @pytest.mark.parametrize("layer_scale", [None, 1.0])
-    def test_reset_parameters(self, mocker, gate_activation, layer_scale):
+    @pytest.mark.parametrize("norm_type", [NormType.LAYER_NORM, NormType.RMS_NORM])
+    def test_reset_parameters(self, mocker, gate_activation, layer_scale, norm_type):
         torch.random.manual_seed(0)
         D = 32
         spy = mocker.spy(MLP, "reset_parameters")
-        layer = MLP(D, D, D, gate_activation=gate_activation, layer_scale=layer_scale)
+        layer = MLP(D, D, D, gate_activation=gate_activation, layer_scale=layer_scale, norm=True, norm_type=norm_type)
         spy.assert_called_once()
+
+        if norm_type == NormType.LAYER_NORM:
+            assert layer.w_norm is not None
+            assert layer.b_norm is not None
 
         weight_init = {k: v.clone() for k, v in layer.named_parameters()}
         layer.reset_parameters()

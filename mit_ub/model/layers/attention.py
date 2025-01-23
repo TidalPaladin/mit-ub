@@ -193,7 +193,7 @@ class MultiHeadAttention(nn.Module, Checkpointable):
         # Fused pre-norm
         if norm:
             self.w_norm = nn.Parameter(torch.empty(embed_dim))
-            if norm_type == NormType.RMS_NORM:
+            if norm_type == NormType.LAYER_NORM:
                 self.b_norm = nn.Parameter(torch.empty(embed_dim))
             else:
                 self.register_parameter("b_norm", None)
