@@ -159,7 +159,8 @@ class TestMultiHeadAttention:
     )
     @pytest.mark.parametrize("norm", [False, True])
     @pytest.mark.parametrize("layer_scale", [None, 1.0])
-    def test_reset_parameters(self, norm, layer_scale, num_heads, num_kv_heads, Dq, Dk):
+    @pytest.mark.parametrize("norm_type", [NormType.LAYER_NORM, NormType.RMS_NORM])
+    def test_reset_parameters(self, norm, layer_scale, num_heads, num_kv_heads, Dq, Dk, norm_type):
         model = MultiHeadAttention(
             Dq,
             num_heads,
@@ -168,7 +169,12 @@ class TestMultiHeadAttention:
             kdim=Dk if Dk != Dq else None,
             vdim=Dk if Dk != Dq else None,
             layer_scale=layer_scale,
+            norm_type=norm_type,
+            norm=True,
         )
+        if norm_type == NormType.LAYER_NORM:
+            assert model.w_norm is not None
+            assert model.b_norm is not None
 
         weights_original = {name: param.clone() for name, param in model.named_parameters()}
         model.reset_parameters()
