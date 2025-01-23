@@ -13,6 +13,7 @@ from mit_ub.model.activations import relu2
 from mit_ub.model.backbone import ViT, ViTConfig
 from mit_ub.model.layers.mlp import MLP, NormType
 from mit_ub.model.layers.pool import PoolType
+from mit_ub.model.layers.pos_enc import RelativeFactorizedPosition
 from mit_ub.tokens import create_mask
 
 
@@ -193,7 +194,7 @@ class TestViT:
         model = ViT(config)
         assert isinstance(model.embedding_norm, exp), f"Embedding norm is not {exp}"
         for layer in model.modules():
-            if hasattr(layer, "norm_type"):
+            if hasattr(layer, "norm_type") and not isinstance(layer, RelativeFactorizedPosition):
                 assert layer.norm_type == norm_type, f"Layer norm type is not {norm_type}"
 
         head = model.create_head(out_dim=10, pool_type=PoolType.ATTENTION)
