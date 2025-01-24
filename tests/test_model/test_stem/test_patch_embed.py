@@ -45,12 +45,14 @@ class TestPatchEmbed2d:
             pytest.param("cuda", marks=pytest.mark.cuda),
         ],
     )
-    def test_forward(self, device):
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    def test_forward(self, device, dtype):
         B, C, H, W = 2, 3, 64, 64
         D_model = 64
         layer = PatchEmbed2d(C, D_model, (4, 4)).to(device)
         x = torch.randn(B, C, H, W, device=device)
-        y = layer(x)
+        with torch.autocast(device_type=device, dtype=dtype):
+            y = layer(x)
         assert y.shape == (B, math.prod((H // 4, W // 4)), D_model)
 
     @pytest.mark.parametrize(

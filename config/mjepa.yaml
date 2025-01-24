@@ -66,6 +66,7 @@ fit:
           stochastic_depth: 0.25
           layer_scale: 0.1 # Layer scale can stabilize early training
           qk_norm: false
+          norm_type: "RMS_NORM"
 
           # This MoE config does comparable to the default config
           #moe_layers: [15]
@@ -145,7 +146,7 @@ fit:
         init_args:
           lr: 0.001
           weight_decay: 0.1
-          betas: [0.85, 0.999]
+          betas: [0.85, 0.95]
           precondition_frequency: 10
       lr_interval: "step"
       lr_scheduler_init:
@@ -186,6 +187,7 @@ fit:
         # Multiplicative weights (no weight decay)
         - params:
             - "LayerNorm"
+            - "RMSNorm"
             - "w_norm"
             - "w_qk_norm"
             - "siglip_t"

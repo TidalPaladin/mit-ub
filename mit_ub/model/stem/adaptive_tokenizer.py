@@ -52,6 +52,7 @@ def adaptive_patch_embed_forward(
     activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
     eps: float = 1e-5,
     training: bool = False,
+    high_precision: bool = True,
 ) -> Tuple[Tensor, Tensor]:
     # Rearrange into patches
     dims = tuple(dim_size // dim_stride for dim_size, dim_stride in zip(x.shape[2:], stride))
@@ -65,7 +66,8 @@ def adaptive_patch_embed_forward(
         raise ValueError(f"Invalid input dimension: {x.ndim}")
 
     # Project and patch
-    x = F.linear(x, w_patch, b_patch)
+    with torch.autocast(device_type=x.device.type, dtype=torch.float32, enabled=high_precision):
+        x = F.linear(x, w_patch, b_patch)
 
     # Add position encoding
     pos = relative_factorized_position_forward(
@@ -161,7 +163,9 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         )
 
     def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
-        return adaptive_patch_embed_forward(
+        mm_precision = torch.get_float32_matmul_precision()
+        torch.set_float32_matmul_precision("high")
+        result = adaptive_patch_embed_forward(
             x,
             self.target_tokenized_shape,
             self._pool_type,
@@ -180,6 +184,8 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
             activation=self.pos_enc.activation,
             training=self.training,
         )
+        torch.set_float32_matmul_precision(mm_precision)
+        return result
 
 
 class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
@@ -247,7 +253,9 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         )
 
     def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
-        return adaptive_patch_embed_forward(
+        mm_precision = torch.get_float32_matmul_precision()
+        torch.set_float32_matmul_precision("high")
+        result = adaptive_patch_embed_forward(
             x,
             self.target_tokenized_shape,
             self._pool_type,
@@ -266,3 +274,5 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
             activation=self.pos_enc.activation,
             training=self.training,
         )
+        torch.set_float32_matmul_precision(mm_precision)
+        return result

@@ -79,6 +79,7 @@ def patch_embed_forward(
     activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
     eps: float = 1e-5,
     training: bool = False,
+    high_precision: bool = True,
 ) -> Tensor:
     dims = tuple(dim_size // dim_stride for dim_size, dim_stride in zip(x.shape[2:], stride))
     if x.ndim == 4:
@@ -90,7 +91,11 @@ def patch_embed_forward(
     else:
         raise ValueError(f"Invalid input dimension: {x.ndim}")
 
-    x = F.linear(x, w_patch, b_patch)
+    # For certain inputs (notably mammograms), BF16 can lose fine detail. To mitigate this, run the stem projection
+    # in FP32.
+    with torch.autocast(device_type=x.device.type, dtype=torch.float32, enabled=high_precision):
+        x = F.linear(x, w_patch, b_patch)
+
     pos = relative_factorized_position_forward(
         dims, w1_pos, b1_pos, w2_pos, b2_pos, w_pos_norm, b_pos_norm, activation, dropout=dropout, training=training
     )
@@ -153,7 +158,9 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Dims2D]):
         return f"in={self.in_channels}, " f"embed={self.embed_dim}, " f"patch_size={self.patch_size}"
 
     def forward(self, x: Tensor) -> Tensor:
-        return patch_embed_forward(
+        mm_precision = torch.get_float32_matmul_precision()
+        torch.set_float32_matmul_precision("high")
+        result = patch_embed_forward(
             x,
             self.w_in,
             self.b_in,
@@ -170,6 +177,8 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Dims2D]):
             dropout=self.pos_enc.dropout,
             training=self.training,
         )
+        torch.set_float32_matmul_precision(mm_precision)
+        return result
 
 
 class PatchEmbed3d(nn.Module, PatchEmbed[Dims3D]):
@@ -225,7 +234,9 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Dims3D]):
         return f"in={self.in_channels}, " f"embed={self.embed_dim}, " f"patch_size={self.patch_size}"
 
     def forward(self, x: Tensor) -> Tensor:
-        return patch_embed_forward(
+        mm_precision = torch.get_float32_matmul_precision()
+        torch.set_float32_matmul_precision("high")
+        result = patch_embed_forward(
             x,
             self.w_in,
             self.b_in,
@@ -242,3 +253,5 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Dims3D]):
             activation=self.pos_enc.activation,
             training=self.training,
         )
+        torch.set_float32_matmul_precision(mm_precision)
+        return result
