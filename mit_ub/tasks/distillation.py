@@ -265,6 +265,8 @@ class Distillation(Task):
             "pred": pred,
             "pred_proj": pred_proj,
             "target": target,
+            "pred_cls_token": pred_cls_token,
+            "target_cls_token": target_cls_token,
             "mixup_weight": mixup_weight,
         }
         return output
@@ -282,7 +284,7 @@ class DistillationWithProbe(Distillation, ABC):
         teacher_config: AnyModelConfig,
         teacher_checkpoint: Path,
         distillation_config: DistillationConfig = DistillationConfig(),
-        probe_key: str = "pred",
+        probe_key: str = "pred_cls_token",
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
         lr_interval: str = "epoch",
