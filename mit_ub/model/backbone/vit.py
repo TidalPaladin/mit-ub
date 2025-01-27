@@ -61,7 +61,7 @@ class ViT(nn.Module, SupportsSafeTensors):
             if config.activation != "identity"
             else (
                 get_activation(config.gate_activation)
-                if config.gate_activation not in (None, "identity")
+                if config.gate_activation is not None and config.gate_activation != "identity"
                 else DEFAULT_POS_ENC_ACTIVATION
             )
         )
