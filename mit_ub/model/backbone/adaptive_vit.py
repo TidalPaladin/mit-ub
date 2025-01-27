@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, Self, Sequence, Tuple, cast
+from typing import Any, ClassVar, Dict, Self, Sequence, Tuple, Type, cast
 
 import torch
 import torch.nn as nn
@@ -55,6 +55,7 @@ class AdaptiveViTConfig(ViTConfig):
 class AdaptiveViT(ViT):
     stem: AdaptiveTokenizer2d | AdaptiveTokenizer3d
     config: AdaptiveViTConfig
+    CONFIG_TYPE: ClassVar[Type[AdaptiveViTConfig]] = AdaptiveViTConfig
 
     def __init__(self, config: AdaptiveViTConfig):
         super().__init__(config)

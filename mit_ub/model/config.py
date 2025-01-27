@@ -1,12 +1,17 @@
 import json
+import tarfile
+import tempfile
 from abc import abstractmethod
 from copy import copy
 from dataclasses import asdict, dataclass
+from os import PathLike
 from pathlib import Path
-from typing import Callable, List, Self, Sequence, Type, TypeVar
+from typing import Callable, ClassVar, List, Protocol, Self, Sequence, Type, TypeVar
 
 import torch.nn as nn
 import yaml
+from deep_helpers.helpers import load_checkpoint
+from safetensors.torch import load_file
 
 from .activations import ACTIVATIONS, get_activation
 
@@ -20,6 +25,7 @@ class ModelConfig:
 
     @classmethod
     def from_file(cls, path: Path) -> Self:
+        r"""Read a config from a JSON or YAML file."""
         match path.suffix.lower():
             case ".json":
                 with open(path, "r") as f:
@@ -31,6 +37,38 @@ class ModelConfig:
                 raise ValueError(f"Unsupported file extension: {path.suffix}")
 
         return cls(**data)
+
+    @classmethod
+    def from_tar(cls, path: Path) -> Self:
+        r"""Read a config from `config.{yaml,json,yml}` inside a tar.gz file.
+
+        Args:
+            path: Path to a tar.gz file containing a a config file.
+
+        """
+        if not path.is_file():
+            raise FileNotFoundError(f"Checkpoint file not found at {path}")  # pragma: no cover
+
+        POSSIBLE_FILES = (Path("config.yaml"), Path("config.json"), Path("config.yml"))
+        is_yaml = False
+        with tarfile.open(path, "r:gz") as tar:
+            for file in POSSIBLE_FILES:
+                try:
+                    config_file = tar.extractfile(str(file))
+                    if config_file is not None:
+                        is_yaml = file.suffix in (".yaml", ".yml")
+                        break
+                except KeyError:
+                    continue
+            else:
+                raise IOError(f"Could not load {POSSIBLE_FILES} from checkpoint")  # pragma: no cover
+
+            if is_yaml:
+                config = yaml.safe_load(config_file)
+            else:
+                config = json.load(config_file)
+
+        return cls(**config)
 
     def _prepare_for_save(self) -> Self:
         config = copy(self)
@@ -123,3 +161,65 @@ def convert_sequences(config: T, container: Type[Sequence]) -> T:
         assert isinstance(getattr(config, key), container)
 
     return config
+
+
+DEFAULT_CHECKPOINT_NAME = "checkpoint.safetensors"
+
+
+class SupportsSafeTensors(Protocol):
+    CONFIG_TYPE: ClassVar[Type[ModelConfig]]
+
+    def load_safetensors(self, path: PathLike, strict: bool = True) -> Self:
+        r"""Load a model from a safetensors file.
+
+        Args:
+            path: Path to a safetensors file.
+            strict: When `False`, try to coerce parameter shapes and ignore missing/extra keys.
+
+        Returns:
+            The model with the checkpoint loaded.
+        """
+        assert isinstance(self, nn.Module), "This method is only supported for nn.Module instances"
+        path = Path(path)
+        for p in self.parameters():
+            device = p.device
+            break
+        else:
+            raise ValueError("No parameters found in model")
+
+        state_dict = load_file(path, device=str(device))
+        load_checkpoint(self, state_dict, strict)
+        return self
+
+    @classmethod
+    def load_tar(
+        cls,
+        path: PathLike,
+        strict: bool = True,
+        checkpoint_name: str = DEFAULT_CHECKPOINT_NAME,
+    ) -> Self:
+        r"""Load a model from a tar.gz file.
+
+        Args:
+            path: Path to a tar.gz file containing a `config.{yaml,json,yml}` and a `checkpoint.safetensors` file.
+            strict: When `False`, try to coerce parameter shapes and ignore missing/extra keys.
+            checkpoint_name: Name of the checkpoint file inside the tar.gz file, if different from `checkpoint.safetensors`.
+
+        Returns:
+            The model with the checkpoint loaded.
+        """
+        # First read the config and use it to instantiate the model
+        path = Path(path)
+        config = cls.CONFIG_TYPE.from_tar(path)
+        model = config.instantiate()
+
+        # Then load the checkpoint
+        with tarfile.open(path, "r:gz") as tar:
+            # Reading from tar gives a byte stream, which we put into a temp file for safe_open
+            stream = tar.extractfile(checkpoint_name)
+            if stream is None:
+                raise IOError(f"Could not load {checkpoint_name} from tar")
+            with tempfile.NamedTemporaryFile() as tmp:
+                tmp.write(stream.read())
+                tmp.flush()
+                return model.load_safetensors(Path(tmp.name), strict)

@@ -12,6 +12,7 @@ from .backbone import (
     ViT,
     ViTConfig,
 )
+from .config import ModelConfig, SupportsSafeTensors
 from .helpers import compile_is_disabled
 from .layers.transformer import TransformerDecoderLayer, TransformerEncoderLayer
 
@@ -33,4 +34,6 @@ __all__ = [
     "ConvViT",
     "ConvNextConfig",
     "AnyModelConfig",
+    "ModelConfig",
+    "SupportsSafeTensors",
 ]
