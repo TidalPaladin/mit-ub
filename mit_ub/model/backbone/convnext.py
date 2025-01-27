@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import ClassVar, List, Sequence, Type, cast
 
+import torch
 import torch.nn as nn
 from torch import Tensor
 
@@ -214,7 +215,11 @@ class ConvNext(nn.Module, SupportsSafeTensors):
 
     def forward(self, x: Tensor, reshape: bool = True) -> Tensor:
         # Patch embed stem
-        x = self.stem(x)
+        with torch.autocast(device_type=x.device.type, dtype=torch.float32):
+            mm_precision = torch.get_float32_matmul_precision()
+            torch.set_float32_matmul_precision("high")
+            x = self.stem(x)
+            torch.set_float32_matmul_precision(mm_precision)
         size = cast(Dims2D, x.shape[2:])
 
         # Convert grid to token sequence and apply norm
