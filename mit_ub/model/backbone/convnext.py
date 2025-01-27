@@ -1,11 +1,11 @@
 from dataclasses import dataclass, field
-from typing import List, Sequence, cast
+from typing import ClassVar, List, Sequence, Type, cast
 
 import torch.nn as nn
 from torch import Tensor
 
 from ..activations import DEFAULT_MLP_ACTIVATION_STR, DEFAULT_MLP_GATE_ACTIVATION_STR, Activation
-from ..config import ModelConfig
+from ..config import ModelConfig, SupportsSafeTensors
 from ..helpers import Dims2D, grid_to_tokens, set_checkpointing, tokens_to_grid
 from ..layers.convnext import ConvNextBlock
 from ..layers.mlp import MLP, NormType
@@ -51,7 +51,9 @@ class ConvNextConfig(ModelConfig):
         return max(n for n in range(16, self.dim + 1, 16) if self.dim % n == 0)
 
 
-class ConvNext(nn.Module):
+class ConvNext(nn.Module, SupportsSafeTensors):
+    CONFIG_TYPE: ClassVar[Type[ConvNextConfig]] = ConvNextConfig
+
     def __init__(self, config: ConvNextConfig):
         super().__init__()
         self.config = config
