@@ -6,11 +6,12 @@ import torch.nn as nn
 from torch import Tensor
 
 from ...tokens import apply_mask, create_mask
-from ..activations import DEFAULT_MLP_ACTIVATION_STR, DEFAULT_MLP_GATE_ACTIVATION_STR, Activation
+from ..activations import DEFAULT_MLP_ACTIVATION_STR, DEFAULT_MLP_GATE_ACTIVATION_STR, Activation, get_activation
 from ..config import ModelConfig, SupportsSafeTensors
 from ..helpers import set_checkpointing
 from ..layers.mlp import MLP, NormType
 from ..layers.pool import PoolType, get_global_pooling_layer
+from ..layers.pos_enc import DEFAULT_POS_ENC_ACTIVATION
 from ..layers.transformer import TransformerDecoderLayer, TransformerEncoderLayer
 from ..stem import PatchEmbed2d, PatchEmbed3d
 from .convnext import tokens_to_grid
@@ -55,8 +56,19 @@ class ViT(nn.Module, SupportsSafeTensors):
         self.cls_token = nn.Parameter(torch.randn(config.dim))
 
         # Stem tokenizer
+        stem_act = (
+            get_activation(config.activation)
+            if config.activation != "identity"
+            else (
+                get_activation(config.gate_activation)
+                if config.gate_activation is not None and config.gate_activation != "identity"
+                else DEFAULT_POS_ENC_ACTIVATION
+            )
+        )
         stem_type = PatchEmbed2d if isinstance(config.patch_size, int) or len(config.patch_size) == 2 else PatchEmbed3d
-        self.stem = stem_type(config.in_channels, config.dim, cast(Any, config.patch_size), dropout=config.dropout)
+        self.stem = stem_type(
+            config.in_channels, config.dim, cast(Any, config.patch_size), dropout=config.dropout, activation=stem_act
+        )
 
         # Transformer blocks
         self.blocks = nn.ModuleList([self.create_encoder_layer(i) for i in range(config.depth)])
