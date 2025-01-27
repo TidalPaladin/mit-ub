@@ -7,31 +7,13 @@ from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
 from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
-from ..helpers import (
-    Dims2D,
-    compile_backend,
-    compile_is_disabled,
-    grid_to_tokens,
-    max_autotune,
-    to_tuple,
-    tokens_to_grid,
-)
+from ..helpers import Dims2D, grid_to_tokens, to_tuple, tokens_to_grid
 from ..layers.layer_scale import LayerScale
 from ..layers.mlp import MLP, NORM_EPS, NormType, mlp_forward
 from ..layers.stochastic_depth import apply_stochastic_depth, stochastic_depth_indices, unapply_stochastic_depth
 
 
-@torch.compile(
-    fullgraph=True,
-    backend=compile_backend(),
-    options={
-        "max_autotune": max_autotune(),
-        "epilogue_fusion": True,
-        "shape_padding": True,
-        "triton.cudagraph_trees": max_autotune(),
-    },
-    disable=compile_is_disabled(),
-)
+# NOTE: For some reason the DW conv portion of this won't torch.compile.
 def convnext_block_forward_2d(
     x: Tensor,
     size: Dims2D,
@@ -52,18 +34,11 @@ def convnext_block_forward_2d(
     training: bool = False,
     norm_type: NormType = NormType.LAYER_NORM,
     w_layer_scale: Tensor | None = None,
-    stochastic_depth: float = 0.0,
+    stride: Tuple[int, ...] = (1,),
 ) -> Tensor:
-    B = x.shape[0]
-    if stochastic_depth > 0.0 and training:
-        indices = stochastic_depth_indices(x, stochastic_depth)
-        x = apply_stochastic_depth(x, indices)
-    else:
-        indices = None
-
     # Depthwise convolution
     y = tokens_to_grid(x, size)
-    y = F.conv2d(y, conv_w, conv_b, stride=1, padding=conv_w.shape[-1] // 2, groups=y.shape[1])
+    y = F.conv2d(y, conv_w, conv_b, stride=stride, padding=conv_w.shape[-1] // 2, groups=y.shape[1])
     y = grid_to_tokens(y)
 
     # LayerNorm, MLP
@@ -88,11 +63,6 @@ def convnext_block_forward_2d(
     if w_layer_scale is not None:
         y = y * w_layer_scale
 
-    # Unapply stochastic depth
-    if stochastic_depth > 0.0 and training:
-        assert indices is not None
-        y = unapply_stochastic_depth(y, indices, B)
-
     return y
 
 
@@ -110,13 +80,14 @@ class ConvNextBlock(nn.Module):
         layer_scale: float | None = None,
         stochastic_depth: float = 0.0,
         norm_type: NormType = NormType.LAYER_NORM,
+        stride: int = 1,
     ):
         super().__init__()
         _kernel_size = to_tuple(kernel_size, 2)
-        padding = cast(Tuple[int, int], tuple(k // 2 for k in _kernel_size))
+        padding = cast(Tuple[int, int], tuple((k - stride) // 2 for k in _kernel_size))
         self._dim = dim
         self._dim_feedforward = dim_feedforward or int(dim * 4)
-        self.conv_dw = nn.Conv2d(dim, dim, kernel_size=_kernel_size, stride=1, padding=padding, groups=dim)
+        self.conv_dw = nn.Conv2d(dim, dim, kernel_size=_kernel_size, stride=stride, padding=padding, groups=dim)
         self.mlp = MLP(
             dim,
             self.dim_feedforward,
@@ -154,9 +125,23 @@ class ConvNextBlock(nn.Module):
         return self.layer_scale.gamma if self.layer_scale is not None else None
 
     def forward(self, x: Tensor, size: Dims2D) -> Tensor:
+        x_orig = x
+        B = x.shape[0]
+        if self.stochastic_depth > 0.0 and self.training:
+            indices = stochastic_depth_indices(x, self.stochastic_depth)
+            x = apply_stochastic_depth(x, indices)
+        else:
+            indices = None
+
         if self.training and self.checkpoint:
+            # Workaround for checkpointing with compile + DDP
+            fn = (
+                torch.compiler.disable(convnext_block_forward_2d)
+                if torch.distributed.is_initialized()
+                else convnext_block_forward_2d
+            )
             y = checkpoint(
-                convnext_block_forward_2d,
+                fn,
                 x,
                 size,
                 self.conv_dw.weight,
@@ -176,7 +161,7 @@ class ConvNextBlock(nn.Module):
                 self.training,
                 self.mlp.norm_type,
                 self.w_layer_scale,
-                self.stochastic_depth,
+                stride=self.conv_dw.stride,
                 use_reentrant=False,
             )
             assert isinstance(y, Tensor)
@@ -201,6 +186,10 @@ class ConvNextBlock(nn.Module):
                 self.training,
                 self.mlp.norm_type,
                 self.w_layer_scale,
-                self.stochastic_depth,
+                self.conv_dw.stride,
             )
-        return x + y
+
+        if indices is not None:
+            y = unapply_stochastic_depth(y, indices, B, training=self.training)
+
+        return x_orig + y
