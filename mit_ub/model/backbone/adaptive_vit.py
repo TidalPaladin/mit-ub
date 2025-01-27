@@ -7,6 +7,7 @@ from torch import Tensor
 from torch.nn import functional as F
 
 from ...tokens import apply_mask, create_mask, mask_is_ragged, unapply_mask
+from ..activations import DEFAULT_POS_ENC_ACTIVATION, get_activation
 from ..helpers import compile_is_disabled, set_checkpointing
 from ..layers.layer_scale import LayerScale
 from ..stem import AdaptiveTokenizer2d, AdaptiveTokenizer3d, PoolType
@@ -57,6 +58,15 @@ class AdaptiveViT(ViT):
 
     def __init__(self, config: AdaptiveViTConfig):
         super().__init__(config)
+        stem_act = (
+            get_activation(config.activation)
+            if config.activation != "identity"
+            else (
+                get_activation(config.gate_activation)
+                if config.gate_activation not in (None, "identity")
+                else DEFAULT_POS_ENC_ACTIVATION
+            )
+        )
         stem_type = (
             AdaptiveTokenizer2d
             if isinstance(config.patch_size, int) or len(config.patch_size) == 2
@@ -69,6 +79,7 @@ class AdaptiveViT(ViT):
             cast(Any, config.target_shape),
             dropout=config.dropout,
             pool_type=PoolType.AVG,
+            activation=stem_act,
         )
 
         # Convert ViT blocks into decoder layers that cross-attend to the dynamic tokens.

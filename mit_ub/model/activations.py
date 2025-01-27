@@ -18,6 +18,13 @@ def relu2(x: Tensor) -> Tensor:
     return y * y
 
 
+@torch.compile(fullgraph=True, backend=compile_backend(), disable=compile_is_disabled())
+def silu2(x: Tensor) -> Tensor:
+    r"""Computes squared SiLU of an input, accounting for the sign of the input."""
+    y = F.silu(x)
+    return y.pow(2) * y.sign()
+
+
 def identity(x: Tensor) -> Tensor:
     return x
 
@@ -40,6 +47,7 @@ ACTIVATIONS: Dict[str, Activation] = {
     "tanh": F.tanh,
     "identity": identity,
     "relu2": relu2,
+    "silu2": silu2,
 }
 
 
@@ -55,6 +63,7 @@ __all__ = [
     "ACTIVATIONS",
     "identity",
     "relu2",
+    "silu2",
     "DEFAULT_POS_ENC_ACTIVATION_STR",
     "DEFAULT_MLP_ACTIVATION_STR",
     "DEFAULT_MLP_GATE_ACTIVATION_STR",
