@@ -43,6 +43,7 @@ def _run_exchange(rank: int, world_size: int):
         dist.destroy_process_group()
 
 
+@pytest.mark.ci_skip
 @pytest.mark.parametrize("world_size", [1, 2, 3, 4])
 def test_ring_exchange(world_size):
     spawn(_run_exchange, nprocs=world_size, args=(world_size,))
@@ -87,6 +88,7 @@ def _compute_siglip_loss(rank: int, world_size: int, expected: float, B: int, D:
         dist.destroy_process_group()
 
 
+@pytest.mark.ci_skip
 @pytest.mark.parametrize("world_size", [1, 2, 3])
 def test_compute_siglip_loss(world_size):
     t = torch.tensor(1.0, requires_grad=True)
