@@ -1,5 +1,7 @@
 import json
+import tarfile
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -7,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import yaml
+from safetensors.torch import save_file
 from torch.testing import assert_close
 
 from mit_ub.model.activations import relu2
@@ -200,3 +203,47 @@ class TestViT:
         head = model.create_head(out_dim=10, pool_type=PoolType.ATTENTION)
         assert isinstance(head.get_submodule("input_norm"), exp), f"Head input norm is not {exp}"
         assert isinstance(head.get_submodule("output_norm"), exp), f"Head output norm is not {exp}"
+
+    @pytest.fixture
+    def checkpoint_model(self, config):
+        return ViT(config)
+
+    @pytest.fixture
+    def safetensors_checkpoint(self, tmp_path, checkpoint_model):
+        model = checkpoint_model
+        checkpoint_path = tmp_path / "checkpoint.safetensors"
+        state_dict = model.state_dict()
+        save_file(state_dict, checkpoint_path)
+        return checkpoint_path
+
+    @pytest.fixture
+    def tar_checkpoint(self, tmp_path, safetensors_checkpoint, checkpoint_model):
+        model = checkpoint_model
+        model.config.save(tmp_path / "config.yaml")
+
+        tar_path = tmp_path / "checkpoint.tar.gz"
+        with tarfile.open(tar_path, "w:gz") as tar:
+            tar.add(safetensors_checkpoint, arcname="checkpoint.safetensors")
+            tar.add(tmp_path / "config.yaml", arcname="config.yaml")
+
+        return tar_path
+
+    def test_load_safetensors(self, checkpoint_model: nn.Module, safetensors_checkpoint: Path):
+        # Fill with an irregular value
+        for param in checkpoint_model.parameters():
+            param.data.fill_(3.0)
+
+        # Load should update the irregular value back to normal
+        loaded = checkpoint_model.load_safetensors(safetensors_checkpoint)
+        for param in loaded.parameters():
+            assert not (param.data == 3.0).all()
+
+    def test_load_tar(self, checkpoint_model: nn.Module, tar_checkpoint: Path):
+        # Fill with an irregular value
+        for param in checkpoint_model.parameters():
+            param.data.fill_(3.0)
+
+        # Load should update the irregular value back to normal
+        loaded = ViT.load_tar(tar_checkpoint)
+        for param in loaded.parameters():
+            assert not (param.data == 3.0).all()

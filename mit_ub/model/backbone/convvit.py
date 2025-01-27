@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, Self, Tuple, cast
+from typing import Any, ClassVar, Dict, Self, Tuple, Type, cast
 
 import torch
 import torch.nn as nn
@@ -22,6 +22,7 @@ class ConvViTConfig(AdaptiveViTConfig):
 
 class ConvViT(AdaptiveViT):
     config: ConvViTConfig
+    CONFIG_TYPE: ClassVar[Type[ConvViTConfig]] = ConvViTConfig
 
     def __init__(self, config: ConvViTConfig):
         super().__init__(config)

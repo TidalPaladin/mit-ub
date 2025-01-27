@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Dict, Self, Sequence, Tuple, cast
+from typing import Any, ClassVar, Dict, Self, Sequence, Tuple, Type, cast
 
 import torch
 import torch.nn as nn
@@ -7,7 +7,7 @@ from torch import Tensor
 
 from ...tokens import apply_mask, create_mask
 from ..activations import DEFAULT_MLP_ACTIVATION_STR, DEFAULT_MLP_GATE_ACTIVATION_STR, Activation
-from ..config import ModelConfig
+from ..config import ModelConfig, SupportsSafeTensors
 from ..helpers import set_checkpointing
 from ..layers.mlp import MLP, NormType
 from ..layers.pool import PoolType, get_global_pooling_layer
@@ -43,8 +43,9 @@ class ViTConfig(ModelConfig):
         return ViT(self)
 
 
-class ViT(nn.Module):
+class ViT(nn.Module, SupportsSafeTensors):
     stem: PatchEmbed2d | PatchEmbed3d
+    CONFIG_TYPE: ClassVar[Type[ViTConfig]] = ViTConfig
 
     def __init__(self, config: ViTConfig):
         super().__init__()
