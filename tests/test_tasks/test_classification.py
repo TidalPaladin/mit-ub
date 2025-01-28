@@ -69,6 +69,19 @@ class TestClassificationTask:
         )
         trainer.fit(binary_task, datamodule=cifar10_datamodule_binary)
 
+    @pytest.fixture
+    def task_convnext(self, optimizer_init, convnext_dummy):
+        config = ClassificationConfig(num_classes=10, pool_type="avg")
+        return ClassificationTask(convnext_dummy, classification_config=config, optimizer_init=optimizer_init)
+
+    def test_fit_convnext(self, task_convnext, cifar10_datamodule, logger):
+        trainer = pl.Trainer(
+            accelerator="cpu",
+            fast_dev_run=True,
+            logger=logger,
+        )
+        trainer.fit(task_convnext, datamodule=cifar10_datamodule)
+
 
 class TestJEPAWithClassification:
     @pytest.fixture
