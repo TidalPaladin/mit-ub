@@ -6,9 +6,9 @@ from einops import rearrange
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
-from ..helpers import Checkpointable, compile_backend, compile_is_disabled, max_autotune
+from ..helpers import Checkpointable, compile_backend, compile_is_disabled, init_weight, max_autotune
 from .layer_scale import LayerScale
-from .mlp import NORM_EPS, NormType
+from .mlp import NormType
 from .stochastic_depth import apply_stochastic_depth, stochastic_depth_indices, unapply_stochastic_depth
 
 
@@ -32,7 +32,6 @@ def attention_forward(
     num_heads: int, num_kv_heads: int,
     w_qk_norm: Tensor | None = None, b_qk_norm: Tensor | None = None,
     dropout: float = 0.0,
-    eps: float = NORM_EPS,
     w_norm: Tensor | None = None,
     b_norm: Tensor | None = None,
     kv_norm: bool = False,
@@ -62,7 +61,6 @@ def attention_forward(
         w_qk_norm: Normalization weight of shape :math:`(head_dim,)` or None
         b_qk_norm: Normalization bias of shape :math:`(head_dim,)` or None
         dropout: Dropout probability
-        eps: Epsilon value for normalization
         w_norm: Weight for pre-normalization, or ``None`` for no pre-normalization
         b_norm: Bias for pre-normalization
         kv_norm: Whether to normalize the key and value tensors in non-packed QKV mode. This should
@@ -88,6 +86,7 @@ def attention_forward(
     head_dim = q.shape[-1] // num_heads
 
     # Pre-normalization
+    eps = torch.finfo(q.dtype).eps
     if w_norm is not None:
         if norm_type == NormType.LAYER_NORM:
             q = F.layer_norm(q, q.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
@@ -229,7 +228,7 @@ class MultiHeadAttention(nn.Module, Checkpointable):
             elif "norm" in name:
                 nn.init.ones_(param)
             elif name.startswith("w_"):
-                nn.init.xavier_uniform_(param)
+                init_weight(param)
             elif name.startswith("layer_scale"):
                 pass
             else:
@@ -390,7 +389,6 @@ class MultiHeadAttention(nn.Module, Checkpointable):
                 self.num_heads, self.num_kv_heads,
                 self.w_qk_norm, self.b_qk_norm,
                 self.dropout,
-                NORM_EPS,
                 self.w_norm,
                 self.b_norm,
                 self.kv_norm,
@@ -411,7 +409,6 @@ class MultiHeadAttention(nn.Module, Checkpointable):
                 self.num_heads, self.num_kv_heads,
                 self.w_qk_norm, self.b_qk_norm,
                 self.dropout,
-                NORM_EPS,
                 self.w_norm,
                 self.b_norm,
                 self.kv_norm,

@@ -140,3 +140,9 @@ def set_checkpointing(module: nn.Module, checkpoint: bool) -> Set[str]:
             child.checkpoint = checkpoint
             names.add(name)
     return names
+
+
+@torch.no_grad()
+def init_weight(param: nn.Parameter) -> nn.Parameter:
+    nn.init.xavier_uniform_(param)
+    return param

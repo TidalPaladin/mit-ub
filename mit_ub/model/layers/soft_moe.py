@@ -7,7 +7,7 @@ from einops import rearrange
 from torch import Tensor
 
 from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
-from ..helpers import compile_is_disabled, max_autotune
+from ..helpers import compile_is_disabled, init_weight, max_autotune
 from .layer_scale import LayerScale
 from .mlp import MLP, NormType
 
@@ -173,9 +173,9 @@ class SoftMoE(nn.Module):
 
     def reset_parameters(self) -> None:
         nn.init.trunc_normal_(self.slots, std=0.02)
-        nn.init.xavier_uniform_(self.w_k_dispatch)
-        nn.init.xavier_uniform_(self.w_q_combine)
-        nn.init.xavier_uniform_(self.w_k_combine)
+        init_weight(self.w_k_dispatch)
+        init_weight(self.w_q_combine)
+        init_weight(self.w_k_combine)
         if self.b_k_dispatch is not None:
             nn.init.zeros_(self.b_k_dispatch)
         if self.b_q_combine is not None:
