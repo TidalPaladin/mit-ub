@@ -10,6 +10,7 @@ from torch import Tensor
 
 from ..activations import Activation
 from ..helpers import compile_backend, compile_is_disabled, max_autotune, to_tuple
+from ..layers.mlp import NormType
 from ..layers.pos_enc import (
     DEFAULT_POS_ENC_ACTIVATION,
     RelativeFactorizedPosition,
@@ -50,7 +51,7 @@ def adaptive_patch_embed_forward(
     b_pos_norm: Tensor | None,
     dropout: float = 0.0,
     activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
-    eps: float = 1e-5,
+    norm_type: NormType = NormType.LAYER_NORM,
     training: bool = False,
     high_precision: bool = True,
 ) -> Tuple[Tensor, Tensor]:
@@ -92,8 +93,13 @@ def adaptive_patch_embed_forward(
     x = rearrange(x, "b ... d -> b (...) d")
     pooled = rearrange(pooled, "b d ... -> b (...) d")
 
-    x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
-    pooled = F.layer_norm(pooled, pooled.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
+    eps = torch.finfo(x.dtype).eps
+    if norm_type == NormType.LAYER_NORM:
+        x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
+        pooled = F.layer_norm(pooled, pooled.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
+    else:
+        x = F.rms_norm(x, x.shape[-1:], weight=w_norm, eps=eps)
+        pooled = F.rms_norm(pooled, pooled.shape[-1:], weight=w_norm, eps=eps)
     return pooled, x
 
 
@@ -108,6 +114,7 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         dropout: float = 0.0,
         activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
         pool_type: PoolType = PoolType.MAX,
+        norm_type: NormType = NormType.LAYER_NORM,
     ):
         super().__init__()
         self._target_shape = to_tuple(target_shape, 2)
@@ -118,8 +125,12 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         self.w_in = nn.Parameter(torch.empty(embed_dim, d_in))
         self.b_in = nn.Parameter(torch.empty(embed_dim))
         self.w_norm = nn.Parameter(torch.empty(embed_dim))
-        self.b_norm = nn.Parameter(torch.empty(embed_dim))
+        if norm_type == NormType.LAYER_NORM:
+            self.b_norm = nn.Parameter(torch.empty(embed_dim))
+        else:
+            self.register_parameter("b_norm", None)
         self.pos_enc = RelativeFactorizedPosition(2, embed_dim, dropout=dropout, activation=activation, norm=False)
+        self.norm_type = norm_type
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -182,6 +193,7 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
             self.pos_enc.b_norm,
             dropout=self.pos_enc.dropout,
             activation=self.pos_enc.activation,
+            norm_type=self.norm_type,
             training=self.training,
         )
         torch.set_float32_matmul_precision(mm_precision)
@@ -199,6 +211,7 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         dropout: float = 0.0,
         activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
         pool_type: PoolType = PoolType.MAX,
+        norm_type: NormType = NormType.LAYER_NORM,
     ):
         super().__init__()
         self._target_shape = to_tuple(target_shape, 3)
@@ -208,8 +221,12 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         self.w_in = nn.Parameter(torch.empty(embed_dim, d_in))
         self.b_in = nn.Parameter(torch.empty(embed_dim))
         self.w_norm = nn.Parameter(torch.empty(embed_dim))
-        self.b_norm = nn.Parameter(torch.empty(embed_dim))
+        if norm_type == NormType.LAYER_NORM:
+            self.b_norm = nn.Parameter(torch.empty(embed_dim))
+        else:
+            self.register_parameter("b_norm", None)
         self.pos_enc = RelativeFactorizedPosition(3, embed_dim, dropout=dropout, activation=activation, norm=False)
+        self.norm_type = norm_type
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -272,6 +289,7 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
             self.pos_enc.b_norm,
             dropout=self.pos_enc.dropout,
             activation=self.pos_enc.activation,
+            norm_type=self.norm_type,
             training=self.training,
         )
         torch.set_float32_matmul_precision(mm_precision)

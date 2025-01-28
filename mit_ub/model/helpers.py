@@ -143,6 +143,6 @@ def set_checkpointing(module: nn.Module, checkpoint: bool) -> Set[str]:
 
 
 @torch.no_grad()
-def init_weight(param: nn.Parameter) -> nn.Parameter:
-    nn.init.xavier_uniform_(param)
+def init_weight(param: Tensor) -> Tensor:
+    nn.init.trunc_normal_(param, std=0.02)
     return param

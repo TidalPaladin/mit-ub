@@ -122,7 +122,8 @@ def patch_embed_forward(
 def _init_patch_embed(layer: nn.Module) -> None:
     layer.pos_enc.reset_parameters()
     nn.init.ones_(layer.w_norm)
-    nn.init.zeros_(layer.b_norm)
+    if layer.b_norm is not None:
+        nn.init.zeros_(layer.b_norm)
     init_weight(layer.w_in)
     nn.init.zeros_(layer.b_in)
 
@@ -144,7 +145,10 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Dims2D]):
         self.w_in = nn.Parameter(torch.empty(embed_dim, d_in))
         self.b_in = nn.Parameter(torch.empty(embed_dim))
         self.w_norm = nn.Parameter(torch.empty(embed_dim))
-        self.b_norm = nn.Parameter(torch.empty(embed_dim))
+        if norm_type == NormType.LAYER_NORM:
+            self.b_norm = nn.Parameter(torch.empty(embed_dim))
+        else:
+            self.register_parameter("b_norm", None)
         self.pos_enc = RelativeFactorizedPosition(2, embed_dim, dropout=dropout, activation=activation, norm=False)
         self.norm_type = norm_type
         self.reset_parameters()
@@ -217,7 +221,10 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Dims3D]):
         self.w_in = nn.Parameter(torch.empty(embed_dim, d_in))
         self.b_in = nn.Parameter(torch.empty(embed_dim))
         self.w_norm = nn.Parameter(torch.empty(embed_dim))
-        self.b_norm = nn.Parameter(torch.empty(embed_dim))
+        if norm_type == NormType.LAYER_NORM:
+            self.b_norm = nn.Parameter(torch.empty(embed_dim))
+        else:
+            self.register_parameter("b_norm", None)
         self.pos_enc = RelativeFactorizedPosition(3, embed_dim, dropout=dropout, activation=activation, norm=False)
         self.norm_type = norm_type
         self.reset_parameters()

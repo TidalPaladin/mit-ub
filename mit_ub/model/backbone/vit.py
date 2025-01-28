@@ -8,7 +8,7 @@ from torch import Tensor
 from ...tokens import apply_mask, create_mask
 from ..activations import DEFAULT_MLP_ACTIVATION_STR, DEFAULT_MLP_GATE_ACTIVATION_STR, Activation, get_activation
 from ..config import ModelConfig, SupportsSafeTensors
-from ..helpers import set_checkpointing
+from ..helpers import init_weight, set_checkpointing
 from ..layers.mlp import DEFAULT_MLP_ACTIVATION, MLP, NormType
 from ..layers.pool import PoolType, get_global_pooling_layer
 from ..layers.pos_enc import DEFAULT_POS_ENC_ACTIVATION
@@ -250,7 +250,7 @@ class ViT(nn.Module, SupportsSafeTensors):
 
         # Output linear
         linear = nn.Linear(self.config.dim, out_dim)
-        nn.init.xavier_normal_(linear.weight)
+        init_weight(linear.weight)
         nn.init.zeros_(linear.bias)
         layer.add_module("out", linear)
         return layer
