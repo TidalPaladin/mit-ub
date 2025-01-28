@@ -35,7 +35,8 @@ class TestPatchEmbed2d:
             layer.pos_enc.activation,
         )
         expected += pos
-        expected = F.layer_norm(expected, expected.shape[-1:], weight=layer.w_norm, bias=layer.b_norm)
+        eps = torch.finfo(expected.dtype).eps
+        expected = F.layer_norm(expected, expected.shape[-1:], weight=layer.w_norm, bias=layer.b_norm, eps=eps)
         assert_close(actual, expected)
 
     @pytest.mark.parametrize(
