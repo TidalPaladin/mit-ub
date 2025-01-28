@@ -5,7 +5,13 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from ..activations import DEFAULT_MLP_ACTIVATION_STR, DEFAULT_MLP_GATE_ACTIVATION_STR, Activation
+from ..activations import (
+    DEFAULT_MLP_ACTIVATION,
+    DEFAULT_MLP_ACTIVATION_STR,
+    DEFAULT_MLP_GATE_ACTIVATION_STR,
+    Activation,
+    get_activation,
+)
 from ..config import ModelConfig, SupportsSafeTensors
 from ..helpers import Dims2D, grid_to_tokens, set_checkpointing, tokens_to_grid
 from ..layers.convnext import ConvNextBlock
@@ -65,7 +71,7 @@ class ConvNext(nn.Module, SupportsSafeTensors):
             kernel_size=self.config.patch_size,
             stride=self.config.patch_size,
         )
-        self.norm = nn.LayerNorm(self.config.dims[0])
+        self.norm = self.create_norm(dim=self.config.dims[0])
 
         self.down_stages = nn.ModuleList(
             [
@@ -132,12 +138,32 @@ class ConvNext(nn.Module, SupportsSafeTensors):
         if config.checkpoint:
             set_checkpointing(self, config.checkpoint)
 
-    def create_norm(self, **kwargs) -> nn.Module:
+    def create_norm(self, dim: int | None = None, **kwargs) -> nn.Module:
+        r"""Creates a normalization layer.
+
+        Args:
+            dim: Dimension of the normalization layer. By default this will be the model dimension.
+        """
+        dim = dim or self.config.dim
         return (
-            nn.LayerNorm(self.config.dim, **kwargs)
-            if self.config.norm_type == NormType.LAYER_NORM
-            else nn.RMSNorm(self.config.dim, **kwargs)
+            nn.LayerNorm(dim, **kwargs) if self.config.norm_type == NormType.LAYER_NORM else nn.RMSNorm(dim, **kwargs)
         )
+
+    def get_external_activation(self, default: Activation = DEFAULT_MLP_ACTIVATION) -> Activation:
+        r"""Gets an activation function suitable for use in external MLPs.
+
+        Args:
+            default: Default activation to return if an activation cannot be selected.
+
+        This is relevant when GLU variants are used in the transformer MLP layers.
+        This function selects an appropriate nonlinearity based on the model's configuration.
+        """
+        if self.config.activation != "identity":
+            return get_activation(self.config.activation)
+        elif self.config.gate_activation is not None and self.config.gate_activation != "identity":
+            return get_activation(self.config.gate_activation)
+        else:
+            return default
 
     def create_head(
         self,
@@ -150,10 +176,10 @@ class ConvNext(nn.Module, SupportsSafeTensors):
         r"""Creates a head for the model.
 
         The head has the following structure:
-            - ``nn.LayerNorm`` if ``input_norm`` is ``True`` and either ``pool_type`` is not ``None`` or ``use_mlp`` is ``True``.
+            - Norm layer if ``input_norm`` is ``True`` and either ``pool_type`` is not ``None`` or ``use_mlp`` is ``True``.
             - Pooling layer if ``pool_type`` is not ``None``
             - MLP if ``use_mlp`` is ``True``. MLP is pre-normalized if ``pool_type`` is not ``None``.
-            - ``nn.LayerNorm``
+            - Norm layer
             - ``nn.Linear`` to project to ``out_dim``
 
         The following MLP options differ from the backbone defaults:
