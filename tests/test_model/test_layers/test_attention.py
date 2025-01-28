@@ -300,9 +300,10 @@ class TestMultiHeadAttention:
         actual = model(q, k, v)
 
         model.w_norm = model.b_norm = None  # type: ignore
-        _q = F.layer_norm(q, q.shape[-1:], weight=w_norm, bias=b_norm)
-        k = F.layer_norm(k, k.shape[-1:], weight=w_norm, bias=b_norm) if k is not q else _q
-        v = F.layer_norm(v, v.shape[-1:], weight=w_norm, bias=b_norm) if v is not q else _q
+        eps = torch.finfo(q.dtype).eps
+        _q = F.layer_norm(q, q.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
+        k = F.layer_norm(k, k.shape[-1:], weight=w_norm, bias=b_norm, eps=eps) if k is not q else _q
+        v = F.layer_norm(v, v.shape[-1:], weight=w_norm, bias=b_norm, eps=eps) if v is not q else _q
         q = _q
         baseline = model(q, k, v)
 

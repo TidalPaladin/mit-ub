@@ -59,7 +59,12 @@ class ViT(nn.Module, SupportsSafeTensors):
         stem_act = self.get_external_activation(default=DEFAULT_POS_ENC_ACTIVATION)
         stem_type = PatchEmbed2d if isinstance(config.patch_size, int) or len(config.patch_size) == 2 else PatchEmbed3d
         self.stem = stem_type(
-            config.in_channels, config.dim, cast(Any, config.patch_size), dropout=config.dropout, activation=stem_act
+            config.in_channels,
+            config.dim,
+            cast(Any, config.patch_size),
+            dropout=config.dropout,
+            activation=stem_act,
+            norm_type=config.norm_type,
         )
 
         # Transformer blocks

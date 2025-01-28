@@ -151,7 +151,7 @@ class TestMLP:
         torch.random.manual_seed(0)
         B, L, D = 2, 8, 32
         x = torch.randn(B, L, D)
-        norm = nn.LayerNorm(D)
+        norm = nn.LayerNorm(D, eps=torch.finfo(x.dtype).eps)
         layer = MLP(D, 2 * D, D)
 
         baseline = layer(norm(x))
