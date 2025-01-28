@@ -273,7 +273,6 @@ class ClassificationTask(Task):
             else:
                 pred = self.backbone(x)
                 pred = grid_to_tokens(pred)
-                pred = self.student_pool(pred)
 
         cls = self.classification_head(pred)
         return {"pred": cls.view(-1, 1)}
@@ -305,7 +304,6 @@ class ClassificationTask(Task):
             else:
                 pred = self.backbone(x)
                 pred = grid_to_tokens(pred)
-                pred = self.student_pool(pred)
 
         # step from features
         output = step_classification_from_features(
