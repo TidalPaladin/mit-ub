@@ -34,7 +34,7 @@ from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
 from ..model import AdaptiveViT, AdaptiveViTConfig, ViT, ViTConfig
 from ..model.helpers import compile_backend, compile_is_disabled, max_autotune
 from ..model.layers.layer_scale import has_layer_scale
-from ..model.layers.pos_enc import RelativeFactorizedPosition
+from ..model.layers.pos_enc import DEFAULT_POS_ENC_ACTIVATION, RelativeFactorizedPosition
 from ..model.layers.transformer import TransformerDecoderLayer
 from ..tokens import apply_mask, create_mask, generate_non_overlapping_mask, mask_is_ragged
 from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
@@ -319,6 +319,7 @@ class JEPA(Task):
             dropout=0.1,
             norm=True,
             norm_type=self.backbone.config.norm_type,
+            activation=self.backbone.get_external_activation(default=DEFAULT_POS_ENC_ACTIVATION),
         )
 
         # JEPA predictor

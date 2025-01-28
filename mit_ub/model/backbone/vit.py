@@ -9,7 +9,7 @@ from ...tokens import apply_mask, create_mask
 from ..activations import DEFAULT_MLP_ACTIVATION_STR, DEFAULT_MLP_GATE_ACTIVATION_STR, Activation, get_activation
 from ..config import ModelConfig, SupportsSafeTensors
 from ..helpers import set_checkpointing
-from ..layers.mlp import MLP, NormType
+from ..layers.mlp import DEFAULT_MLP_ACTIVATION, MLP, NormType
 from ..layers.pool import PoolType, get_global_pooling_layer
 from ..layers.pos_enc import DEFAULT_POS_ENC_ACTIVATION
 from ..layers.transformer import TransformerDecoderLayer, TransformerEncoderLayer
@@ -56,15 +56,7 @@ class ViT(nn.Module, SupportsSafeTensors):
         self.cls_token = nn.Parameter(torch.randn(config.dim))
 
         # Stem tokenizer
-        stem_act = (
-            get_activation(config.activation)
-            if config.activation != "identity"
-            else (
-                get_activation(config.gate_activation)
-                if config.gate_activation is not None and config.gate_activation != "identity"
-                else DEFAULT_POS_ENC_ACTIVATION
-            )
-        )
+        stem_act = self.get_external_activation(default=DEFAULT_POS_ENC_ACTIVATION)
         stem_type = PatchEmbed2d if isinstance(config.patch_size, int) or len(config.patch_size) == 2 else PatchEmbed3d
         self.stem = stem_type(
             config.in_channels, config.dim, cast(Any, config.patch_size), dropout=config.dropout, activation=stem_act
@@ -157,12 +149,32 @@ class ViT(nn.Module, SupportsSafeTensors):
             set_checkpointing(layer, self.config.checkpoint)
         return layer
 
-    def create_norm(self, **kwargs) -> nn.Module:
+    def create_norm(self, dim: int | None = None, **kwargs) -> nn.Module:
+        r"""Creates a normalization layer.
+
+        Args:
+            dim: Dimension of the normalization layer. By default this will be the model dimension.
+        """
+        dim = dim or self.config.dim
         return (
-            nn.LayerNorm(self.config.dim, **kwargs)
-            if self.config.norm_type == NormType.LAYER_NORM
-            else nn.RMSNorm(self.config.dim, **kwargs)
+            nn.LayerNorm(dim, **kwargs) if self.config.norm_type == NormType.LAYER_NORM else nn.RMSNorm(dim, **kwargs)
         )
+
+    def get_external_activation(self, default: Activation = DEFAULT_MLP_ACTIVATION) -> Activation:
+        r"""Gets an activation function suitable for use in external MLPs.
+
+        Args:
+            default: Default activation to return if an activation cannot be selected.
+
+        This is relevant when GLU variants are used in the transformer MLP layers.
+        This function selects an appropriate nonlinearity based on the model's configuration.
+        """
+        if self.config.activation != "identity":
+            return get_activation(self.config.activation)
+        elif self.config.gate_activation is not None and self.config.gate_activation != "identity":
+            return get_activation(self.config.gate_activation)
+        else:
+            return default
 
     def create_head(
         self,
@@ -175,10 +187,10 @@ class ViT(nn.Module, SupportsSafeTensors):
         r"""Creates a head for the model.
 
         The head has the following structure:
-            - ``nn.LayerNorm`` if ``input_norm`` is ``True`` and either ``pool_type`` is not ``None`` or ``use_mlp`` is ``True``.
+            - Norm layer if ``input_norm`` is ``True`` and either ``pool_type`` is not ``None`` or ``use_mlp`` is ``True``.
             - Pooling layer if ``pool_type`` is not ``None``
             - MLP if ``use_mlp`` is ``True``. MLP is pre-normalized if ``pool_type`` is not ``None``.
-            - ``nn.LayerNorm``
+            - Norm layer
             - ``nn.Linear`` to project to ``out_dim``
 
         The following MLP options differ from the backbone defaults:
@@ -217,8 +229,8 @@ class ViT(nn.Module, SupportsSafeTensors):
                 "hidden_features": self.config.dim_feedforward,
                 "out_features": self.config.dim,
                 "dropout": kwargs.get("dropout", self.config.dropout),
-                "activation": kwargs.get("activation", self.config.activation),
-                "gate_activation": kwargs.get("gate_activation", self.config.gate_activation),
+                "activation": kwargs.get("activation", self.get_external_activation()),
+                "gate_activation": kwargs.get("gate_activation", None),
                 "bias": kwargs.get("bias", True),
                 "norm": kwargs.get("norm", pool_type is not None),
                 "norm_type": kwargs.get("norm_type", self.config.norm_type),
