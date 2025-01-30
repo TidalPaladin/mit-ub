@@ -42,7 +42,7 @@ fit:
       init_args:
         save_dir: ${fit.trainer.default_root_dir}
         project: mit-ub
-        name: mjepa-sigliptweak
+        name: mjepa
 
   model:
     # Use the MJEPA task with a linear probe
