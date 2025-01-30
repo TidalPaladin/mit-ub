@@ -617,7 +617,7 @@ class JEPA(Task):
         if self.jepa_config.loss_fn == "smooth_l1":
             loss_jepa = F.smooth_l1_loss(pred, target)
         elif self.jepa_config.loss_fn == "cosine":
-            loss_jepa = (1 - F.cosine_similarity(pred, target, dim=1, eps=torch.finfo(pred.dtype).eps)).mean()
+            loss_jepa = (1 - F.cosine_similarity(pred, target, dim=-1, eps=torch.finfo(pred.dtype).eps)).mean()
         else:
             raise ValueError(f"Invalid loss function: {self.jepa_config.loss_fn}")
 
