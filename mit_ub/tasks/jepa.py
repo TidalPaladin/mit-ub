@@ -133,6 +133,7 @@ def compute_siglip_loss(
     rank: int,
     world_size: int,
     eps: float = 1e-12,
+    gamma: float | None = 2.0,
 ) -> Tensor:
     r"""Compute the SigLIP loss across all ranks.
 
@@ -145,6 +146,7 @@ def compute_siglip_loss(
         rank: The rank of the current process.
         world_size: The number of processes in the distributed group.
         eps: The epsilon value to use for normalization.
+        gamma: If set, use focal loss with the provided gamma value.
 
     Returns:
         The SigLIP loss.
@@ -171,8 +173,13 @@ def compute_siglip_loss(
         logits_x1 = compute_siglip_logits(x1, x2_global.mT, t, b)
         logits_x2 = compute_siglip_logits(x1_global, x2.mT, t, b)
 
-        loss_x1 = sigmoid_focal_loss(logits_x1, _target, reduction="sum")
-        loss_x2 = sigmoid_focal_loss(logits_x2, _target, reduction="sum")
+        if gamma is not None:
+            loss_x1 = sigmoid_focal_loss(logits_x1, _target, reduction="sum", gamma=gamma, alpha=-1)
+            loss_x2 = sigmoid_focal_loss(logits_x2, _target, reduction="sum", gamma=gamma, alpha=-1)
+        else:
+            loss_x1 = F.binary_cross_entropy_with_logits(logits_x1, _target, reduction="sum")
+            loss_x2 = F.binary_cross_entropy_with_logits(logits_x2, _target, reduction="sum")
+
         loss += (loss_x1 + loss_x2) / (target.numel() * world_size * 2)
 
     return loss
@@ -209,6 +216,10 @@ class JEPAConfig:
             Input normalization should not be necessary for backbones that already have an output normalization layer.
             Only has an effect if ``mlp_tower`` is ``True``.
         siglip_weight: Weight of the SigLIP loss. If 0, SigLIP does not contribute to the backbone gradients.
+        siglip_gamma: Gamma value for the SigLIP focal loss. If None, use binary cross entropy.
+        siglip_t: Temperature parameter for the SigLIP loss.
+        siglip_b: Bias parameter for the SigLIP loss.
+        trainable_siglip_params: If True, the SigLIP parameters are trainable.
     """
 
     context_ratio: float = 0.5
@@ -230,7 +241,13 @@ class JEPAConfig:
     self_attn: bool = False
     mlp_tower: bool = False
     tower_input_norm: bool = False
+
+    # SigLIP parameters
     siglip_weight: float = 1.0
+    siglip_gamma: float | None = 2.0
+    siglip_t: float = 10.0
+    siglip_b: float = -10.0
+    trainable_siglip_params: bool = True
 
     def __post_init__(self) -> None:
         if not 0 < self.context_ratio <= 1:
@@ -249,6 +266,8 @@ class JEPAConfig:
             raise ValueError("weight_decay_final must be non-negative")
         if self.siglip_weight < 0:
             raise ValueError("siglip_weight must be non-negative")
+        if self.siglip_gamma is not None and self.siglip_gamma <= 0:
+            raise ValueError("siglip_gamma must be non-negative")
 
 
 class JEPA(Task):
@@ -339,22 +358,18 @@ class JEPA(Task):
 
         # SigLIP pooling layer
         rank_zero_info(f"Using SigLIP weight: {self.jepa_config.siglip_weight}")
-        self.siglip_pred = self.backbone.create_head(
+        self.siglip_head = self.backbone.create_head(
             self.backbone.config.dim,
             pool_type=None,
-            use_mlp=False,
-            input_norm=False,
-        )
-        self.siglip_target = self.backbone.create_head(
-            self.backbone.config.dim,
-            pool_type=None,
-            use_mlp=False,
-            input_norm=False,
+            use_mlp=self.jepa_config.mlp_tower,
+            input_norm=self.jepa_config.tower_input_norm,
         )
         self.siglip_t = nn.Parameter(torch.empty(1))
         self.siglip_b = nn.Parameter(torch.empty(1))
-        nn.init.constant_(self.siglip_t, math.log(10))
-        nn.init.constant_(self.siglip_b, -10)
+        nn.init.constant_(self.siglip_t, math.log(self.jepa_config.siglip_t))
+        nn.init.constant_(self.siglip_b, self.jepa_config.siglip_b)
+        self.siglip_t.requires_grad = self.jepa_config.trainable_siglip_params
+        self.siglip_b.requires_grad = self.jepa_config.trainable_siglip_params
 
         self.save_hyperparameters()
 
@@ -390,6 +405,8 @@ class JEPA(Task):
             metrics["layer_scale_mean"] = MeanLayerScale()
         if state.mode == Mode.TRAIN:
             metrics["ema_momentum"] = tm.MeanMetric()
+            metrics["siglip_t"] = tm.MeanMetric()
+            metrics["siglip_b"] = tm.MeanMetric()
 
         return metrics
 
@@ -595,11 +612,10 @@ class JEPA(Task):
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
         loss_jepa = F.smooth_l1_loss(pred, target)
 
-        # Compute siglip loss across all ranks
-        siglip_pred_token = self.siglip_pred(
-            pred_cls_token.detach() if self.jepa_config.siglip_weight == 0 else pred_cls_token
-        )
-        siglip_target_token = self.siglip_target(target_cls_token)
+        # Compute siglip loss across all ranks. When siglip_weight is 0, a stop gradient is applied to the CLS token.
+        _pred_cls_token = pred_cls_token.detach() if self.jepa_config.siglip_weight == 0 else pred_cls_token
+        siglip_pred_token = self.siglip_head(_pred_cls_token)
+        siglip_target_token = self.siglip_head(target_cls_token)
         loss_siglip = compute_siglip_loss(
             siglip_pred_token,
             siglip_target_token,
@@ -608,6 +624,7 @@ class JEPA(Task):
             self.siglip_b,
             self.trainer.global_rank,
             self.trainer.world_size,
+            gamma=self.jepa_config.siglip_gamma,
         )
 
         # Compute metrics
@@ -629,6 +646,10 @@ class JEPA(Task):
 
                 if "ema_momentum" in metrics:
                     metrics["ema_momentum"].update(self.get_ema_momentum())
+                if "siglip_t" in metrics:
+                    metrics["siglip_t"].update(self.siglip_t)
+                if "siglip_b" in metrics:
+                    metrics["siglip_b"].update(self.siglip_b)
                 torch.cuda.nvtx.range_pop()
 
         output = {

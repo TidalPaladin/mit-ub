@@ -127,9 +127,9 @@ class TestJEPAWithClassification:
             "siglip_loss",
         }
         train_keys = (
-            {"layer_scale_mean", "layer_scale_max", "ema_momentum"}
+            {"layer_scale_mean", "layer_scale_max", "ema_momentum", "siglip_t", "siglip_b"}
             if has_layer_scale(task.backbone)
-            else {"ema_momentum"}
+            else {"ema_momentum", "siglip_t", "siglip_b"}
         )
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
@@ -162,9 +162,9 @@ class TestJEPAWithClassification:
             "siglip_loss",
         }
         train_keys = (
-            {"layer_scale_mean", "layer_scale_max", "ema_momentum"}
+            {"layer_scale_mean", "layer_scale_max", "ema_momentum", "siglip_t", "siglip_b"}
             if has_layer_scale(binary_task.backbone)
-            else {"ema_momentum"}
+            else {"ema_momentum", "siglip_t", "siglip_b"}
         )
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
