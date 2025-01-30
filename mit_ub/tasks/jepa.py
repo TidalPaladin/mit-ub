@@ -596,7 +596,9 @@ class JEPA(Task):
         loss_jepa = F.smooth_l1_loss(pred, target)
 
         # Compute siglip loss across all ranks
-        siglip_pred_token = self.siglip_pred(pred_cls_token)
+        siglip_pred_token = self.siglip_pred(
+            pred_cls_token.detach() if self.jepa_config.siglip_weight == 0 else pred_cls_token
+        )
         siglip_target_token = self.siglip_target(target_cls_token)
         loss_siglip = compute_siglip_loss(
             siglip_pred_token,
