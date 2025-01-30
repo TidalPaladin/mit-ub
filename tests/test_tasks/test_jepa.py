@@ -62,7 +62,7 @@ def test_compute_siglip_loss_local():
     loss = compute_siglip_loss(x1, x2, target, t, b, rank, world_size, eps=1e-12)
     x1 = F.normalize(x1, dim=-1, eps=1e-12)
     x2 = F.normalize(x2, dim=-1, eps=1e-12)
-    expected = sigmoid_focal_loss(torch.matmul(x1, x2.T) * t.exp() + b, target, reduction="mean")
+    expected = sigmoid_focal_loss(torch.matmul(x1, x2.T) * t.exp() + b, target, reduction="mean", alpha=-1)
     assert_close(loss, expected)
 
 
@@ -110,7 +110,7 @@ def test_compute_siglip_loss(world_size):
     x1 = torch.cat(x1_list, 0)
     x2 = torch.cat(x2_list, 0)
     target = torch.eye(x1.shape[0], dtype=torch.float32)
-    expected = sigmoid_focal_loss(torch.matmul(x1, x2.T) * t.exp() + b, target, reduction="mean")
+    expected = sigmoid_focal_loss(torch.matmul(x1, x2.T) * t.exp() + b, target, reduction="mean", alpha=-1)
 
     spawn(
         _compute_siglip_loss,
@@ -184,9 +184,9 @@ class TestJEPA:
             "siglip_loss",
         }
         train_keys = (
-            {"layer_scale_mean", "layer_scale_max", "ema_momentum"}
+            {"layer_scale_mean", "layer_scale_max", "ema_momentum", "siglip_t", "siglip_b"}
             if has_layer_scale(task.backbone)
-            else {"ema_momentum"}
+            else {"ema_momentum", "siglip_t", "siglip_b"}
         )
 
         if state.mode == Mode.TRAIN:

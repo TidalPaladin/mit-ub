@@ -136,6 +136,10 @@ fit:
         # When this weight is zero, there is a stop gradient applied to the SigLIP pathway.
         # Otherwise, the SigLIP predictor can influence backbone updates.
         siglip_weight: 0.2
+        siglip_gamma: 2.0
+        siglip_t: 10.0
+        siglip_b: -10.0
+        trainable_siglip_params: true
 
       # Use SOAP optimizer and a reciplrocal square root learning rate schedule.
       # SOAP is empirically much faster than AdamW for this task.
@@ -196,8 +200,7 @@ fit:
         - params:
             - "jepa_head"
             - "linear_probe"
-            - "siglip_pred"
-            - "siglip_target"
+            - "siglip_head"
           weight_decay: 1.0
 
   data:
