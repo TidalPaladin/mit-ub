@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
+from lightning_utilities.core.rank_zero import rank_zero_info
 from torch import Tensor
 from torch.optim.optimizer import Optimizer
 from torchvision.ops import sigmoid_focal_loss
@@ -229,7 +230,7 @@ class JEPAConfig:
     self_attn: bool = False
     mlp_tower: bool = False
     tower_input_norm: bool = False
-    siglip_weight: float = 0.0
+    siglip_weight: float = 1.0
 
     def __post_init__(self) -> None:
         if not 0 < self.context_ratio <= 1:
@@ -337,6 +338,7 @@ class JEPA(Task):
         )
 
         # SigLIP pooling layer
+        rank_zero_info(f"Using SigLIP weight: {self.jepa_config.siglip_weight}")
         self.siglip_pred = self.backbone.create_head(
             self.backbone.config.dim,
             pool_type=None,
