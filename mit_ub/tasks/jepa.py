@@ -215,6 +215,7 @@ class JEPAConfig:
         tower_input_norm: If True, apply input normalization to the tower.
             Input normalization should not be necessary for backbones that already have an output normalization layer.
             Only has an effect if ``mlp_tower`` is ``True``.
+        loss_fn: Loss function to use for the JEPA loss. Can be ``smooth_l1`` or ``cosine``.
         siglip_weight: Weight of the SigLIP loss. If 0, SigLIP does not contribute to the backbone gradients.
         siglip_gamma: Gamma value for the SigLIP focal loss. If None, use binary cross entropy.
         siglip_t: Temperature parameter for the SigLIP loss.
@@ -241,6 +242,7 @@ class JEPAConfig:
     self_attn: bool = False
     mlp_tower: bool = False
     tower_input_norm: bool = False
+    loss_fn: str = "smooth_l1"
 
     # SigLIP parameters
     siglip_weight: float = 1.0
@@ -268,6 +270,8 @@ class JEPAConfig:
             raise ValueError("siglip_weight must be non-negative")
         if self.siglip_gamma is not None and self.siglip_gamma <= 0:
             raise ValueError("siglip_gamma must be non-negative")
+        if self.loss_fn not in ["smooth_l1", "cosine"]:
+            raise ValueError("loss_fn must be one of ['smooth_l1', 'cosine']")
 
 
 class JEPA(Task):
@@ -610,7 +614,12 @@ class JEPA(Task):
 
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
-        loss_jepa = F.smooth_l1_loss(pred, target)
+        if self.jepa_config.loss_fn == "smooth_l1":
+            loss_jepa = F.smooth_l1_loss(pred, target)
+        elif self.jepa_config.loss_fn == "cosine":
+            loss_jepa = (1 - F.cosine_similarity(pred, target, dim=1, eps=torch.finfo(pred.dtype).eps)).mean()
+        else:
+            raise ValueError(f"Invalid loss function: {self.jepa_config.loss_fn}")
 
         # Compute siglip loss across all ranks. When siglip_weight is 0, a stop gradient is applied to the CLS token.
         _pred_cls_token = pred_cls_token.detach() if self.jepa_config.siglip_weight == 0 else pred_cls_token

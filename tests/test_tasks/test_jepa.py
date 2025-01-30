@@ -156,10 +156,11 @@ def run_ema_sync(rank, world_size, backbone, optimizer_init):
 
 
 class TestJEPA:
-    @pytest.fixture
-    def task(self, optimizer_init, backbone):
+    @pytest.fixture(params=["smooth_l1", "cosine"])
+    def task(self, optimizer_init, backbone, request):
         config = JEPAConfig()
         config.scale = 1
+        config.loss_fn = request.param
         return JEPA(backbone, optimizer_init=optimizer_init, jepa_config=config)
 
     @pytest.mark.parametrize(
