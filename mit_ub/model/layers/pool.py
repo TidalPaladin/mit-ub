@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
-from ..helpers import compile_is_disabled, max_autotune
+from ..helpers import compile_is_disabled, init_weight, max_autotune
 
 
 class PoolType(StrEnum):
@@ -90,7 +90,7 @@ class MultiHeadAttentionPool(nn.Module):
             elif name == "w_norm":
                 nn.init.ones_(param)
             elif name.startswith("w_"):
-                nn.init.xavier_uniform_(param)
+                init_weight(param)
             elif name.startswith("b_"):
                 nn.init.zeros_(param)
             else:
@@ -144,7 +144,7 @@ class SimpleAttentionPool(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self):
-        nn.init.xavier_uniform_(self.w)
+        init_weight(self.w)
 
     def forward(self, x: Tensor) -> Tensor:
         return simple_attention_pool(x, self.w, self.num_heads)

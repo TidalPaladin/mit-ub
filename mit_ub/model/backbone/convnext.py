@@ -13,7 +13,7 @@ from ..activations import (
     get_activation,
 )
 from ..config import ModelConfig, SupportsSafeTensors
-from ..helpers import Dims2D, grid_to_tokens, set_checkpointing, tokens_to_grid
+from ..helpers import Dims2D, grid_to_tokens, init_weight, set_checkpointing, tokens_to_grid
 from ..layers.convnext import ConvNextBlock
 from ..layers.mlp import MLP, NormType
 from ..layers.pool import PoolType, get_global_pooling_layer
@@ -218,8 +218,8 @@ class ConvNext(nn.Module, SupportsSafeTensors):
                 "hidden_features": self.config.dim_feedforward,
                 "out_features": self.config.dim,
                 "dropout": kwargs.get("dropout", self.config.dropout),
-                "activation": kwargs.get("activation", self.config.activation),
-                "gate_activation": kwargs.get("gate_activation", self.config.gate_activation),
+                "activation": kwargs.get("activation", self.get_external_activation()),
+                "gate_activation": kwargs.get("gate_activation", None),
                 "bias": kwargs.get("bias", True),
                 "norm": kwargs.get("norm", pool_type is not None),
                 "norm_type": kwargs.get("norm_type", self.config.norm_type),
@@ -234,7 +234,7 @@ class ConvNext(nn.Module, SupportsSafeTensors):
 
         # Output linear
         linear = nn.Linear(self.config.dim, out_dim)
-        nn.init.xavier_normal_(linear.weight)
+        init_weight(linear.weight)
         nn.init.zeros_(linear.bias)
         layer.add_module("out", linear)
         return layer

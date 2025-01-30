@@ -120,9 +120,14 @@ class Distillation(Task):
         if not isinstance(self.teacher_backbone, ViT):
             raise ValueError("Teacher backbone must be a ViT")
 
-        student_dim = backbone.config.dim
         teacher_dim = teacher_backbone.config.dim
-        self.proj = nn.Linear(student_dim, teacher_dim) if student_dim != teacher_dim else nn.Identity()
+        self.distill_proj = self.backbone.create_head(
+            out_dim=teacher_dim,
+            pool_type=None,
+            use_mlp=False,
+            input_norm=self.config.student_pool_input_norm,
+        )
+
         self.student_pool = self.backbone.create_head(
             out_dim=teacher_dim,
             pool_type=cast(PoolType | None, self.config.student_pool_type),
@@ -192,7 +197,7 @@ class Distillation(Task):
             pred = grid_to_tokens(pred)
             pred_cls_token = self.student_pool(pred)
 
-        pred_proj = self.proj(pred)
+        pred_proj = self.distill_proj(pred)
         return {"distill_pred": pred, "distill_pred_proj": pred_proj, "distill_pred_cls_token": pred_cls_token}
 
     def step(

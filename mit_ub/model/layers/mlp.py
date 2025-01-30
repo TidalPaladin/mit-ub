@@ -1,5 +1,4 @@
 from enum import StrEnum
-from typing import Final
 
 import torch
 import torch.nn as nn
@@ -8,12 +7,9 @@ from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
 from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
-from ..helpers import Checkpointable, compile_backend, compile_is_disabled, max_autotune
+from ..helpers import Checkpointable, compile_backend, compile_is_disabled, init_weight, max_autotune
 from .layer_scale import LayerScale
 from .stochastic_depth import apply_stochastic_depth, stochastic_depth_indices, unapply_stochastic_depth
-
-
-NORM_EPS: Final = 1e-5
 
 
 class NormType(StrEnum):
@@ -45,12 +41,12 @@ def mlp_forward(
     gate_activation: Activation | None = DEFAULT_MLP_GATE_ACTIVATION,
     w_norm: Tensor | None = None,
     b_norm: Tensor | None = None,
-    eps: float = NORM_EPS,
     training: bool = False,
     norm_type: NormType = NormType.LAYER_NORM,
     w_layer_scale: Tensor | None = None,
 ) -> Tensor:
     # Pre-normalization
+    eps = torch.finfo(x.dtype).eps
     if w_norm is not None:
         if norm_type == NormType.LAYER_NORM:
             x = F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
@@ -165,7 +161,7 @@ class MLP(nn.Module, Checkpointable):
             elif "norm" in name:
                 nn.init.ones_(param)
             elif name.startswith("w_"):
-                nn.init.xavier_uniform_(param)
+                init_weight(param)
             elif name.startswith("layer_scale"):
                 pass
             else:
@@ -237,7 +233,6 @@ class MLP(nn.Module, Checkpointable):
                 self.gate_activation,
                 self.w_norm,
                 self.b_norm,
-                NORM_EPS,
                 self.training,
                 self.norm_type,
                 self.w_layer_scale,
@@ -257,7 +252,6 @@ class MLP(nn.Module, Checkpointable):
                 self.gate_activation,
                 self.w_norm,
                 self.b_norm,
-                NORM_EPS,
                 self.training,
                 self.norm_type,
                 self.w_layer_scale,

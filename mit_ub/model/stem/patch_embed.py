@@ -9,7 +9,8 @@ from einops import rearrange
 from torch import Tensor
 
 from ..activations import Activation
-from ..helpers import Dims2D, Dims3D, compile_backend, compile_is_disabled, max_autotune, to_tuple
+from ..helpers import Dims2D, Dims3D, compile_backend, compile_is_disabled, init_weight, max_autotune, to_tuple
+from ..layers.mlp import NormType
 from ..layers.pos_enc import (
     DEFAULT_POS_ENC_ACTIVATION,
     RelativeFactorizedPosition,
@@ -77,7 +78,7 @@ def patch_embed_forward(
     b_pos_norm: Tensor | None,
     dropout: float = 0.0,
     activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
-    eps: float = 1e-5,
+    norm_type: NormType = NormType.LAYER_NORM,
     training: bool = False,
     high_precision: bool = True,
 ) -> Tensor:
@@ -97,17 +98,33 @@ def patch_embed_forward(
         x = F.linear(x, w_patch, b_patch)
 
     pos = relative_factorized_position_forward(
-        dims, w1_pos, b1_pos, w2_pos, b2_pos, w_pos_norm, b_pos_norm, activation, dropout=dropout, training=training
+        dims,
+        w1_pos,
+        b1_pos,
+        w2_pos,
+        b2_pos,
+        w_pos_norm,
+        b_pos_norm,
+        activation,
+        norm_type,
+        dropout=dropout,
+        training=training,
     )
     x = x + pos
-    return F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
+
+    eps = torch.finfo(x.dtype).eps
+    if norm_type == NormType.RMS_NORM:
+        return F.rms_norm(x, normalized_shape=(x.shape[-1],), weight=w_norm, eps=eps)
+    else:
+        return F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
 
 
 def _init_patch_embed(layer: nn.Module) -> None:
     layer.pos_enc.reset_parameters()
     nn.init.ones_(layer.w_norm)
-    nn.init.zeros_(layer.b_norm)
-    nn.init.xavier_uniform_(layer.w_in)
+    if layer.b_norm is not None:
+        nn.init.zeros_(layer.b_norm)
+    init_weight(layer.w_in)
     nn.init.zeros_(layer.b_in)
 
 
@@ -120,6 +137,7 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Dims2D]):
         patch_size: int | Dims2D,
         dropout: float = 0.0,
         activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
+        norm_type: NormType = NormType.LAYER_NORM,
     ):
         super().__init__()
         self._patch_size = to_tuple(patch_size, 2)
@@ -127,8 +145,12 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Dims2D]):
         self.w_in = nn.Parameter(torch.empty(embed_dim, d_in))
         self.b_in = nn.Parameter(torch.empty(embed_dim))
         self.w_norm = nn.Parameter(torch.empty(embed_dim))
-        self.b_norm = nn.Parameter(torch.empty(embed_dim))
+        if norm_type == NormType.LAYER_NORM:
+            self.b_norm = nn.Parameter(torch.empty(embed_dim))
+        else:
+            self.register_parameter("b_norm", None)
         self.pos_enc = RelativeFactorizedPosition(2, embed_dim, dropout=dropout, activation=activation, norm=False)
+        self.norm_type = norm_type
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -174,6 +196,7 @@ class PatchEmbed2d(nn.Module, PatchEmbed[Dims2D]):
             self.pos_enc.w_norm,
             self.pos_enc.b_norm,
             activation=self.pos_enc.activation,
+            norm_type=self.norm_type,
             dropout=self.pos_enc.dropout,
             training=self.training,
         )
@@ -190,6 +213,7 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Dims3D]):
         patch_size: int | Dims3D,
         dropout: float = 0.0,
         activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
+        norm_type: NormType = NormType.LAYER_NORM,
     ):
         super().__init__()
         self._patch_size = to_tuple(patch_size, 3)
@@ -197,8 +221,12 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Dims3D]):
         self.w_in = nn.Parameter(torch.empty(embed_dim, d_in))
         self.b_in = nn.Parameter(torch.empty(embed_dim))
         self.w_norm = nn.Parameter(torch.empty(embed_dim))
-        self.b_norm = nn.Parameter(torch.empty(embed_dim))
+        if norm_type == NormType.LAYER_NORM:
+            self.b_norm = nn.Parameter(torch.empty(embed_dim))
+        else:
+            self.register_parameter("b_norm", None)
         self.pos_enc = RelativeFactorizedPosition(3, embed_dim, dropout=dropout, activation=activation, norm=False)
+        self.norm_type = norm_type
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -251,6 +279,7 @@ class PatchEmbed3d(nn.Module, PatchEmbed[Dims3D]):
             self.pos_enc.b_norm,
             dropout=self.pos_enc.dropout,
             activation=self.pos_enc.activation,
+            norm_type=self.norm_type,
             training=self.training,
         )
         torch.set_float32_matmul_precision(mm_precision)

@@ -140,3 +140,9 @@ def set_checkpointing(module: nn.Module, checkpoint: bool) -> Set[str]:
             child.checkpoint = checkpoint
             names.add(name)
     return names
+
+
+@torch.no_grad()
+def init_weight(param: Tensor) -> Tensor:
+    nn.init.trunc_normal_(param, std=0.02)
+    return param

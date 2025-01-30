@@ -81,6 +81,7 @@ class AdaptiveViT(ViT):
             dropout=config.dropout,
             pool_type=PoolType.AVG,
             activation=stem_act,
+            norm_type=config.norm_type,
         )
 
         # Convert ViT blocks into decoder layers that cross-attend to the dynamic tokens.

@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from ..activations import DEFAULT_POS_ENC_ACTIVATION, Activation
-from ..helpers import compile_backend, compile_is_disabled, max_autotune
+from ..helpers import compile_backend, compile_is_disabled, init_weight, max_autotune
 from .mlp import NormType
 
 
@@ -108,11 +108,12 @@ def relative_factorized_position_forward(
     y = activation(y)
     y = F.dropout(y, p=dropout, training=training, inplace=True)
     y = F.linear(y, w2, b2)
+    eps = torch.finfo(y.dtype).eps
     if w_norm is not None:
         if norm_type == NormType.RMS_NORM:
-            y = F.rms_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm)
+            y = F.rms_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm, eps=eps)
         else:
-            y = F.layer_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm, bias=b_norm)
+            y = F.layer_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm, bias=b_norm, eps=eps)
     return y
 
 
@@ -170,7 +171,7 @@ class RelativeFactorizedPosition(nn.Module):
 
     def reset_parameters(self) -> None:
         for weight in (self.w_in, self.w_out):
-            nn.init.xavier_uniform_(weight)
+            init_weight(weight)
 
         for bias in (self.b_in, self.b_out, self.b_norm):
             if bias is not None:

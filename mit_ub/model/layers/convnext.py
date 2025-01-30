@@ -9,7 +9,7 @@ from torch.utils.checkpoint import checkpoint
 from ..activations import DEFAULT_MLP_ACTIVATION, DEFAULT_MLP_GATE_ACTIVATION, Activation
 from ..helpers import Dims2D, grid_to_tokens, to_tuple, tokens_to_grid
 from ..layers.layer_scale import LayerScale
-from ..layers.mlp import MLP, NORM_EPS, NormType, mlp_forward
+from ..layers.mlp import MLP, NormType, mlp_forward
 from ..layers.stochastic_depth import apply_stochastic_depth, stochastic_depth_indices, unapply_stochastic_depth
 
 
@@ -30,7 +30,6 @@ def convnext_block_forward_2d(
     gate_activation: Activation | None = DEFAULT_MLP_GATE_ACTIVATION,
     w_norm: Tensor | None = None,
     b_norm: Tensor | None = None,
-    eps: float = NORM_EPS,
     training: bool = False,
     norm_type: NormType = NormType.LAYER_NORM,
     w_layer_scale: Tensor | None = None,
@@ -55,7 +54,6 @@ def convnext_block_forward_2d(
         gate_activation,
         w_norm,
         b_norm,
-        eps,
         training,
         norm_type,
     )
@@ -157,7 +155,6 @@ class ConvNextBlock(nn.Module):
                 self.mlp.gate_activation,
                 self.mlp.w_norm,
                 self.mlp.b_norm,
-                NORM_EPS,
                 self.training,
                 self.mlp.norm_type,
                 self.w_layer_scale,
@@ -182,7 +179,6 @@ class ConvNextBlock(nn.Module):
                 self.mlp.gate_activation,
                 self.mlp.w_norm,
                 self.mlp.b_norm,
-                NORM_EPS,
                 self.training,
                 self.mlp.norm_type,
                 self.w_layer_scale,
