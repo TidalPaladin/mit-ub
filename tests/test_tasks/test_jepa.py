@@ -156,7 +156,7 @@ def run_ema_sync(rank, world_size, backbone, optimizer_init):
 
 
 class TestJEPA:
-    @pytest.fixture(params=["smooth_l1", "cosine"])
+    @pytest.fixture(params=["smooth_l1", "smooth_l1_l2norm", "smooth_l1_layernorm", "cosine", "cosine-all"])
     def task(self, optimizer_init, backbone, request):
         config = JEPAConfig()
         config.scale = 1

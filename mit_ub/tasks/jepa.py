@@ -215,7 +215,12 @@ class JEPAConfig:
         tower_input_norm: If True, apply input normalization to the tower.
             Input normalization should not be necessary for backbones that already have an output normalization layer.
             Only has an effect if ``mlp_tower`` is ``True``.
-        loss_fn: Loss function to use for the JEPA loss. Can be ``smooth_l1`` or ``cosine``.
+        loss_fn: Loss function to use for the JEPA loss. Can be one of:
+            * ``smooth_l1``: Smooth L1 loss.
+            * ``smooth_l1_l2norm``: Smooth L1 loss where the target is L2-normalized.
+            * ``smooth_l1_layernorm``: Smooth L1 loss where the target is passed through a non-affine LayerNorm
+            * ``cosine``: Cosine similarity loss between individual tokens.
+            * ``cosine-all``: Cosine similarity loss, treating each example's target as a complete vector
         siglip_weight: Weight of the SigLIP loss. If 0, SigLIP does not contribute to the backbone gradients.
         siglip_gamma: Gamma value for the SigLIP focal loss. If None, use binary cross entropy.
         siglip_t: Temperature parameter for the SigLIP loss.
@@ -270,8 +275,10 @@ class JEPAConfig:
             raise ValueError("siglip_weight must be non-negative")
         if self.siglip_gamma is not None and self.siglip_gamma <= 0:
             raise ValueError("siglip_gamma must be non-negative")
-        if self.loss_fn not in ["smooth_l1", "cosine"]:
-            raise ValueError("loss_fn must be one of ['smooth_l1', 'cosine']")
+        if self.loss_fn not in ["smooth_l1", "smooth_l1_l2norm", "smooth_l1_layernorm", "cosine", "cosine-all"]:
+            raise ValueError(
+                "loss_fn must be one of ['smooth_l1', 'smooth_l1_l2norm', 'smooth_l1_layernorm', 'cosine', 'cosine-all']"
+            )
 
 
 class JEPA(Task):
@@ -532,6 +539,60 @@ class JEPA(Task):
         )
         return list(updates)
 
+    def compute_jepa_loss(self, pred: Tensor, target: Tensor) -> Tensor:
+        r"""Compute the JEPA loss between predicted and target embeddings.
+
+        Args:
+            pred: Predicted embeddings
+            target: Target embeddings
+
+        Shapes:
+            pred: :math:`(B, L, D)`
+            target: :math:`(B, L, D)`
+        """
+        if pred.shape != target.shape:
+            raise ValueError(f"Prediction shape {pred.shape} does not match target shape {target.shape}")
+        eps = max(
+            torch.finfo(pred.dtype).eps,
+            torch.finfo(target.dtype).eps,
+        )
+
+        match self.jepa_config.loss_fn:
+            case "smooth_l1":
+                return F.smooth_l1_loss(pred, target)
+
+            case "smooth_l1_l2norm":
+                divisor = target.numel() / target.shape[-1]
+                return (
+                    F.smooth_l1_loss(
+                        pred,
+                        F.normalize(target, p=2, dim=-1, eps=eps),
+                        reduction="sum",
+                    )
+                    / divisor
+                )
+
+            case "smooth_l1_layernorm":
+                return F.smooth_l1_loss(
+                    pred,
+                    F.layer_norm(target, target.shape[1:], eps=eps),
+                )
+
+            case "cosine":
+                return (1 - F.cosine_similarity(pred, target, dim=-1, eps=eps)).mean()
+
+            case "cosine-all":
+                sim = F.cosine_similarity(
+                    pred.flatten(start_dim=1),
+                    target.flatten(start_dim=1),
+                    dim=-1,
+                    eps=eps,
+                )
+                return (1 - sim).mean()
+
+            case _:
+                raise ValueError(f"Invalid loss function: {self.jepa_config.loss_fn}")
+
     def step(
         self,
         batch: Any,
@@ -613,13 +674,7 @@ class JEPA(Task):
         context: Tensor = pred_dict["jepa_context"]
 
         # compute loss between target and predictor encoded latents
-        assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
-        if self.jepa_config.loss_fn == "smooth_l1":
-            loss_jepa = F.smooth_l1_loss(pred, target)
-        elif self.jepa_config.loss_fn == "cosine":
-            loss_jepa = (1 - F.cosine_similarity(pred, target, dim=-1, eps=torch.finfo(pred.dtype).eps)).mean()
-        else:
-            raise ValueError(f"Invalid loss function: {self.jepa_config.loss_fn}")
+        loss_jepa = self.compute_jepa_loss(pred, target)
 
         # Compute siglip loss across all ranks. When siglip_weight is 0, a stop gradient is applied to the CLS token.
         _pred_cls_token = pred_cls_token.detach() if self.jepa_config.siglip_weight == 0 else pred_cls_token
