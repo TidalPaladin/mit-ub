@@ -12,7 +12,7 @@ from deep_helpers.tasks import Task
 from torch import Tensor
 
 from ..data import is_mixed, is_mixed_with_unknown, mixup, mixup_dense_label, sample_mixup_parameters
-from ..model import AdaptiveViTConfig, AnyModelConfig, ViT, ViTConfig
+from ..model import AnyModelConfig, ViT, ViTConfig
 from ..model.helpers import grid_to_tokens
 from ..model.layers.pool import PoolType
 from .distillation import DistillationConfig, DistillationWithProbe
@@ -330,7 +330,7 @@ class ClassificationTask(Task):
 class JEPAWithClassification(JEPAWithProbe):
     def __init__(
         self,
-        backbone_config: ViTConfig | AdaptiveViTConfig,
+        backbone_config: ViTConfig,
         classification_config: ClassificationConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
         probe_key: str = "target_cls_token",

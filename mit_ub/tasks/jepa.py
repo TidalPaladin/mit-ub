@@ -32,7 +32,7 @@ from ..data.noise import (
 from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, TokenSimilarity
 from ..metrics.distance import RMSPairwiseDistance, TokenRMSDistance
 from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
-from ..model import AdaptiveViT, AdaptiveViTConfig, ViT, ViTConfig
+from ..model import ViT, ViTConfig
 from ..model.helpers import compile_backend, compile_is_disabled, max_autotune
 from ..model.layers.layer_scale import has_layer_scale
 from ..model.layers.pos_enc import DEFAULT_POS_ENC_ACTIVATION, RelativeFactorizedPosition
@@ -297,11 +297,11 @@ class JEPA(Task):
         parameter_groups: Dictionary of parameter groups and their corresponding weight decay values.
     """
 
-    backbone: ViT | AdaptiveViT
+    backbone: ViT
 
     def __init__(
         self,
-        backbone_config: ViTConfig | AdaptiveViTConfig,
+        backbone_config: ViTConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
@@ -330,7 +330,7 @@ class JEPA(Task):
 
         # Backbone and EMA weights
         backbone = backbone_config.instantiate()
-        assert isinstance(backbone, (ViT, AdaptiveViT))
+        assert isinstance(backbone, ViT)
         self.backbone = backbone
         self.teacher_backbone = deepcopy(self.backbone)
         self.teacher_backbone.requires_grad_(False)
@@ -693,7 +693,7 @@ class JEPA(Task):
 class JEPAWithProbe(JEPA, ABC):
     def __init__(
         self,
-        backbone_config: ViTConfig | AdaptiveViTConfig,
+        backbone_config: ViTConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
         probe_key: str = "target_cls_token",
         optimizer_init: Dict[str, Any] = {},
