@@ -10,10 +10,11 @@ authors = [
     {name = "Scott Chase Waggener", email = "tidalpaladin@protonmail.com"},
 ]
 dependencies = [
-  "torch",
-  "torchvision",
-  "einops",
-  "registry @ git+https://github.com/TidalPaladin/callable-registry.git",
+    "torch",
+    "torchvision",
+    "einops",
+    "registry @ git+https://github.com/TidalPaladin/callable-registry.git",
+    "transformer-engine[pytorch]>=1.13.0",
 ]
 readme = "README.md"
 license = {text = "Apache"}
