@@ -13,7 +13,6 @@ import yaml
 from deep_helpers.helpers import load_checkpoint
 from safetensors.torch import load_file
 
-from ..model.config import SupportsSafeTensors
 from .activations import ACTIVATIONS, get_activation
 
 
