@@ -103,7 +103,7 @@ def patch_embed_forward(
     return F.layer_norm(x, x.shape[-1:], weight=w_norm, bias=b_norm, eps=eps)
 
 
-def _init_patch_embed(layer: nn.Module) -> None:
+def _init_patch_embed(layer: "PatchEmbed2d | PatchEmbed3d") -> None:
     layer.pos_enc.reset_parameters()
     nn.init.ones_(layer.w_norm)
     nn.init.zeros_(layer.b_norm)

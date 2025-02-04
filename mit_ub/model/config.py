@@ -6,7 +6,7 @@ from copy import copy
 from dataclasses import asdict, dataclass
 from os import PathLike
 from pathlib import Path
-from typing import Callable, ClassVar, List, Protocol, Self, Sequence, Type, TypeVar
+from typing import Any, Callable, ClassVar, List, Protocol, Self, Sequence, Type, TypeVar, cast, runtime_checkable
 
 import torch.nn as nn
 import yaml
@@ -166,6 +166,7 @@ def convert_sequences(config: T, container: Type[Sequence]) -> T:
 DEFAULT_CHECKPOINT_NAME = "checkpoint.safetensors"
 
 
+@runtime_checkable
 class SupportsSafeTensors(Protocol):
     CONFIG_TYPE: ClassVar[Type[ModelConfig]]
 
@@ -212,6 +213,7 @@ class SupportsSafeTensors(Protocol):
         path = Path(path)
         config = cls.CONFIG_TYPE.from_tar(path)
         model = config.instantiate()
+        assert isinstance(model, SupportsSafeTensors)
 
         # Then load the checkpoint
         with tarfile.open(path, "r:gz") as tar:
@@ -222,4 +224,4 @@ class SupportsSafeTensors(Protocol):
             with tempfile.NamedTemporaryFile() as tmp:
                 tmp.write(stream.read())
                 tmp.flush()
-                return model.load_safetensors(Path(tmp.name), strict)
+                return cast(Any, model).load_safetensors(Path(tmp.name), strict)

@@ -98,6 +98,9 @@ class TokenSimilarity(AveragePairwiseCosineSimilarity):
         - output: Scalar
     """
 
+    sum: Tensor
+    count: Tensor
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.add_state("sum", default=torch.tensor(0.0), dist_reduce_fx="sum")

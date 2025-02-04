@@ -1,4 +1,4 @@
-from typing import Tuple, cast
+from typing import Any, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -110,7 +110,7 @@ class ConvNextBlock(nn.Module):
     def reset_parameters(self) -> None:
         for module in self.children():
             if hasattr(module, "reset_parameters"):
-                module.reset_parameters()
+                cast(Any, module).reset_parameters()
 
     @property
     def dim(self) -> int:

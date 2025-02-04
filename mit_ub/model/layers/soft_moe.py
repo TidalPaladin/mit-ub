@@ -1,4 +1,4 @@
-from typing import List
+from typing import Any, List, cast
 
 import torch
 import torch.nn as nn
@@ -183,7 +183,7 @@ class SoftMoE(nn.Module):
         if self.b_k_combine is not None:
             nn.init.zeros_(self.b_k_combine)
         for expert in self.experts:
-            expert.reset_parameters()
+            cast(Any, expert).reset_parameters()
         if not isinstance(self.pre_norm, nn.Identity):
             self.pre_norm.reset_parameters()
         if not isinstance(self.layer_scale, nn.Identity):

@@ -108,7 +108,7 @@ class UniformNoise(Transform):
     def _get_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
         return dict()
 
-    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
         return uniform_noise(
             inpt,
             min=self.min,
@@ -126,7 +126,7 @@ class SaltPepperNoise(Transform):
     def _get_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
         return dict()
 
-    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
         return salt_pepper_noise(
             inpt,
             min=self.min,
@@ -145,7 +145,7 @@ class MultiplicativeNoise(Transform):
     def _get_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
         return dict()
 
-    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
         return multiplicative_noise(
             inpt,
             min=self.min,
