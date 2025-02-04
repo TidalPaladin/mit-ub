@@ -41,6 +41,10 @@ class RMSPairwiseDistance(tm.Metric):
         - output: Scalar
     """
 
+    sum_x: Tensor
+    sum_x_sq: Tensor
+    count: Tensor
+
     def __init__(self, dim: int, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.dim = dim
@@ -94,6 +98,9 @@ class TokenRMSDistance(RMSPairwiseDistance):
         - x: :math:`(..., L, D)`
         - output: Scalar
     """
+
+    sum: Tensor
+    count: Tensor
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

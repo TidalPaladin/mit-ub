@@ -230,7 +230,7 @@ class TestViT:
             param.data.fill_(3.0)
 
         # Load should update the irregular value back to normal
-        loaded = checkpoint_model.load_safetensors(safetensors_checkpoint, strict=False)
+        loaded = cast(Any, checkpoint_model).load_safetensors(safetensors_checkpoint, strict=False)
         for param in loaded.parameters():
             assert not (param.data == 3.0).all()
 

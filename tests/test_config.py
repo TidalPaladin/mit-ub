@@ -100,7 +100,7 @@ class TestSupportsSafeTensors:
 
         return tar_path
 
-    def test_load_safetensors(self, model: nn.Module, safetensors_checkpoint: Path):
+    def test_load_safetensors(self, model, safetensors_checkpoint: Path):
         # Fill with an irregular value
         for param in model.parameters():
             param.data.fill_(3.0)
