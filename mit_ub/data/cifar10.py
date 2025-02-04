@@ -20,6 +20,19 @@ class CIFAR10(CIFAR10Base):
         return {"img": img, "label": torch.tensor(target)}
 
 
+class CycledCIFAR10(CIFAR10):
+    def __init__(self, *args, cycle: int, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cycle = cycle
+
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        index = index % len(self.data)
+        return super().__getitem__(index)
+
+    def __len__(self):
+        return len(self.data) * self.cycle
+
+
 class CIFAR10DataModule(LightningDataModule):
     r"""Data module for CIFAR10 dataset.
 
@@ -63,6 +76,7 @@ class CIFAR10DataModule(LightningDataModule):
         pin_memory: bool = True,
         prefetch_factor: Optional[int] = None,
         persistent_workers: bool = True,
+        cycle: int | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -82,6 +96,7 @@ class CIFAR10DataModule(LightningDataModule):
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers if num_workers > 0 else False
         self.dataloader_config = kwargs
+        self.cycle = cycle
 
     def prepare_data(self):
         CIFAR10(root=self.root, train=True, download=True)
@@ -93,7 +108,12 @@ class CIFAR10DataModule(LightningDataModule):
             case "fit":
                 # prepare training dataset
                 rank_zero_info("Preparing training datasets")
-                self.dataset_train = CIFAR10(self.root, train=True, transform=self.train_transforms)
+                if self.cycle is not None:
+                    self.dataset_train = CycledCIFAR10(
+                        self.root, cycle=self.cycle, train=True, transform=self.train_transforms
+                    )
+                else:
+                    self.dataset_train = CIFAR10(self.root, train=True, transform=self.train_transforms)
                 self.dataset_val = CIFAR10(self.root, train=False, transform=self.val_transforms)
 
             case None:
