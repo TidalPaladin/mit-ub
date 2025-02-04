@@ -17,11 +17,11 @@ from mit_ub.profile import entrypoint
 def test_profile(tmp_path, capsys, device, training):
     config = ViTConfig(
         in_channels=3,
-        dim=128,
-        dim_feedforward=256,
         patch_size=(16, 16),
         depth=3,
-        nhead=128 // 16,
+        hidden_size=128,
+        ffn_hidden_size=256,
+        num_attention_heads=128 // 16,
     )
     config.save(tmp_path / "config.json")
 

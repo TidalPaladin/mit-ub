@@ -16,12 +16,13 @@ def vit_dummy():
     dim = 128
     config = ViTConfig(
         in_channels=1,
-        dim=dim,
         patch_size=(2, 2),
         depth=2,
-        nhead=dim // 32,
-        dim_feedforward=dim,
-        dropout=0.1,
+        hidden_size=dim,
+        ffn_hidden_size=dim,
+        num_attention_heads=dim // 32,
+        hidden_dropout=0.1,
+        attention_dropout=0.1,
     )
     return config
 
@@ -31,11 +32,10 @@ def convnext_dummy():
     config = ConvNextConfig(
         in_channels=1,
         depths=(2, 2, 2),
-        dims=(32, 48, 64),
-        dims_feedforward=(128, 192, 256),
-        dropout=0.1,
-        stochastic_depth=0.1,
-        patch_size=2,
+        hidden_sizes=(32, 48, 64),
+        ffn_hidden_sizes=(128, 192, 256),
+        patch_size=(2, 2),
+        kernel_size=(3, 3),
     )
     return config
 
@@ -45,12 +45,13 @@ def vit_distillation():
     dim = 128
     config = ViTConfig(
         in_channels=1,
-        dim=dim,
         patch_size=(4, 4),
         depth=2,
-        nhead=dim // 32,
-        dim_feedforward=dim,
-        dropout=0.1,
+        hidden_size=dim,
+        ffn_hidden_size=dim,
+        num_attention_heads=dim // 32,
+        hidden_dropout=0.1,
+        attention_dropout=0.1,
     )
     return config
 
@@ -60,12 +61,10 @@ def convnext_distillation():
     config = ConvNextConfig(
         in_channels=1,
         depths=(2, 2, 2),
-        up_depths=(2, 2),
-        dims=(32, 48, 64),
-        dims_feedforward=(128, 192, 256),
-        dropout=0.1,
-        stochastic_depth=0.1,
-        patch_size=2,
+        hidden_sizes=(32, 48, 64),
+        ffn_hidden_sizes=(128, 192, 256),
+        patch_size=(2, 2),
+        kernel_size=(3, 3),
     )
     return config
 

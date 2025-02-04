@@ -1,4 +1,5 @@
 import math
+import warnings
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -10,6 +11,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics as tm
+import transformer_engine.pytorch as te
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
 from lightning_utilities.core.rank_zero import rank_zero_info
@@ -31,13 +33,9 @@ from ..data.noise import (
 )
 from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, TokenSimilarity
 from ..metrics.distance import RMSPairwiseDistance, TokenRMSDistance
-from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
 from ..model import ViT, ViTConfig
 from ..model.helpers import compile_backend, compile_is_disabled, max_autotune
-from ..model.layers.layer_scale import has_layer_scale
-from ..model.layers.pos_enc import DEFAULT_POS_ENC_ACTIVATION, RelativeFactorizedPosition
-from ..model.layers.transformer import TransformerDecoderLayer
-from ..tokens import apply_mask, create_mask, generate_non_overlapping_mask, mask_is_ragged
+from ..tokens import apply_mask, generate_non_overlapping_mask, mask_is_ragged
 from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
 
 
@@ -47,6 +45,10 @@ sigmoid_focal_loss = torch.compile(
     backend=compile_backend(),
     disable=compile_is_disabled(),
 )
+
+# Spammed from TE
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 
 @torch.no_grad()
@@ -132,7 +134,7 @@ def compute_siglip_loss(
     b: Tensor,
     rank: int,
     world_size: int,
-    eps: float = 1e-12,
+    eps: float = 1e-5,
     gamma: float | None = 2.0,
 ) -> Tensor:
     r"""Compute the SigLIP loss across all ranks.
@@ -209,7 +211,6 @@ class JEPAConfig:
         noise_clip: If True, clip the noise to the range [0, 1].
         weight_decay_final: Final weight decay value. If set, the weight decay will be linearly
             annealed from the current value to this value over the course of training.
-        self_attn: If True, use self-attention in the predictor.
         mlp_tower: If True, use a MLP tower on the JEPA predictor output instead of a simple linear layer.
             Empirically it seems better to not use a MLP tower.
         tower_input_norm: If True, apply input normalization to the tower.
@@ -239,7 +240,6 @@ class JEPAConfig:
     noise_prob: float = DEFAULT_NOISE_PROB
     noise_clip: bool = True
     weight_decay_final: float | None = None
-    self_attn: bool = False
     mlp_tower: bool = False
     tower_input_norm: bool = False
     loss_fn: str = "smooth_l1"
@@ -337,36 +337,27 @@ class JEPA(Task):
         self.teacher_backbone.eval()
 
         # Position encoding / initialization for prediction queries.
-        self.pos_enc = RelativeFactorizedPosition(
-            len(self.backbone.stem.patch_size),
-            self.backbone.config.dim,
-            dropout=0.1,
-            norm=True,
-            norm_type=self.backbone.config.norm_type,
-            activation=self.backbone.get_external_activation(default=DEFAULT_POS_ENC_ACTIVATION),
+        self.pos_enc_proj = te.LayerNormMLP(
+            self.backbone.config.hidden_size,
+            self.backbone.config.hidden_size,
         )
 
         # JEPA predictor
         self.jepa_predictor = nn.ModuleList(
-            [
-                self.backbone.create_decoder_layer(i, self_attn=self.jepa_config.self_attn, kv_norm=False)
-                for i in range(self.jepa_config.predictor_depth)
-            ]
+            [self.backbone.create_decoder_layer(i, drop_path_rate=0.0) for i in range(self.jepa_config.predictor_depth)]
         )
-        self.jepa_head = self.backbone.create_head(
-            self.backbone.config.dim,
-            pool_type=None,
-            use_mlp=self.jepa_config.mlp_tower,
-            input_norm=self.jepa_config.tower_input_norm,
+        self.jepa_head = te.LayerNormLinear(
+            self.backbone.config.hidden_size,
+            self.backbone.config.hidden_size,
+            init_method=nn.init.orthogonal_,
         )
 
         # SigLIP pooling layer
         rank_zero_info(f"Using SigLIP weight: {self.jepa_config.siglip_weight}")
-        self.siglip_head = self.backbone.create_head(
-            self.backbone.config.dim,
-            pool_type=None,
-            use_mlp=self.jepa_config.mlp_tower,
-            input_norm=self.jepa_config.tower_input_norm,
+        self.siglip_head = te.LayerNormLinear(
+            self.backbone.config.hidden_size,
+            self.backbone.config.hidden_size,
+            init_method=nn.init.orthogonal_,
         )
         self.siglip_t = nn.Parameter(torch.empty(1))
         self.siglip_b = nn.Parameter(torch.empty(1))
@@ -394,19 +385,16 @@ class JEPA(Task):
         r"""Gets a MetricCollection for a given state"""
         metrics = tm.MetricCollection(
             {
-                "example_sim": AveragePairwiseCosineSimilarity(self.backbone.config.dim),
-                "micro_token_sim": TokenSimilarity(self.backbone.config.dim),
-                "macro_token_sim": AveragePairwiseCosineSimilarity(self.backbone.config.dim),
-                "example_rms": RMSPairwiseDistance(self.backbone.config.dim),
-                "micro_token_rms": TokenRMSDistance(self.backbone.config.dim),
-                "macro_token_rms": RMSPairwiseDistance(self.backbone.config.dim),
+                "example_sim": AveragePairwiseCosineSimilarity(self.backbone.config.hidden_size),
+                "micro_token_sim": TokenSimilarity(self.backbone.config.hidden_size),
+                "macro_token_sim": AveragePairwiseCosineSimilarity(self.backbone.config.hidden_size),
+                "example_rms": RMSPairwiseDistance(self.backbone.config.hidden_size),
+                "micro_token_rms": TokenRMSDistance(self.backbone.config.hidden_size),
+                "macro_token_rms": RMSPairwiseDistance(self.backbone.config.hidden_size),
                 "jepa_loss": tm.MeanMetric(),
                 "siglip_loss": tm.MeanMetric(),
             }
         )
-        if has_layer_scale(self.backbone) and state.mode == Mode.TRAIN:
-            metrics["layer_scale_max"] = MaxLayerScale()
-            metrics["layer_scale_mean"] = MeanLayerScale()
         if state.mode == Mode.TRAIN:
             metrics["ema_momentum"] = tm.MeanMetric()
             metrics["siglip_t"] = tm.MeanMetric()
@@ -421,33 +409,19 @@ class JEPA(Task):
             Tuple[Tensor, Tensor], self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
         )
         torch.cuda.nvtx.range_pop()
-        B, L, D = context.shape
-
-        # Sample a subset of the context as input to the predictor and project
-        if self.jepa_config.context_subsample_ratio < 1.0:
-            subsample_mask = create_mask(
-                (L,),
-                mask_ratio=1 - self.jepa_config.context_subsample_ratio,
-                batch_size=B,
-                device=context.device,
-            )
-            context = apply_mask(subsample_mask, context, fill_value=None)
-            L = context.shape[1]
-
-        # Add CLS token to context
-        context = torch.cat([cls_token.view(B, 1, -1).expand(B, -1, -1), context], dim=1)
-        assert context.shape == (B, L + 1, D)
 
         # Prepare positional encoding for target queries
-        tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
-        query = self.pos_enc(tokenized_size).expand(B, -1, -1)
+        with torch.no_grad():
+            tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
+            query = self.backbone.stem.pos_enc(tokenized_size)
+        query = self.pos_enc_proj(query).expand(target_mask.shape[0], -1, -1)
         query = apply_mask(target_mask, query, fill_value=None)
 
         # Run query and context through predictor
         torch.cuda.nvtx.range_push("jepa_predictor")
         for block in self.jepa_predictor:
-            block = cast(TransformerDecoderLayer, block)
-            query = block(query, context)
+            block = cast(te.TransformerLayer, block)
+            query = block(query, encoder_output=context, checkpoint_core_attention=self.backbone.config.checkpoint)
         torch.cuda.nvtx.range_pop()
 
         pred = self.jepa_head(query)
@@ -572,6 +546,12 @@ class JEPA(Task):
             torch.cuda.nvtx.range_push("ema_backbone")
             full_target, target_cls_token = cast(Tuple[Tensor, Tensor], self.teacher_backbone(x, reshape=False))
             torch.cuda.nvtx.range_pop()
+
+        # inference_mode() removes version tracking so we must clone the outputs
+        full_target = full_target.clone()
+        target_cls_token = target_cls_token.clone()
+
+        with torch.no_grad():
             siglip_target = torch.eye(full_target.shape[0], device=full_target.device, dtype=torch.float32)
 
             # apply random noise
@@ -615,9 +595,9 @@ class JEPA(Task):
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
         if self.jepa_config.loss_fn == "smooth_l1":
-            loss_jepa = F.smooth_l1_loss(pred, target)
+            loss_jepa = F.smooth_l1_loss(pred, F.layer_norm(target, target.shape[-1:]))
         elif self.jepa_config.loss_fn == "cosine":
-            loss_jepa = (1 - F.cosine_similarity(pred, target, dim=-1, eps=torch.finfo(pred.dtype).eps)).mean()
+            loss_jepa = (1 - F.cosine_similarity(pred, target, dim=-1, eps=1e-5)).mean()
         else:
             raise ValueError(f"Invalid loss function: {self.jepa_config.loss_fn}")
 

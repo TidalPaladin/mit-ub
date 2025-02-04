@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.helpers import load_checkpoint
-from deep_helpers.structs import Mode, State
+from deep_helpers.structs import State
 from deep_helpers.tasks import Task
 from torch import Tensor
 
@@ -24,11 +24,8 @@ from ..data.noise import (
     UNIFORM_NOISE_MIN,
     RandomNoise,
 )
-from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
 from ..model import AnyModelConfig, ViT
 from ..model.helpers import grid_to_tokens
-from ..model.layers import has_layer_scale
-from ..model.layers.pool import PoolType
 from .jepa import mixup
 
 
@@ -64,9 +61,9 @@ class DistillationConfig:
     noise_clip: bool = True
     salt_pepper_prob: float = SALT_PEPPER_NOISE_PROB
     salt_pepper_pixel_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX)
-    student_pool_type: str | PoolType | None = None
+    student_pool_type: str | None = None
     student_pool_input_norm: bool = False
-    teacher_pool_type: str | PoolType | None = None
+    teacher_pool_type: str | None = None
     teacher_pool_input_norm: bool = False
     teacher_resolution: Sequence[int] | None = None
 
@@ -120,18 +117,16 @@ class Distillation(Task):
         if not isinstance(self.teacher_backbone, ViT):
             raise ValueError("Teacher backbone must be a ViT")
 
-        student_dim = backbone.config.dim
-        teacher_dim = teacher_backbone.config.dim
+        student_dim = backbone.config.isotropic_output_dim
+        teacher_dim = teacher_backbone.config.isotropic_output_dim
         self.proj = nn.Linear(student_dim, teacher_dim) if student_dim != teacher_dim else nn.Identity()
         self.student_pool = self.backbone.create_head(
             out_dim=teacher_dim,
-            pool_type=cast(PoolType | None, self.config.student_pool_type),
-            input_norm=self.config.student_pool_input_norm,
+            pool_type=self.config.student_pool_type,
         )
         self.teacher_pool = self.teacher_backbone.create_head(
             out_dim=teacher_dim,
-            pool_type=cast(PoolType | None, self.config.teacher_pool_type),
-            input_norm=self.config.teacher_pool_input_norm,
+            pool_type=self.config.teacher_pool_type,
         )
 
         # Resize teacher input if necessary
@@ -174,11 +169,6 @@ class Distillation(Task):
                 "distill_loss_cls": tm.MeanMetric(),
             }
         )
-
-        if has_layer_scale(self.backbone) and state.mode == Mode.TRAIN:
-            metrics["layer_scale_max"] = MaxLayerScale()
-            metrics["layer_scale_mean"] = MeanLayerScale()
-
         return metrics
 
     def forward(self, x: Tensor) -> Dict[str, Tensor]:

@@ -1,6 +1,5 @@
-from .convnext import ConvNext, ConvNextConfig
+from .convnext import ConvNext2d, ConvNextConfig
 from .vit import ViT, ViTConfig
-from .vit_te import ViTTE, ViTTEConfig
 
 
 AnyModelConfig = ViTConfig | ConvNextConfig
@@ -8,9 +7,7 @@ AnyModelConfig = ViTConfig | ConvNextConfig
 __all__ = [
     "ViT",
     "ViTConfig",
-    "ConvNext",
+    "ConvNext2d",
     "ConvNextConfig",
     "AnyModelConfig",
-    "ViTTE",
-    "ViTTEConfig",
 ]

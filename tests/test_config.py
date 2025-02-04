@@ -7,21 +7,12 @@ import pytest
 import torch.nn as nn
 from safetensors.torch import save_file
 
-from mit_ub.model.activations import ACTIVATIONS, Activation
-from mit_ub.model.config import (
-    ModelConfig,
-    SupportsSafeTensors,
-    convert_activation_to_str,
-    convert_sequences,
-    convert_str_to_activation,
-    get_activation_fields,
-)
+from mit_ub.model.config import ModelConfig, SupportsSafeTensors, convert_sequences
 
 
 @dataclass(frozen=True)
 class DummyConfig(ModelConfig):
-    activation: str | Activation = "gelu"
-    gate_activation: str | Activation | None = None
+    activation: str = "gelu"
     sequence_field: Sequence[int] = field(default_factory=list)
 
     def instantiate(self) -> nn.Module:
@@ -55,26 +46,6 @@ class TestModelConfig:
 
         loaded = DummyConfig.from_tar(tar_path)
         assert loaded == config
-
-
-def test_get_activation_fields():
-    config = DummyConfig()
-    fields = get_activation_fields(config)
-    assert fields == ["activation", "gate_activation"]
-
-
-def test_convert_activation_to_str():
-    config = DummyConfig(activation=ACTIVATIONS["gelu"])
-    converted = convert_activation_to_str(config)
-    assert isinstance(converted.activation, str)
-    assert converted.activation == "gelu"
-
-
-def test_convert_str_to_activation():
-    config = DummyConfig(activation="gelu")
-    converted = convert_str_to_activation(config)
-    assert callable(converted.activation)
-    assert converted.activation == ACTIVATIONS["gelu"]
 
 
 @pytest.mark.parametrize("container", [list, tuple])

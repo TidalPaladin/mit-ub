@@ -1643,7 +1643,7 @@ files = [
 
 [[package]]
 name = "pytorch-optimizer"
-version = "3.3.2"
+version = "3.4.0"
 requires_python = ">=3.8"
 summary = "optimizer & lr scheduler & objective function collections in PyTorch"
 groups = ["train"]
@@ -1653,8 +1653,8 @@ dependencies = [
     "torch>=1.10; python_version >= \"3.8\"",
 ]
 files = [
-    {file = "pytorch_optimizer-3.3.2-py3-none-any.whl", hash = "sha256:8bc424ad50ca5eda9d2893f59ff4e94a3846cc030a09eb3cb2d86ab37a591992"},
-    {file = "pytorch_optimizer-3.3.2.tar.gz", hash = "sha256:0f0d5e5d92d884c65d0034a0b337ac6e6fea855f3f384c7fdb462da8bca04eb2"},
+    {file = "pytorch_optimizer-3.4.0-py3-none-any.whl", hash = "sha256:e631f2310ae98f6c641deaacf26867b4913bf5c72985ce7ba3b1ee72e17cd6cb"},
+    {file = "pytorch_optimizer-3.4.0.tar.gz", hash = "sha256:0af1f7575bf9c46b9e16c50f351e17cf992a225f8115d36baa5410e77f72a60d"},
 ]
 
 [[package]]
@@ -2072,7 +2072,7 @@ files = [
 [[package]]
 name = "transformer-engine-torch"
 version = "1.13.0"
-summary = ""
+summary = "Transformer acceleration library - Torch Lib"
 groups = ["default"]
 dependencies = [
     "torch",

@@ -3,7 +3,6 @@ import pytorch_lightning as pl
 import torch
 from deep_helpers.structs import Mode, State
 
-from mit_ub.model.layers import has_layer_scale
 from mit_ub.tasks.classification import (
     ClassificationConfig,
     ClassificationTask,
@@ -53,17 +52,21 @@ class TestClassificationTask:
         base_keys = {"bce_loss", "acc", "macro_acc", "auroc"}
         assert set(metrics.keys()) == base_keys
 
+    @pytest.mark.cuda
     def test_fit(self, task, cifar10_datamodule, logger):
         trainer = pl.Trainer(
-            accelerator="cpu",
+            accelerator="gpu",
+            devices=1,
             fast_dev_run=True,
             logger=logger,
         )
         trainer.fit(task, datamodule=cifar10_datamodule)
 
+    @pytest.mark.cuda
     def test_fit_binary(self, binary_task, cifar10_datamodule_binary, logger):
         trainer = pl.Trainer(
-            accelerator="cpu",
+            accelerator="gpu",
+            devices=1,
             fast_dev_run=True,
             logger=logger,
         )
@@ -74,9 +77,11 @@ class TestClassificationTask:
         config = ClassificationConfig(num_classes=10, pool_type="avg")
         return ClassificationTask(convnext_dummy, classification_config=config, optimizer_init=optimizer_init)
 
+    @pytest.mark.cuda
     def test_fit_convnext(self, task_convnext, cifar10_datamodule, logger):
         trainer = pl.Trainer(
-            accelerator="cpu",
+            accelerator="gpu",
+            devices=1,
             fast_dev_run=True,
             logger=logger,
         )
@@ -126,11 +131,7 @@ class TestJEPAWithClassification:
             "macro_token_rms",
             "siglip_loss",
         }
-        train_keys = (
-            {"layer_scale_mean", "layer_scale_max", "ema_momentum", "siglip_t", "siglip_b"}
-            if has_layer_scale(task.backbone)
-            else {"ema_momentum", "siglip_t", "siglip_b"}
-        )
+        train_keys = {"ema_momentum", "siglip_t", "siglip_b"}
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
         else:
@@ -161,27 +162,27 @@ class TestJEPAWithClassification:
             "macro_token_rms",
             "siglip_loss",
         }
-        train_keys = (
-            {"layer_scale_mean", "layer_scale_max", "ema_momentum", "siglip_t", "siglip_b"}
-            if has_layer_scale(binary_task.backbone)
-            else {"ema_momentum", "siglip_t", "siglip_b"}
-        )
+        train_keys = {"ema_momentum", "siglip_t", "siglip_b"}
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
         else:
             assert set(metrics.keys()) == base_keys
 
+    @pytest.mark.cuda
     def test_fit(self, task, cifar10_datamodule, logger):
         trainer = pl.Trainer(
-            accelerator="cpu",
+            accelerator="gpu",
+            devices=1,
             fast_dev_run=True,
             logger=logger,
         )
         trainer.fit(task, datamodule=cifar10_datamodule)
 
+    @pytest.mark.cuda
     def test_fit_binary(self, binary_task, cifar10_datamodule_binary, logger):
         trainer = pl.Trainer(
-            accelerator="cpu",
+            accelerator="gpu",
+            devices=1,
             fast_dev_run=True,
             logger=logger,
         )
@@ -249,7 +250,7 @@ class TestDistillationWithClassification:
     def test_create_metrics(self, task, state):
         metrics = task.create_metrics(state)
         base_keys = {"distill_loss", "distill_loss_cls", "ce_loss", "acc", "macro_acc"}
-        train_keys = {"layer_scale_mean", "layer_scale_max"} if has_layer_scale(task.backbone) else set()
+        train_keys = set()
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
         else:
@@ -267,23 +268,27 @@ class TestDistillationWithClassification:
     def test_create_metrics_binary(self, binary_task, state):
         metrics = binary_task.create_metrics(state)
         base_keys = {"distill_loss", "distill_loss_cls", "bce_loss", "acc", "macro_acc", "auroc"}
-        train_keys = {"layer_scale_mean", "layer_scale_max"} if has_layer_scale(binary_task.backbone) else set()
+        train_keys = set()
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
         else:
             assert set(metrics.keys()) == base_keys
 
+    @pytest.mark.cuda
     def test_fit(self, task, cifar10_datamodule, logger):
         trainer = pl.Trainer(
-            accelerator="cpu",
+            accelerator="gpu",
+            devices=1,
             fast_dev_run=True,
             logger=logger,
         )
         trainer.fit(task, datamodule=cifar10_datamodule)
 
+    @pytest.mark.cuda
     def test_fit_binary(self, binary_task, cifar10_datamodule_binary, logger):
         trainer = pl.Trainer(
-            accelerator="cpu",
+            accelerator="gpu",
+            devices=1,
             fast_dev_run=True,
             logger=logger,
         )

@@ -1,27 +1,29 @@
 import json
 import tarfile
 import tempfile
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from copy import copy
 from dataclasses import asdict, dataclass
 from os import PathLike
 from pathlib import Path
-from typing import Callable, ClassVar, List, Protocol, Self, Sequence, Type, TypeVar
+from typing import ClassVar, Protocol, Self, Sequence, Type, TypeVar
 
 import torch.nn as nn
 import yaml
 from deep_helpers.helpers import load_checkpoint
 from safetensors.torch import load_file
 
-from .activations import ACTIVATIONS, get_activation
-
 
 @dataclass(frozen=True)
-class ModelConfig:
+class ModelConfig(ABC):
 
     def __post_init__(self) -> None:
-        convert_str_to_activation(self)
         convert_sequences(self, tuple)
+
+    @property
+    def isotropic_output_dim(self) -> int:
+        r"""The output dimension of the model when interpreted as an isotropic model."""
+        raise NotImplementedError
 
     @classmethod
     def from_file(cls, path: Path) -> Self:
@@ -72,7 +74,6 @@ class ModelConfig:
 
     def _prepare_for_save(self) -> Self:
         config = copy(self)
-        config = convert_activation_to_str(config)
         config = convert_sequences(config, list)
         return config
 
@@ -93,54 +94,6 @@ class ModelConfig:
 
 
 T = TypeVar("T", bound=ModelConfig)
-
-
-def get_activation_fields(config: ModelConfig) -> List[str]:
-    return [name for name in config.__dataclass_fields__.keys() if "activation" in name.replace(" ", "")]
-
-
-def convert_activation_to_str(config: T) -> T:
-    r"""Convert any field of type Activation to a string."""
-    # Convert activation and gate_activation to strings.
-    # First try using the name of the activation function. If that isnt in ACTIVATIONS,
-    # traverse the dict to find the key.
-    for key in get_activation_fields(config):
-        fn = getattr(config, key)
-        if fn is None:
-            continue
-
-        # Try using function name directly
-        replacement = None
-        if fn.__name__ in ACTIVATIONS:
-            replacement = fn.__name__
-        else:
-            # Search through ACTIVATIONS dict
-            for name, func in ACTIVATIONS.items():
-                if func == fn:
-                    replacement = name
-                    break
-
-        if replacement is not None:
-            object.__setattr__(config, key, replacement)
-            assert isinstance(getattr(config, key), str)
-        else:
-            raise ValueError(f"Activation function {fn} not found in ACTIVATIONS")
-
-    return config
-
-
-def convert_str_to_activation(config: T) -> T:
-    r"""Convert any field of type Activation to a string."""
-    for key in get_activation_fields(config):
-        val = getattr(config, key)
-        if val is None:
-            continue
-
-        act = get_activation(val)
-        object.__setattr__(config, key, act)
-        assert isinstance(getattr(config, key), Callable)
-
-    return config
 
 
 def convert_sequences(config: T, container: Type[Sequence]) -> T:

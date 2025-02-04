@@ -1,14 +1,11 @@
-import math
 from typing import Sequence
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import transformer_engine.pytorch as te
 from torch import Tensor
 
-from ..activations import DEFAULT_POS_ENC_ACTIVATION, Activation
-from ..helpers import compile_backend, compile_is_disabled, max_autotune
-from .mlp import NormType
+from ..helpers import compile_backend, compile_is_disabled
 
 
 @torch.compile(fullgraph=True, backend=compile_backend(), disable=compile_is_disabled())
@@ -39,83 +36,6 @@ def create_grid(
     return grid.view(1, -1, len(dims))
 
 
-@torch.compile(
-    fullgraph=True,
-    backend=compile_backend(),
-    disable=compile_is_disabled(),
-    options={
-        "max_autotune": max_autotune(),
-        "shape_padding": True,
-        "triton.cudagraph_trees": max_autotune(),
-    },
-)
-def relative_factorized_position_forward(
-    dims: Sequence[int],
-    w1: Tensor,
-    b1: Tensor | None,
-    w2: Tensor,
-    b2: Tensor | None,
-    w_norm: Tensor | None,
-    b_norm: Tensor | None,
-    activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
-    norm_type: NormType = NormType.LAYER_NORM,
-    dropout: float = 0.0,
-    training: bool = False,
-) -> Tensor:
-    """
-    Perform the forward pass for the relative factorized position encoding.
-
-    Args:
-        dims:
-            The length of each dimension
-        w1:
-            The weight tensor for the first linear layer
-        b1:
-            The bias tensor for the first linear layer
-        w2:
-            The weight tensor for the second linear layer
-        b2:
-            The bias tensor for the second linear layer
-        w_norm:
-            The weight tensor for the layer normalization
-        b_norm:
-            The bias tensor for the layer normalization
-        activation:
-            The activation function to be applied after the first linear layer
-        norm_type:
-            The type of normalization to be applied
-        dropout:
-            The dropout probability
-
-    Shapes:
-        * dims - :math:`(C,)` where :math:`C` is the number of dimensions
-        * w1 - :math:`(H, C)` where :math:`H` is the hidden dimension
-        * b1 - :math:`(H,)` or None
-        * w2 - :math:`(D, H)` where :math:`D` is the output dimension
-        * b2 - :math:`(D,)` or None
-        * w_norm - :math:`(D,)`
-        * b_norm - :math:`(D,)` or None
-        * Output - :math:`(1, L, D)` where :math:`L` is the product of dims and :math:`D` is the output dimension
-    """
-    # TODO: Make a faster kernel that doesn't need a grid of input coords. Just compute normalized
-    # coodinates based on the block of the output we're computing, no need to read coords from DRAM.
-    # NOTE: Scale by 1/sqrt(1/3) make uniform distribution have unit variance.
-    scale = math.sqrt(3)
-    lens = [torch.linspace(-scale, scale, d, device=w1.device, dtype=w1.dtype) for d in dims]
-    grid = torch.stack(torch.meshgrid(lens, indexing="ij"), dim=-1).view(1, -1, len(dims))
-
-    y = F.linear(grid, w1, b1)
-    y = activation(y)
-    y = F.dropout(y, p=dropout, training=training, inplace=True)
-    y = F.linear(y, w2, b2)
-    if w_norm is not None:
-        if norm_type == NormType.RMS_NORM:
-            y = F.rms_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm)
-        else:
-            y = F.layer_norm(y, normalized_shape=(y.shape[-1],), weight=w_norm, bias=b_norm)
-    return y
-
-
 class RelativeFactorizedPosition(nn.Module):
     """
     Computes relative factorized position encodings.
@@ -130,89 +50,25 @@ class RelativeFactorizedPosition(nn.Module):
             Input dimension size
         d_out:
             Output dimension size
-        dropout:
-            Dropout probability to be applied in the MLP
 
     Shapes:
         * Input - :math:`(C,)` where :math:`C` is the number of input dimensions
         * Output - :math:`(1, L, D)` where :math:`L` is the product of input dimensions and :math:`D` is the output dimension
     """
 
-    def __init__(
-        self,
-        d_in: int,
-        d_out: int,
-        dropout: float = 0.0,
-        activation: Activation = DEFAULT_POS_ENC_ACTIVATION,
-        dim_feedforward: int | None = None,
-        norm: bool = False,
-        norm_type: NormType = NormType.LAYER_NORM,
-    ):
+    def __init__(self, d_in: int, d_out: int):
         super().__init__()
-        self._dim_feedforward = dim_feedforward or int(4 * d_out)
-        self.dropout = dropout
-        self.activation = activation
-        self.w_in = nn.Parameter(torch.empty(self.dim_feedforward, d_in))
-        self.w_out = nn.Parameter(torch.empty(d_out, self.dim_feedforward))
-        self.b_in = nn.Parameter(torch.empty(self.dim_feedforward))
-        self.b_out = nn.Parameter(torch.empty(d_out))
-        self.norm_type = norm_type
-        if norm:
-            self.w_norm = nn.Parameter(torch.empty(d_out))
-            if norm_type == NormType.RMS_NORM:
-                self.register_parameter("b_norm", None)
-            else:
-                self.b_norm = nn.Parameter(torch.empty(d_out))
-        else:
-            self.register_parameter("w_norm", None)
-            self.register_parameter("b_norm", None)
-        self.reset_parameters()
-
-    def reset_parameters(self) -> None:
-        for weight in (self.w_in, self.w_out):
-            nn.init.xavier_uniform_(weight)
-
-        for bias in (self.b_in, self.b_out, self.b_norm):
-            if bias is not None:
-                nn.init.zeros_(bias)
-
-        if self.w_norm is not None:
-            nn.init.ones_(self.w_norm)
-
-    @property
-    def d_in(self) -> int:
-        return self.w_in.shape[1]
-
-    @property
-    def d_out(self) -> int:
-        return self.w_out.shape[0]
-
-    @property
-    def dim_feedforward(self) -> int:
-        return self._dim_feedforward
-
-    def extra_repr(self) -> str:
-        return (
-            f"in={self.d_in}, "
-            f"hidden={self.dim_feedforward}, "
-            f"out={self.d_out}, "
-            f"dropout={self.dropout}, "
-            f"act={self.activation.__name__}, "
-            f"norm={self.w_norm is not None}, "
-            f"norm_type={self.norm_type}"
-        )
+        self.linear = te.Linear(d_in, d_out)
+        self.mlp = te.LayerNormMLP(d_out, d_out, activation="srelu")
 
     def forward(self, dims: Sequence[int]) -> Tensor:
-        return relative_factorized_position_forward(
-            dims,
-            self.w_in,
-            self.b_in,
-            self.w_out,
-            self.b_out,
-            self.w_norm,
-            self.b_norm,
-            self.activation,
-            self.norm_type,
-            dropout=self.dropout,
-            training=self.training,
-        )
+        with torch.autocast(device_type=self.linear.weight.device.type, dtype=torch.float32):
+            mp = torch.get_float32_matmul_precision()
+            torch.set_float32_matmul_precision("high")
+            with torch.no_grad():
+                grid = create_grid(dims, device=self.linear.weight.device)
+            result = self.linear(grid)
+            torch.set_float32_matmul_precision(mp)
+
+        result = self.mlp(result)
+        return result

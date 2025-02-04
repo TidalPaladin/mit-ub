@@ -1,7 +1,7 @@
 from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, cast
+from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -14,7 +14,6 @@ from torch import Tensor
 from ..data import is_mixed, is_mixed_with_unknown, mixup, mixup_dense_label, sample_mixup_parameters
 from ..model import AnyModelConfig, ViT, ViTConfig
 from ..model.helpers import grid_to_tokens
-from ..model.layers.pool import PoolType
 from .distillation import DistillationConfig, DistillationWithProbe
 from .jepa import JEPAConfig, JEPAWithProbe
 
@@ -177,7 +176,7 @@ class ClassificationConfig:
     mixup_prob: float = 0.2
     freeze_backbone: bool = False
     # TODO: jsonargparse can't handle the strenum it seems
-    pool_type: str | PoolType | None = None
+    pool_type: str | None = None
     label_key: str = "label"
     mlp_tower: bool = False
     tower_input_norm: bool = False
@@ -189,8 +188,6 @@ class ClassificationConfig:
             raise ValueError("mixup_alpha must be positive")
         if not 0 <= self.mixup_prob <= 1:
             raise ValueError("mixup_prob must be in the range [0, 1]")
-        if isinstance(self.pool_type, str):
-            self.pool_type = PoolType(self.pool_type)
 
     @property
     def is_binary(self) -> bool:
@@ -250,11 +247,9 @@ class ClassificationTask(Task):
             for param in self.backbone.parameters():
                 param.requires_grad = False
 
-        self.backbone.config.dim
-
         self.classification_head = self.backbone.create_head(
             out_dim=self.config.num_classes if not self.config.is_binary else 1,
-            pool_type=cast(PoolType | None, self.config.pool_type),
+            pool_type=self.config.pool_type,
             use_mlp=self.config.mlp_tower,
             input_norm=self.config.tower_input_norm,
         )
@@ -365,9 +360,8 @@ class JEPAWithClassification(JEPAWithProbe):
     def create_probe_head(self) -> nn.Module:
         return self.backbone.create_head(
             out_dim=self.classification_config.num_classes if not self.classification_config.is_binary else 1,
-            pool_type=cast(PoolType | None, self.classification_config.pool_type),
-            use_mlp=self.classification_config.mlp_tower,
-            input_norm=self.classification_config.tower_input_norm,
+            pool_type=self.classification_config.pool_type,
+            use_mlp=False,
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
@@ -446,9 +440,8 @@ class DistillationWithClassification(DistillationWithProbe):
     def create_probe_head(self) -> nn.Module:
         return self.backbone.create_head(
             out_dim=self.classification_config.num_classes if not self.classification_config.is_binary else 1,
-            pool_type=cast(PoolType | None, self.classification_config.pool_type),
-            use_mlp=self.classification_config.mlp_tower,
-            input_norm=self.classification_config.tower_input_norm,
+            pool_type=self.classification_config.pool_type,
+            use_mlp=False,
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:

@@ -13,7 +13,6 @@ from torch.multiprocessing import spawn  # type: ignore
 from torch.testing import assert_close
 from torchvision.ops import sigmoid_focal_loss
 
-from mit_ub.model.layers import has_layer_scale
 from mit_ub.tasks.jepa import JEPA, EMAConfig, JEPAConfig, compute_siglip_loss, ring_exchange_all
 
 
@@ -184,11 +183,7 @@ class TestJEPA:
             "macro_token_rms",
             "siglip_loss",
         }
-        train_keys = (
-            {"layer_scale_mean", "layer_scale_max", "ema_momentum", "siglip_t", "siglip_b"}
-            if has_layer_scale(task.backbone)
-            else {"ema_momentum", "siglip_t", "siglip_b"}
-        )
+        train_keys = {"ema_momentum", "siglip_t", "siglip_b"}
 
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
@@ -285,10 +280,12 @@ class TestJEPA:
         assert opt.param_groups[0]["weight_decay"] == 1.0
         assert opt.param_groups[1]["weight_decay"] == 0.5
 
+    @pytest.mark.cuda
     def test_fit(self, task, cifar10_datamodule, logger):
         task.weight_decay_final = 4.0
         trainer = pl.Trainer(
-            accelerator="cpu",
+            accelerator="gpu",
+            devices=1,
             fast_dev_run=True,
             logger=logger,
         )
@@ -301,10 +298,12 @@ class TestJEPA:
         config.siglip_weight = 0.5
         return JEPA(backbone, optimizer_init=optimizer_init, jepa_config=config)
 
+    @pytest.mark.cuda
     def test_fit_siglip(self, task_siglip, cifar10_datamodule, logger):
         task_siglip.weight_decay_final = 4.0
         trainer = pl.Trainer(
-            accelerator="cpu",
+            accelerator="gpu",
+            devices=1,
             fast_dev_run=True,
             logger=logger,
         )
