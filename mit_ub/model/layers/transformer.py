@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Any, Tuple, cast
 
 import torch.nn as nn
 from torch import Tensor
@@ -81,7 +81,7 @@ class TransformerEncoderLayer(nn.Module):
     def reset_parameters(self):
         for module in self.children():
             if hasattr(module, "reset_parameters"):
-                module.reset_parameters()
+                cast(Any, module).reset_parameters()
 
     def forward(self, x: Tensor) -> Tensor:
         # Self attention
@@ -189,7 +189,7 @@ class TransformerDecoderLayer(nn.Module):
     def reset_parameters(self):
         for module in self.children():
             if hasattr(module, "reset_parameters"):
-                module.reset_parameters()
+                cast(Any, module).reset_parameters()
 
     def forward(self, q: Tensor, kv: Tensor) -> Tensor:
         # Self attention

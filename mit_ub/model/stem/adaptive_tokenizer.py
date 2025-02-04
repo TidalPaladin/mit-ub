@@ -1,6 +1,6 @@
 import math
 from enum import StrEnum
-from typing import Sequence, Tuple, cast
+from typing import Any, Sequence, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -123,7 +123,7 @@ class AdaptiveTokenizer2d(nn.Module, PatchEmbed[Tuple[int, int]]):
         self.reset_parameters()
 
     def reset_parameters(self):
-        _init_patch_embed(self)
+        _init_patch_embed(cast(Any, self))
 
     @property
     def patch_size(self) -> Tuple[int, int]:
@@ -213,7 +213,7 @@ class AdaptiveTokenizer3d(nn.Module, PatchEmbed[Tuple[int, int, int]]):
         self.reset_parameters()
 
     def reset_parameters(self):
-        _init_patch_embed(self)
+        _init_patch_embed(cast(Any, self))
 
     @property
     def patch_size(self) -> Tuple[int, int, int]:

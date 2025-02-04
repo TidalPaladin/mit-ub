@@ -28,10 +28,10 @@ def test_mlp_forward(dropout, training):
     torch.random.manual_seed(0)
     actual = mlp_forward(
         x,
-        layer[0].weight,
-        layer[3].weight,
-        layer[0].bias,
-        layer[3].bias,
+        layer[0].weight,  # type: ignore
+        layer[3].weight,  # type: ignore
+        layer[0].bias,  # type: ignore
+        layer[3].bias,  # type: ignore
         dropout=dropout,
         activation=F.relu,
         training=training,

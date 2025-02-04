@@ -2,6 +2,7 @@ import json
 import tarfile
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 import torch
@@ -268,7 +269,7 @@ class TestConvNext:
             param.data.fill_(3.0)
 
         # Load should update the irregular value back to normal
-        loaded = checkpoint_model.load_safetensors(safetensors_checkpoint)
+        loaded = cast(Any, checkpoint_model).load_safetensors(safetensors_checkpoint)
         for param in loaded.parameters():
             assert not (param.data == 3.0).all()
 

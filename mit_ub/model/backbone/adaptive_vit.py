@@ -98,9 +98,11 @@ class AdaptiveViT(ViT):
         # Since we are updating the KV tokens iteratively we must ensure that they are always normalized.
         # Failure do to do will result in numerical instability that is hard to debug.
         assert all(
-            block.cross_attn.kv_norm for block in self.dynamic_blocks
+            cast(Any, block.cross_attn).kv_norm for block in self.dynamic_blocks
         ), "Dynamic blocks must use KV normalization"
-        assert all(block.cross_attn.kv_norm for block in self.blocks), "Fixed blocks must use KV normalization"
+        assert all(
+            cast(Any, block.cross_attn).kv_norm for block in self.blocks
+        ), "Fixed blocks must use KV normalization"
 
         if config.share_layers:
             self.set_shared_layers()
@@ -154,10 +156,10 @@ class AdaptiveViT(ViT):
         """
         for block, dynamic_block in zip(self.blocks, self.dynamic_blocks):
             # Copy the parameters of the self-attention layer to the cross-attention layer
-            dynamic_block.cross_attn.copy_parameters(block.self_attn)
+            cast(Any, dynamic_block.cross_attn).copy_parameters(block.self_attn)
 
             # Copy the parameters of the MLP layer to the dynamic MLP layer
-            for name, param in block.mlp.named_parameters():
+            for name, param in cast(Any, block.mlp).named_parameters():
                 if hasattr(dynamic_block.mlp, name):
                     setattr(dynamic_block.mlp, name, nn.Parameter(param.clone()))
 

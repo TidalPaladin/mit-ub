@@ -226,13 +226,13 @@ class TestAdaptiveViT:
         seq = torch.randn(1, L, D)
         for block, dynamic_block in zip(model.blocks, model.dynamic_blocks):
             # Check MLP weights initialized
-            exp = block.mlp(seq)
-            act = dynamic_block.mlp(seq)
+            exp = cast(Any, block.mlp)(seq)
+            act = cast(Any, dynamic_block.mlp)(seq)
             assert_close(act, exp)
 
             # Check cross-attention weights initialized from self-attention
-            exp = block.self_attn(seq, seq, seq)
-            act = dynamic_block.cross_attn(seq, seq.clone(), seq.clone())
+            exp = cast(Any, block.self_attn)(seq, seq, seq)
+            act = cast(Any, dynamic_block.cross_attn)(seq, seq.clone(), seq.clone())
             assert_close(act, exp)
 
     @pytest.mark.parametrize(
