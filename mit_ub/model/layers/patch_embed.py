@@ -1,4 +1,3 @@
-import math
 from typing import Tuple
 
 import torch
@@ -29,10 +28,6 @@ class PatchEmbed2d(nn.Module):
     @property
     def patch_size(self) -> Tuple[int, int]:
         return self._patch_size
-
-    @property
-    def in_channels(self) -> int:
-        return self.w_in.shape[1] // math.prod(self.patch_size)
 
     def tokenized_size(self, size: Tuple[int, int]) -> Tuple[int, int]:
         ht, wt = tuple(s // p for s, p in zip(size, self.patch_size))

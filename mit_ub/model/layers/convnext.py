@@ -1,4 +1,4 @@
-from typing import Any, Tuple, cast
+from typing import Tuple, cast
 
 import torch.nn as nn
 import torch.nn.functional as F

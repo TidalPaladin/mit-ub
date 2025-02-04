@@ -6,8 +6,7 @@ from copy import copy
 from dataclasses import asdict, dataclass
 from os import PathLike
 from pathlib import Path
-from typing import ClassVar, Protocol, Self, Sequence, Type, TypeVar
-from typing import Any, Callable, ClassVar, List, Protocol, Self, Sequence, Type, TypeVar, cast, runtime_checkable
+from typing import Any, ClassVar, Protocol, Self, Sequence, Type, TypeVar, cast, runtime_checkable
 
 import torch.nn as nn
 import yaml

@@ -1,4 +1,4 @@
-from typing import Sequence
+from typing import Sequence, cast
 
 import torch
 import torch.nn as nn
@@ -62,11 +62,11 @@ class RelativeFactorizedPosition(nn.Module):
         self.mlp = te.LayerNormMLP(d_out, d_out, activation="srelu")
 
     def forward(self, dims: Sequence[int]) -> Tensor:
-        with torch.autocast(device_type=self.linear.weight.device.type, dtype=torch.float32):
+        with torch.autocast(device_type="cuda", dtype=torch.float32):
             mp = torch.get_float32_matmul_precision()
             torch.set_float32_matmul_precision("high")
             with torch.no_grad():
-                grid = create_grid(dims, device=self.linear.weight.device)
+                grid = create_grid(dims, device=cast(Tensor, self.linear.weight).device)
             result = self.linear(grid)
             torch.set_float32_matmul_precision(mp)
 
