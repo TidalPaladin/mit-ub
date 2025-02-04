@@ -192,7 +192,8 @@ class TestConvNext:
         model = checkpoint_model
         checkpoint_path = tmp_path / "checkpoint.safetensors"
         state_dict = model.state_dict()
-        save_file(state_dict, checkpoint_path)
+        tensors = {k: v for k, v in state_dict.items() if isinstance(v, torch.Tensor)}
+        save_file(tensors, checkpoint_path)
         return checkpoint_path
 
     @pytest.fixture
@@ -213,7 +214,7 @@ class TestConvNext:
             param.data.fill_(3.0)
 
         # Load should update the irregular value back to normal
-        loaded = checkpoint_model.load_safetensors(safetensors_checkpoint)
+        loaded = checkpoint_model.load_safetensors(safetensors_checkpoint, strict=False)
         for param in loaded.parameters():
             assert not (param.data == 3.0).all()
 
@@ -223,6 +224,6 @@ class TestConvNext:
             param.data.fill_(3.0)
 
         # Load should update the irregular value back to normal
-        loaded = ConvNext2d.load_tar(tar_checkpoint)
+        loaded = ConvNext2d.load_tar(tar_checkpoint, strict=False)
         for param in loaded.parameters():
             assert not (param.data == 3.0).all()

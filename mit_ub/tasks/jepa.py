@@ -541,7 +541,7 @@ class JEPA(Task):
         torch.cuda.nvtx.range_pop()
 
         # generate ground truth with forward pass of ema backbone on unmasked image
-        with torch.inference_mode():
+        with torch.no_grad():
             self.teacher_backbone.eval()
             torch.cuda.nvtx.range_push("ema_backbone")
             full_target, target_cls_token = cast(Tuple[Tensor, Tensor], self.teacher_backbone(x, reshape=False))
@@ -618,7 +618,7 @@ class JEPA(Task):
 
         # Compute metrics
         if metrics is not None:
-            with torch.inference_mode():
+            with torch.no_grad():
                 torch.cuda.nvtx.range_push("metrics")
                 metrics["jepa_loss"].update(loss_jepa)
                 metrics["siglip_loss"].update(loss_siglip)

@@ -153,7 +153,7 @@ class Distillation(Task):
         self.save_hyperparameters()
 
     def load_teacher_checkpoint(self, teacher_checkpoint: Path) -> nn.Module:
-        state_dict = torch.load(teacher_checkpoint, weights_only=True)
+        state_dict = torch.load(teacher_checkpoint, weights_only=False)
         if "state_dict" in state_dict:
             state_dict = state_dict["state_dict"]
         if any(k.startswith("backbone.") for k in state_dict):
