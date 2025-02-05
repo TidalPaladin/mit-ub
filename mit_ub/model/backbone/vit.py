@@ -43,6 +43,13 @@ class ViTConfig(ModelConfig):
     def instantiate(self) -> "ViT":
         return ViT(self)
 
+    def __post_init__(self):
+        super().__post_init__()
+        if self.norm_type == "RMS_NORM":
+            object.__setattr__(self, "norm_type", NormType.RMS_NORM)
+        if self.norm_type == "LAYER_NORM":
+            object.__setattr__(self, "norm_type", NormType.LAYER_NORM)
+
 
 class ViT(nn.Module, SupportsSafeTensors):
     stem: PatchEmbed2d | PatchEmbed3d
