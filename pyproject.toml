@@ -80,11 +80,12 @@ test = [
     "coverage",
 ]
 quality = [
-  "autoflake",
-  "autopep8",
-  "black",
-  "flake8",
-  "isort",
+    "autoflake",
+    "autopep8",
+    "black",
+    "flake8",
+    "isort",
+    "clang-format>=19.1.7",
 ]
 
 [tool.pytest.ini_options]

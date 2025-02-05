@@ -85,6 +85,7 @@ style:
 	$(PYTHON) -m isort $(QUALITY_DIRS)
 	$(PYTHON) -m autopep8 -a $(QUALITY_DIRS)
 	$(PYTHON) -m black $(QUALITY_DIRS)
+	find csrc/ -type f \( -name "*.cu" -o -name "*.cuh" \) -exec clang-format -i {} +
 
 test: ## run unit tests
 	$(PYTHON) -m pytest \
