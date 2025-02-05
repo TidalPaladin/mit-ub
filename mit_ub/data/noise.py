@@ -266,7 +266,6 @@ _noise_cuda = load(
     verbose=True,
 )
 
-
 @torch.no_grad()
 def apply_noise_batched_cuda(
     x: Tensor,
@@ -277,6 +276,7 @@ def apply_noise_batched_cuda(
     salt_pepper_pixel_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX),
     clip: bool = True,
     seed: int | None = None,
+    inplace: bool = False,
 ) -> Tensor:
     """Apply noise to a batch of images using CUDA kernel.
 
@@ -289,6 +289,7 @@ def apply_noise_batched_cuda(
         salt_pepper_pixel_prob: Proportion of salt and pepper noise to apply to each pixel
         clip: Whether to clip the result to the range :math:`[0, 1]`
         seed: Random seed for noise generation
+        inplace: Whether to modify the input tensor in place
 
     Shape:
         - Input: :math:`(N, ...)`
@@ -307,25 +308,23 @@ def apply_noise_batched_cuda(
     if isinstance(salt_pepper_pixel_prob, (int, float)):
         salt_pepper_pixel_prob = (salt_pepper_pixel_prob, salt_pepper_pixel_prob)
 
-    uniform_params = torch.tensor(uniform_scale, dtype=torch.float32, device=x.device)
-    multiplicative_params = torch.tensor(multiplicative_scale, dtype=torch.float32, device=x.device)
-    salt_pepper_params = torch.tensor(
-        [salt_pepper_prob, *salt_pepper_pixel_prob], dtype=torch.float32, device=x.device
-    )
-
     if seed is None:
-        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+        seed = int(torch.randint(0, 2**31 - 1, (1,), dtype=torch.int64).item())
 
     return _noise_cuda.fused_noise(
         x,
-        uniform_params,
-        multiplicative_params,
-        salt_pepper_params,
-        prob,
-        prob,
-        salt_pepper_prob,
-        clip,
+        float(uniform_scale[0]),
+        float(uniform_scale[1]),
+        float(multiplicative_scale[0]),
+        float(multiplicative_scale[1]),
+        float(salt_pepper_pixel_prob[0]),
+        float(salt_pepper_pixel_prob[1]),
+        float(prob),
+        float(prob),
+        float(salt_pepper_prob),
+        bool(clip),
         seed,
+        inplace,
     ) 
 
 
@@ -335,6 +334,7 @@ def parse_args() -> Namespace:
     parser.add_argument("-b", "--batch-size", type=int, default=32, help="Batch size")
     parser.add_argument("-p", "--prob", type=float, default=0.5, help="Probability of applying noise")
     parser.add_argument("-c", "--cuda", default=False, action="store_true", help="Use CUDA kernel")
+    parser.add_argument("-f", "--fused", default=False, action="store_true", help="Use fused CUDA kernel")
     parser.add_argument(
         "-u",
         "--uniform-scale",
@@ -392,7 +392,7 @@ def main(args: Namespace):
 
     torch.cuda.synchronize()
     start = timeit.default_timer()
-    if args.cuda:
+    if args.cuda and args.fused:
         noise = noise_op.apply_batched_cuda(image)
     else:
         noise = noise_op.apply_batched(image)
