@@ -10,10 +10,11 @@ authors = [
     {name = "Scott Chase Waggener", email = "tidalpaladin@protonmail.com"},
 ]
 dependencies = [
-  "torch",
-  "torchvision",
-  "einops",
-  "registry @ git+https://github.com/TidalPaladin/callable-registry.git",
+    "torch",
+    "torchvision",
+    "einops",
+    "registry @ git+https://github.com/TidalPaladin/callable-registry.git",
+    "ninja>=1.11.1.3",
 ]
 readme = "README.md"
 license = {text = "Apache"}
@@ -78,11 +79,12 @@ test = [
     "coverage",
 ]
 quality = [
-  "autoflake",
-  "autopep8",
-  "black",
-  "flake8",
-  "isort",
+    "autoflake",
+    "autopep8",
+    "black",
+    "flake8",
+    "isort",
+    "clang-format>=19.1.7",
 ]
 
 [tool.pytest.ini_options]
