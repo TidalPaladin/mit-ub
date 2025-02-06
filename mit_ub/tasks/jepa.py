@@ -557,7 +557,10 @@ class JEPA(Task):
             # apply random noise
             if self.training and self.jepa_config.use_noise:
                 torch.cuda.nvtx.range_push("noise")
-                x = self.random_noise.apply_batched(x)
+                if x.device.type == "cuda":
+                    x = self.random_noise.apply_batched_cuda(x, inplace=True)
+                else:
+                    x = self.random_noise.apply_batched(x)
                 torch.cuda.nvtx.range_pop()
 
             # apply mixup, not overwriting full_target

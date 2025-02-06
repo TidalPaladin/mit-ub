@@ -8,23 +8,6 @@ Each noise type is either applied or not applied to each entry of the batch inde
 #include <curand_kernel.h>
 #include <torch/extension.h>
 
-// Initialize weights for each noise operation for each batch entry
-__global__ void setup_noise_batch_weights(float *__restrict__ weights, const int64_t batch_size, const int64_t seed,
-                                          const float uniform_prob, const float multiplicative_prob,
-                                          const float salt_pepper_prob) {
-    int id = blockIdx.x * blockDim.x + threadIdx.x;
-    curandState state;
-    curand_init(seed, id, 0, &state);
-
-    const float uniform = curand_uniform(&state) < uniform_prob;
-    const float multiplicative = curand_uniform(&state) < multiplicative_prob;
-    const float salt_pepper = curand_uniform(&state) < salt_pepper_prob;
-
-    weights[id] = uniform;
-    weights[id + batch_size] = multiplicative;
-    weights[id + 2 * batch_size] = salt_pepper;
-}
-
 // Initialize curand states for each thread
 __global__ void setup_noise_seq_curand(curandState *states, unsigned long seed) {
     int id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -33,12 +16,11 @@ __global__ void setup_noise_seq_curand(curandState *states, unsigned long seed) 
 
 template <typename scalar_t>
 __global__ void fused_noise_kernel(const scalar_t *__restrict__ input, scalar_t *__restrict__ output,
-                                   const float *__restrict__ weights, const float uniform_noise_min,
-                                   const float uniform_noise_max, const float multiplicative_min,
-                                   const float multiplicative_max, const float salt_pepper_min,
-                                   const float salt_pepper_max, const float uniform_prob,
+                                   const float uniform_noise_min, const float uniform_noise_max,
+                                   const float multiplicative_min, const float multiplicative_max,
+                                   const float salt_pepper_min, const float salt_pepper_max, const float uniform_prob,
                                    const float multiplicative_prob, const float salt_pepper_prob, const bool clip,
-                                   const int64_t batch_size, const int64_t seq_len, curandState *states) {
+                                   const int64_t batch_size, const int64_t seq_len, const int64_t seed) {
     const int batch_idx = blockIdx.y;
     const int seq_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (seq_idx >= seq_len || batch_idx >= batch_size) return;
@@ -47,14 +29,17 @@ __global__ void fused_noise_kernel(const scalar_t *__restrict__ input, scalar_t 
     const int64_t idx = batch_idx * seq_len + seq_idx;
     scalar_t val = input[idx];
 
-    // Load the weights for this batch entry
-    const float uniform_mask = weights[batch_idx];
-    const float mult_mask = weights[batch_idx + batch_size];
-    const float sp_mask = weights[batch_idx + 2 * batch_size];
+    // Compute masks for each noise type for this batch entry
+    curandState batch_state;
+    curand_init(seed + batch_idx, 0, 0, &batch_state);
+    const scalar_t uniform_mask = curand_uniform(&batch_state) < uniform_prob;
+    const scalar_t mult_mask = curand_uniform(&batch_state) < multiplicative_prob;
+    const scalar_t sp_mask = curand_uniform(&batch_state) < salt_pepper_prob;
 
-    // Get random state for this thread
-    curandState seq_state = states[seq_idx];
-    skipahead(batch_idx, &seq_state);
+    // Initialize pointwise-unique random state
+    curandState seq_state;
+    const unsigned long seq_seed = seed + batch_idx * seq_len + seq_idx;
+    curand_init(seq_seed, 0, 0, &seq_state);
 
     // Compute multiplicative factor (will be 1.0 if not applied)
     const float mult_center = (multiplicative_min + multiplicative_max) / 2.0f;
@@ -100,9 +85,6 @@ torch::Tensor fused_noise_cuda(const torch::Tensor &input, const float uniform_n
     const int64_t batch_size = input.size(0);
     const int64_t seq_len = input.numel() / batch_size;
 
-    float *weights;
-    curandState *states;
-
     AT_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "fused_noise_cuda", ([&] {
             // Calculate grid dimensions
@@ -112,32 +94,11 @@ torch::Tensor fused_noise_cuda(const torch::Tensor &input, const float uniform_n
             const unsigned int blocks_x = (seq_len + block_size - 1) / block_size;
             const dim3 blocks(blocks_x, batch_size);
 
-            // Initialize weights for each batch entry
-            int block_size_batch_setup;
-            cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size_batch_setup,
-                                               (void *)setup_noise_batch_weights, 0, 0);
-            const unsigned int blocks_b = (batch_size + block_size_batch_setup - 1) / block_size_batch_setup;
-            cudaMalloc((void **)&weights, 3 * batch_size * sizeof(float));
-            setup_noise_batch_weights<<<blocks_b, block_size_batch_setup>>>(weights, batch_size, seed, uniform_prob,
-                                                                            multiplicative_prob, salt_pepper_prob);
-
-            // Initialize curand states
-            int block_size_seq_setup;
-            cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size_seq_setup, (void *)setup_noise_seq_curand, 0,
-                                               0);
-            const unsigned int blocks_s = (seq_len + block_size_seq_setup - 1) / block_size_seq_setup;
-            cudaMalloc((void **)&states, blocks_s * block_size_seq_setup * sizeof(curandState));
-            setup_noise_seq_curand<<<blocks_s, block_size_seq_setup>>>(states, seed);
-
             fused_noise_kernel<scalar_t><<<blocks, block_size>>>(
-                input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), weights, uniform_noise_min, uniform_noise_max,
+                input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), uniform_noise_min, uniform_noise_max,
                 multiplicative_min, multiplicative_max, salt_pepper_min, salt_pepper_max, uniform_prob,
-                multiplicative_prob, salt_pepper_prob, clip, batch_size, seq_len, states);
+                multiplicative_prob, salt_pepper_prob, clip, batch_size, seq_len, seed);
         }));
-
-    // Free memory
-    cudaFree(weights);
-    cudaFree(states);
 
     return output;
 }

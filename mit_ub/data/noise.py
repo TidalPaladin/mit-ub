@@ -260,16 +260,13 @@ def apply_noise_batched(
     return x
 
 
-try:
+if torch.cuda.is_available():
     _noise_cuda = load(
         name="noise_cuda",
-        sources=["csrc/noise.cu"],
+        sources=[str(Path(__file__).parents[2] / "csrc" / "noise.cu")],
         extra_cuda_cflags=["-O3"],
-        verbose=True,
     )
-    CUDA_AVAILABLE = True
-except Exception:
-    CUDA_AVAILABLE = False
+else:
     _noise_cuda = None
 
 
@@ -307,7 +304,7 @@ def apply_noise_batched_cuda(
     Returns:
         Input with noise applied
     """
-    if not CUDA_AVAILABLE:
+    if _noise_cuda is None:
         raise ValueError("CUDA is not available")
     if not x.is_cuda:
         raise ValueError("Input tensor must be on CUDA device")
@@ -322,7 +319,6 @@ def apply_noise_batched_cuda(
     if seed is None:
         seed = int(torch.randint(0, 2**31 - 1, (1,), dtype=torch.int64).item())
 
-    assert _noise_cuda is not None
     return _noise_cuda.fused_noise(
         x,
         float(uniform_scale[0]),
