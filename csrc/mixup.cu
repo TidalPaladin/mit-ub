@@ -8,6 +8,8 @@ Implements a fused kernel for applying MixUp to a batch of images or categorical
 #include <curand_kernel.h>
 #include <torch/extension.h>
 
+#define WARP_SIZE 32
+
 __device__ float sample_beta(curandState *state, const float alpha) {
     const float divisor = 1.0f / alpha;
     float u = powf(curand_uniform(state), divisor);
@@ -75,7 +77,7 @@ torch::Tensor mixup(const torch::Tensor &input, const float mixup_prob, const fl
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t warp_max(scalar_t val) {
 #pragma unroll
-    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
         val = max(val, __shfl_down_sync(0xffffffff, val, offset));
     }
     return val;
@@ -84,7 +86,7 @@ __device__ __forceinline__ scalar_t warp_max(scalar_t val) {
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t warp_sum(scalar_t val) {
 #pragma unroll
-    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
         val += __shfl_down_sync(0xffffffff, val, offset);
     }
     return val;
@@ -112,12 +114,16 @@ __global__ void cross_entropy_mixup_fwd_kernel(const scalar_t *__restrict__ logi
     // Softmax using online softmax trick
     scalar_t max_val = -INFINITY;
     scalar_t sum_exp = 0.0f;
-    scalar_t normalizer = 0.0f;
-    for (int c = threadIdx.x; c < num_classes; c += warpSize) {
-        // Calculate values within warp first
+    for (int c = threadIdx.x; c < num_classes; c += WARP_SIZE) {
+        // Calculate warp-wise max first
         scalar_t logit = logits[batch_idx * num_classes + c];
-        scalar_t old_max = max_val;
         max_val = warp_max(fmaxf(max_val, logit));
+        scalar_t old_max = max_val;
+
+        // Rescale online sum
+        sum_exp *= expf(old_max - max_val);
+
+        // Calculate warp-wise sum
         sum_exp += warp_sum(expf(logit - max_val));
     }
     const scalar_t log_sum_exp = logf(sum_exp);
@@ -130,14 +136,13 @@ __global__ void cross_entropy_mixup_fwd_kernel(const scalar_t *__restrict__ logi
         const int mixup_batch_idx = (batch_idx + 1) % batch_size;
         const int mixup_label_idx = static_cast<int>(labels[mixup_batch_idx]);
 
-        // Calculate cross entropy with mixed labels
-        for (int c = 0; c < num_classes; c++) {
-            const scalar_t target_prob = (c == label_idx) ? weight : ((c == mixup_label_idx) ? (1.0f - weight) : 0.0f);
-            if (target_prob > 0) {
-                const scalar_t log_softmax_val = logits[batch_idx * num_classes + c] - max_val - log_sum_exp;
-                loss -= target_prob * log_softmax_val;
-            }
-        }
+        // Original label contribution
+        const scalar_t log_softmax_val_orig = logits[batch_idx * num_classes + label_idx] - max_val - log_sum_exp;
+        loss -= weight * log_softmax_val_orig;
+
+        // Mixed label contribution
+        const scalar_t log_softmax_val_mix = logits[batch_idx * num_classes + mixup_label_idx] - max_val - log_sum_exp;
+        loss -= (1.0f - weight) * log_softmax_val_mix;
     } else {
         // Standard cross entropy without MixUp
         const scalar_t log_softmax_val = logits[batch_idx * num_classes + label_idx] - max_val - log_sum_exp;
@@ -156,9 +161,9 @@ torch::Tensor cross_entropy_mixup_fwd(const torch::Tensor &logits, const torch::
 
     const auto batch_size = logits.size(0);
     const auto num_classes = logits.size(1);
-    auto output = torch::empty({batch_size}, logits.options());
+    auto output = torch::zeros({batch_size}, logits.options());
 
-    const size_t block_size = warpSize;
+    const size_t block_size = WARP_SIZE < num_classes ? WARP_SIZE : num_classes;
     const size_t num_blocks = (batch_size + block_size - 1) / block_size;
     const dim3 blocks(num_blocks);
 
