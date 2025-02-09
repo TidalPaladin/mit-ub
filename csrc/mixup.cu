@@ -114,17 +114,21 @@ __global__ void cross_entropy_mixup_fwd_kernel(const scalar_t *__restrict__ logi
     // Softmax using online softmax trick
     scalar_t max_val = -INFINITY;
     scalar_t sum_exp = 0.0f;
-    for (int c = threadIdx.x; c < num_classes; c += WARP_SIZE) {
+    for (int c = threadIdx.x; c < num_classes; c += blockDim.x) {
         // Calculate warp-wise max first
         scalar_t logit = logits[batch_idx * num_classes + c];
-        max_val = warp_max(fmaxf(max_val, logit));
         scalar_t old_max = max_val;
+        max_val = fmaxf(old_max, warp_max(logit));
+        max_val = __shfl_sync(0xffffffff, max_val, 0);
 
         // Rescale online sum
         sum_exp *= expf(old_max - max_val);
 
         // Calculate warp-wise sum
-        sum_exp += warp_sum(expf(logit - max_val));
+        scalar_t new_sum = warp_sum(expf(logit - max_val));
+        new_sum = __shfl_sync(0xffffffff, new_sum, 0);
+
+        sum_exp += new_sum;
     }
     const scalar_t log_sum_exp = logf(sum_exp);
 
@@ -149,7 +153,9 @@ __global__ void cross_entropy_mixup_fwd_kernel(const scalar_t *__restrict__ logi
         loss = -log_softmax_val;
     }
 
-    output[batch_idx] = loss;
+    if (threadIdx.x == 0) {
+        output[batch_idx] = loss;
+    }
 }
 
 torch::Tensor cross_entropy_mixup_fwd(const torch::Tensor &logits, const torch::Tensor &labels, const float mixup_prob,
@@ -163,8 +169,8 @@ torch::Tensor cross_entropy_mixup_fwd(const torch::Tensor &logits, const torch::
     const auto num_classes = logits.size(1);
     auto output = torch::zeros({batch_size}, logits.options());
 
-    const size_t block_size = WARP_SIZE < num_classes ? WARP_SIZE : num_classes;
-    const size_t num_blocks = (batch_size + block_size - 1) / block_size;
+    const size_t block_size = WARP_SIZE;
+    const size_t num_blocks = batch_size;
     const dim3 blocks(num_blocks);
 
     AT_DISPATCH_FLOATING_TYPES(logits.scalar_type(), "cross_entropy_mixup_fwd", ([&] {
