@@ -8,12 +8,6 @@ Each noise type is either applied or not applied to each entry of the batch inde
 #include <curand_kernel.h>
 #include <torch/extension.h>
 
-// Initialize curand states for each thread
-__global__ void setup_noise_seq_curand(curandState *states, unsigned long seed) {
-    int id = blockIdx.x * blockDim.x + threadIdx.x;
-    curand_init(seed, id, 0, &states[id]);
-}
-
 template <typename scalar_t>
 __global__ void fused_noise_kernel(const scalar_t *__restrict__ input, scalar_t *__restrict__ output,
                                    const float uniform_noise_min, const float uniform_noise_max,
