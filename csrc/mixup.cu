@@ -73,11 +73,29 @@ torch::Tensor mixup(const torch::Tensor &input, const float mixup_prob, const fl
 }
 
 template <typename scalar_t>
+__device__ __forceinline__ scalar_t warp_max(scalar_t val) {
+#pragma unroll
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        val = max(val, __shfl_down_sync(0xffffffff, val, offset));
+    }
+    return val;
+}
+
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t warp_sum(scalar_t val) {
+#pragma unroll
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    return val;
+}
+
+template <typename scalar_t>
 __global__ void cross_entropy_mixup_fwd_kernel(const scalar_t *__restrict__ logits, const int64_t *__restrict__ labels,
                                                scalar_t *__restrict__ output, const float mixup_prob,
                                                const float mixup_alpha, const int64_t batch_size,
                                                const int64_t num_classes, const int64_t seed) {
-    const int batch_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int batch_idx = blockIdx.x;
     if (batch_idx >= batch_size) return;
 
     // Initialize RNG state for this batch element
@@ -91,17 +109,18 @@ __global__ void cross_entropy_mixup_fwd_kernel(const scalar_t *__restrict__ logi
     const int label_idx = static_cast<int>(labels[batch_idx]);
     scalar_t loss = 0.0f;
 
-    // Calculate softmax denominator first
-    scalar_t max_val = logits[batch_idx * num_classes];
-    for (int c = 1; c < num_classes; c++) {
-        max_val = max(max_val, logits[batch_idx * num_classes + c]);
-    }
-
+    // Softmax using online softmax trick
+    scalar_t max_val = -INFINITY;
     scalar_t sum_exp = 0.0f;
-    for (int c = 0; c < num_classes; c++) {
-        sum_exp += exp(logits[batch_idx * num_classes + c] - max_val);
+    scalar_t normalizer = 0.0f;
+    for (int c = threadIdx.x; c < num_classes; c += warpSize) {
+        // Calculate values within warp first
+        scalar_t logit = logits[batch_idx * num_classes + c];
+        scalar_t old_max = max_val;
+        max_val = warp_max(fmaxf(max_val, logit));
+        sum_exp += warp_sum(expf(logit - max_val));
     }
-    const scalar_t log_sum_exp = log(sum_exp);
+    const scalar_t log_sum_exp = logf(sum_exp);
 
     if (apply_mixup) {
         // Generate MixUp weight using same method as image MixUp
@@ -139,18 +158,16 @@ torch::Tensor cross_entropy_mixup_fwd(const torch::Tensor &logits, const torch::
     const auto num_classes = logits.size(1);
     auto output = torch::empty({batch_size}, logits.options());
 
-    AT_DISPATCH_FLOATING_TYPES(
-        logits.scalar_type(), "cross_entropy_mixup_fwd", ([&] {
-            int min_grid_size;
-            int block_size;
-            cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
-                                               (void *)cross_entropy_mixup_fwd_kernel<scalar_t>, 0, 0);
-            const int grid_size = (batch_size + block_size - 1) / block_size;
+    const size_t block_size = warpSize;
+    const size_t num_blocks = (batch_size + block_size - 1) / block_size;
+    const dim3 blocks(num_blocks);
 
-            cross_entropy_mixup_fwd_kernel<scalar_t><<<grid_size, block_size>>>(
-                logits.data_ptr<scalar_t>(), labels.data_ptr<int64_t>(), output.data_ptr<scalar_t>(), mixup_prob,
-                mixup_alpha, batch_size, num_classes, seed);
-        }));
+    AT_DISPATCH_FLOATING_TYPES(logits.scalar_type(), "cross_entropy_mixup_fwd", ([&] {
+                                   cross_entropy_mixup_fwd_kernel<scalar_t>
+                                       <<<blocks, block_size>>>(logits.data_ptr<scalar_t>(), labels.data_ptr<int64_t>(),
+                                                                output.data_ptr<scalar_t>(), mixup_prob, mixup_alpha,
+                                                                batch_size, num_classes, seed);
+                               }));
 
     return output;
 }
