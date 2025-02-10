@@ -17,7 +17,7 @@ from torch import Tensor
 from torch.optim.optimizer import Optimizer
 from torchvision.ops import sigmoid_focal_loss
 
-from ..data.mixup import mixup, sample_mixup_parameters
+from ..data.mixup import mixup
 from ..data.noise import (
     DEFAULT_NOISE_PROB,
     MULTIPLICATIVE_NOISE_MAX,
@@ -586,16 +586,14 @@ class JEPA(Task):
             # apply mixup, not overwriting full_target
             if self.training and self.jepa_config.mixup_prob > 0:
                 torch.cuda.nvtx.range_push("mixup")
-                mixup_weight = sample_mixup_parameters(
-                    x.shape[0], self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, device=x.device
-                )
-                x = mixup(x, mixup_weight)
-                full_target = mixup(full_target, mixup_weight)
-                target_cls_token = mixup(target_cls_token, mixup_weight)
-                siglip_target = mixup(siglip_target, mixup_weight)
+                mixup_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+                x = mixup(x, self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, mixup_seed)
+                full_target = mixup(full_target, self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, mixup_seed)
+                target_cls_token = mixup(target_cls_token, self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, mixup_seed)
+                siglip_target = mixup(siglip_target, self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, mixup_seed)
                 torch.cuda.nvtx.range_pop()
             else:
-                mixup_weight = None
+                mixup_seed = None
 
             target = apply_mask(target_mask, full_target, fill_value=None)
 
@@ -605,8 +603,6 @@ class JEPA(Task):
             target = target.clone()
             siglip_target = siglip_target.clone()
             target_cls_token = target_cls_token.clone()
-            if mixup_weight is not None:
-                mixup_weight = mixup_weight.clone()
 
         # generate predictions by encoding the context and then running the encoded context
         # plus the positional target queries through the predictor
@@ -675,7 +671,7 @@ class JEPA(Task):
             "jepa_pred": pred,
             "target": target,
             "full_target": full_target,
-            "mixup_weight": mixup_weight,
+            "mixup_seed": mixup_seed,
         }
         return output
 

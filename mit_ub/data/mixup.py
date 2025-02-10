@@ -22,123 +22,6 @@ else:
 
 
 
-
-
-
-
-
-
-
-def _right_broadcast(inp: Tensor, proto: Tensor) -> Tensor:
-    return inp.view(-1, *(1,) * len(proto.shape[1:]))
-
-
-@torch.no_grad()
-def sample_mixup_parameters(
-    size: int,
-    mixup_prob: float = 0.2,
-    mixup_alpha: float = 1.0,
-    device: torch.device = torch.device("cpu"),
-) -> Tensor:
-    r"""Samples an interpolation weight tensor for MixUp.
-
-    Args:
-        size: The size of the tensor to sample.
-        mixup_prob: The probability of applying mixup to the input and target.
-        mixup_alpha: The alpha parameter for the Beta distribution used to sample the mixup weight.
-        device: The device to sample the tensor on.
-
-    Returns:
-        A tensor of size ``size`` sampled from a Beta distribution with parameters ``mixup_alpha`` and ``mixup_alpha``.
-    """
-    # Generate mixup weight
-    u = torch.empty(size, device=device).uniform_(0, 1).pow_(1.0 / mixup_alpha)
-    v = torch.empty(size, device=device).uniform_(0, 1).pow_(1.0 / mixup_alpha)
-    weight = u.div_(u + v)
-
-    # Generate mask of mixup samples
-    mixup_mask = torch.rand_like(weight) < mixup_prob
-
-    # Update the weight tensor with the mixup mask
-    weight = torch.where(mixup_mask, weight, 0.0)
-    return weight
-
-
-@torch.no_grad()
-def mixup(x: Tensor, weight: Tensor) -> Tensor:
-    r"""Apply MixUp to an input tensor using a given weight.
-
-    The input tensor is rolled along the first dimension and linearly interpolated
-    with the original input using the provided weight.
-
-    Args:
-        x: The input tensor.
-        weight: The weight tensor.
-
-    Returns:
-        ``x.lerp(x.roll(1, 0), weight)``
-    """
-    x = x.float()
-    return x.lerp(x.roll(1, 0), _right_broadcast(weight, x))
-
-
-@torch.no_grad()
-def mixup_dense_label(x: Tensor, weight: Tensor, num_classes: int) -> Tensor:
-    r"""Applies mixup weights to a dense label tensor.
-
-    Args:
-        x: The input tensor.
-        weight: The mixup weights.
-        num_classes: The number of classes.
-
-    Shapes:
-        x: :math:`(B,)`
-        weight: :math:`(B,)`
-        Output: :math:`(B, N)` where :math:`N` is the number of classes
-
-    Returns:
-        The mixed label tensor.
-    """
-    y = x.new_zeros(x.shape[0], num_classes, dtype=torch.float)
-    y[x >= 0] = F.one_hot(x[x >= 0], num_classes=num_classes).float()
-    return mixup(y, weight)
-
-
-@torch.no_grad()
-def is_mixed(weight: Tensor) -> Tensor:
-    r"""Returns a mask of samples with mixup.
-
-    Args:
-        weight: The mixup weights.
-
-    Shapes:
-        weight: :math:`(B,)`
-        Output: :math:`(B,)`
-
-    Returns:
-        The mixed label tensor.
-    """
-    return weight != 0
-
-
-@torch.no_grad()
-def is_mixed_with_unknown(weight: Tensor, mask: Tensor) -> Tensor:
-    r"""Checks which examples have mixup applied and the mixed counterpart has unknown label.
-
-    Args:
-        weight: The mixup weights.
-        mask: The mask of valid labels.
-
-    Shapes:
-        weight: :math:`(B,)`
-        mask: :math:`(B,)`
-        Output: :math:`(B,)`
-    """
-    mixed = is_mixed(weight)
-    counterpart = mask.roll(1, 0)
-    return mixed & ~counterpart
-
-
 @torch.no_grad()
 def _get_weights(batch_size: int, mixup_prob: float = 0.2, mixup_alpha: float = 1.0, seed: int | None = None) -> Tensor:
     if _mixup_cuda is None:
@@ -150,7 +33,7 @@ def _get_weights(batch_size: int, mixup_prob: float = 0.2, mixup_alpha: float = 
 
 
 @torch.no_grad()
-def fused_mixup(x: Tensor, mixup_prob: float = 0.2, mixup_alpha: float = 1.0, seed: int | None = None) -> Tensor:
+def mixup(x: Tensor, mixup_prob: float = 0.2, mixup_alpha: float = 1.0, seed: int | None = None) -> Tensor:
     r"""Apply MixUp to an input tensor using a given weight.
 
     The input tensor is rolled along the first dimension and linearly interpolated
@@ -193,10 +76,88 @@ class CrossEntropyMixup(Function):
         return grad, None, None, None, None
 
 
-def cross_entropy_mixup(logits: Tensor, labels: Tensor, mixup_prob: float, mixup_alpha: float, seed: int | None = None) -> Tensor:
+def cross_entropy_mixup(logits: Tensor, labels: Tensor, seed: int, mixup_prob: float = 0.2, mixup_alpha: float = 1.0) -> Tensor:
+    """Cross entropy loss with MixUp.
+
+    Applies MixUp to the target labels by mixing them with a shifted version of the batch.
+    The mixing weight is sampled from a Beta distribution. If a label is -1 (unknown),
+    that sample is excluded from the loss calculation.
+
+    This implementation avoids materializing the one-hot encoded labels, instead using
+    a single kernel with online softmax to compute the loss.
+
+    Args:
+        logits: The predicted class logits
+        labels: The target class labels
+        seed: Random seed for reproducibility. Should match the seed used when applying MixUp
+            to the input.
+        mixup_prob: Probability of applying mixup to each sample
+        mixup_alpha: Alpha parameter for Beta distribution used to sample mixup weight
+
+    Returns:
+        The cross entropy loss for each sample in the batch. Samples with unknown
+        labels (-1) will have a loss value of -1.
+
+    Shapes:
+        - logits: :math:`(N, C)`
+        - labels: :math:`(N,)`
+        - Output: :math:`(N,)`
+    """
+    if _mixup_cuda is None:
+        raise RuntimeError("MixUp is not available on this system")
     return CrossEntropyMixup.apply(logits, labels, mixup_prob, mixup_alpha, seed)
 
 
+class BCEMixup(Function):
+    @staticmethod
+    def forward(ctx, logits: Tensor, labels: Tensor, mixup_prob: float, mixup_alpha: float, seed: int) -> Tensor:
+        ctx.mixup_prob = mixup_prob
+        ctx.mixup_alpha = mixup_alpha
+        ctx.seed = seed
+        loss = _mixup_cuda.bce_mixup_fwd(logits, labels, mixup_prob, mixup_alpha, seed)
+        ctx.save_for_backward(logits, labels)
+        return loss
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor) -> Tuple[Tensor, None, None, None, None]:
+        logits, labels = ctx.saved_tensors
+        mixup_prob = ctx.mixup_prob
+        mixup_alpha = ctx.mixup_alpha
+        seed = ctx.seed
+        grad = _mixup_cuda.bce_mixup_bwd(logits, labels, grad_output, mixup_prob, mixup_alpha, seed)
+        return grad, None, None, None, None
+
+
+def bce_mixup(logits: Tensor, labels: Tensor, seed: int, mixup_prob: float = 0.2, mixup_alpha: float = 1.0) -> Tensor:
+    """BCE loss with MixUp.
+
+    Applies MixUp to the target labels by mixing them with a shifted version of the batch.
+    The mixing weight is sampled from a Beta distribution. If a label is -1 (unknown),
+    that sample is excluded from the loss calculation.
+
+    This implementation avoids materializing the one-hot encoded labels, instead using
+    a single kernel with online softmax to compute the loss.
+
+    Args:
+        logits: The predicted class logits
+        labels: The target class labels
+        seed: Random seed for reproducibility. Should match the seed used when applying MixUp
+            to the input.
+        mixup_prob: Probability of applying mixup to each sample
+        mixup_alpha: Alpha parameter for Beta distribution used to sample mixup weight
+
+    Returns:
+        The cross entropy loss for each sample in the batch. Samples with unknown
+        labels (-1) will have a loss value of -1.
+
+    Shapes:
+        - logits: :math:`(N, ...)`
+        - labels: :math:`(N, ...)`
+        - Output: :math:`(N, ...)`
+    """
+    if _mixup_cuda is None:
+        raise RuntimeError("MixUp is not available on this system")
+    return BCEMixup.apply(logits, labels, mixup_prob, mixup_alpha, seed)
 
 
 def parse_args() -> Namespace:

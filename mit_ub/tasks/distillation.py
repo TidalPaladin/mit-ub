@@ -12,7 +12,7 @@ from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
 from torch import Tensor
 
-from ..data.mixup import mixup, sample_mixup_parameters
+from ..data.mixup import mixup
 from ..data.noise import (
     DEFAULT_NOISE_PROB,
     MULTIPLICATIVE_NOISE_MAX,
@@ -29,7 +29,6 @@ from ..model import AnyModelConfig, ViT
 from ..model.helpers import grid_to_tokens
 from ..model.layers import has_layer_scale
 from ..model.layers.pool import PoolType
-from .jepa import mixup
 
 
 @dataclass
@@ -218,21 +217,17 @@ class Distillation(Task):
 
             # apply mixup
             if self.training and self.config.mixup_prob > 0:
-                mixup_weight = sample_mixup_parameters(
-                    x.shape[0], self.config.mixup_prob, self.config.mixup_alpha, device=x.device
-                )
-                x = mixup(x, mixup_weight)
-                target = mixup(target, mixup_weight)
-                target_cls_token = mixup(target_cls_token, mixup_weight)
+                mixup_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+                x = mixup(x, self.config.mixup_prob, self.config.mixup_alpha, mixup_seed)
+                target = mixup(target, self.config.mixup_prob, self.config.mixup_alpha, mixup_seed)
+                target_cls_token = mixup(target_cls_token, self.config.mixup_prob, self.config.mixup_alpha, mixup_seed)
             else:
-                mixup_weight = None
+                mixup_seed = None
 
         if self.training:
             x = x.clone()
             target = target.clone()
             target_cls_token = target_cls_token.clone()
-            if mixup_weight is not None:
-                mixup_weight = mixup_weight.clone()
 
         pred_dict = self(x)
         pred: Tensor = pred_dict["distill_pred"]
@@ -267,7 +262,7 @@ class Distillation(Task):
             "target": target,
             "pred_cls_token": pred_cls_token,
             "target_cls_token": target_cls_token,
-            "mixup_weight": mixup_weight,
+            "mixup_seed": mixup_seed,
         }
         return output
 
