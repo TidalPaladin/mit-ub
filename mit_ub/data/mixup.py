@@ -140,6 +140,16 @@ def is_mixed_with_unknown(weight: Tensor, mask: Tensor) -> Tensor:
 
 
 @torch.no_grad()
+def _get_weights(batch_size: int, mixup_prob: float = 0.2, mixup_alpha: float = 1.0, seed: int | None = None) -> Tensor:
+    if _mixup_cuda is None:
+        raise RuntimeError("MixUp is not available on this system")
+
+    if seed is None:
+        seed = int(torch.randint(0, 2**31 - 1, (1,), dtype=torch.int64).item())
+    return _mixup_cuda.get_weights(batch_size, mixup_prob, mixup_alpha, seed)
+
+
+@torch.no_grad()
 def fused_mixup(x: Tensor, mixup_prob: float = 0.2, mixup_alpha: float = 1.0, seed: int | None = None) -> Tensor:
     r"""Apply MixUp to an input tensor using a given weight.
 

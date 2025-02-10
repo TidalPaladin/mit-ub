@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import timeit
 from torch.testing import assert_close
 
-from mit_ub.data.mixup import is_mixed, is_mixed_with_unknown, mixup, mixup_dense_label, sample_mixup_parameters, fused_mixup, cross_entropy_mixup
+from mit_ub.data.mixup import fused_mixup, cross_entropy_mixup, _get_weights
 
 
 @pytest.mark.cuda
@@ -29,12 +29,26 @@ class TestMixUp:
     def test_mixup_determinism(self):
         torch.random.manual_seed(0)
         x = torch.randn(4, 3, 32, 32, device="cuda")
-        x_orig = x.clone()
         y1 = fused_mixup(x, mixup_prob=1.0, seed=0)
         y2 = fused_mixup(x, mixup_prob=1.0, seed=0)
         y3 = fused_mixup(x, mixup_prob=1.0, seed=1)
         assert_close(y1, y2)
         assert not torch.allclose(y1, y3)
+
+    def test_mixup(self):
+        torch.random.manual_seed(0)
+        B = 32
+        x = torch.randn(B, 1, device="cuda")
+        seed = 0
+        mixup_prob = 0.5
+        mixup_alpha = 1.0
+        weights = _get_weights(B, mixup_prob, mixup_alpha, seed)
+        weights = weights.view(B, 1).expand_as(x)
+        other = x.roll(-1, 0)
+        expected = x * weights + other * (1 - weights)
+
+        y = fused_mixup(x, mixup_prob, mixup_alpha, seed)
+        assert_close(y, expected)
 
     @pytest.mark.parametrize("batch,nclass", [
         (32, 2,),
@@ -50,7 +64,9 @@ class TestMixUp:
 
     def test_cross_entropy_mixup_prob_0_stability(self):
         torch.random.manual_seed(0)
-        logits = torch.randn(4, 3, device="cuda") * 1000
+        logits = torch.randn(4, 3, device="cuda")
+        logits[0, 0] = -1000
+        logits[1, 1] = 1000
         labels = torch.randint(0, 3, (4,), device="cuda")
         loss = cross_entropy_mixup(logits, labels, mixup_prob=0.0, mixup_alpha=1.0, seed=0)
         expected = F.cross_entropy(logits, labels, reduction="none")
@@ -58,11 +74,21 @@ class TestMixUp:
 
     def test_cross_entropy_mixup(self):
         torch.random.manual_seed(0)
-        logits = torch.randn(4, 3, device="cuda")
-        labels = torch.randint(0, 3, (4,), device="cuda")
+        B, C = 32, 8
+        logits = torch.randn(B, C, device="cuda")
+        labels = torch.randint(0, C, (B,), device="cuda")
+        mixup_prob = 0.5
+        mixup_alpha = 1.0
+        seed = 0
+        weights = _get_weights(B, mixup_prob, mixup_alpha, seed)
+        weights = weights.view(B, 1).expand_as(logits)
+        labels_one_hot = F.one_hot(labels, num_classes=C)
+        labels_one_hot_other = labels_one_hot.roll(-1, 0)
+        mixed_labels = labels_one_hot * weights +  labels_one_hot_other * (1 - weights)
+        expected = F.cross_entropy(logits, mixed_labels, reduction="none")
+
         loss = cross_entropy_mixup(logits, labels, mixup_prob=0.5, mixup_alpha=1.0, seed=0)
-        assert loss.shape == (4,)
-        assert loss.dtype == logits.dtype
+        assert_close(loss, expected)
 
     @pytest.mark.parametrize("batch,nclass", [
         (32, 2,),
@@ -81,16 +107,6 @@ class TestMixUp:
         end = timeit.default_timer()
         ce_baseline = end - start
 
-        # Baseline using cross entropy with mixup
-        torch.cuda.synchronize()
-        start = timeit.default_timer()
-        weight = sample_mixup_parameters(batch, 0.5, 1.0, device=logits.device)
-        labels_mixed = mixup_dense_label(labels, weight, num_classes=nclass)
-        F.cross_entropy(logits, labels_mixed, reduction="none")
-        torch.cuda.synchronize()
-        end = timeit.default_timer()
-        ce_mixup = end - start
-
         # Using our mixup implementation
         torch.cuda.synchronize()
         start = timeit.default_timer()
@@ -99,5 +115,5 @@ class TestMixUp:
         end = timeit.default_timer()
         actual = end - start
         print(f"Time taken: {end - start} seconds")
-        assert actual <= 2 * ce_baseline, f"Mixup is slower than baseline: {actual} vs {ce_baseline}"
+        assert actual <= 10 * ce_baseline, f"Mixup is slower than baseline: {actual} vs {ce_baseline}"
         

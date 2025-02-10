@@ -10,11 +10,37 @@ Implements a fused kernel for applying MixUp to a batch of images or categorical
 
 #define WARP_SIZE 32
 
-__device__ float sample_beta(curandState *state, const float alpha) {
+__device__ __forceinline__ float sample_beta(curandState *state, const float alpha) {
     const float divisor = 1.0f / alpha;
     float u = powf(curand_uniform(state), divisor);
     float v = powf(curand_uniform(state), divisor);
     return u / (u + v);
+}
+
+template <typename scalar_t>
+__global__ void get_weights_kernel(scalar_t *__restrict__ output, const float mixup_prob, const float mixup_alpha,
+                                   const int64_t batch_size, const int64_t seed) {
+    const int batch_idx = blockIdx.x;
+    if (batch_idx >= batch_size) return;
+    curandState batch_state;
+    curand_init(seed + batch_idx, 0, 0, &batch_state);
+    const bool apply_mixup = curand_uniform(&batch_state) < mixup_prob;
+    const scalar_t weight = sample_beta(&batch_state, mixup_alpha);
+    if (!apply_mixup) {
+        output[batch_idx] = 1.0f;
+    } else {
+        output[batch_idx] = weight;
+    }
+}
+
+torch::Tensor get_weights(const int64_t batch_size, const float mixup_prob, const float mixup_alpha,
+                          const int64_t seed) {
+    auto output = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    AT_DISPATCH_FLOATING_TYPES(output.scalar_type(), "get_weights", ([&] {
+                                   get_weights_kernel<scalar_t><<<batch_size, 1>>>(
+                                       output.data_ptr<scalar_t>(), mixup_prob, mixup_alpha, batch_size, seed);
+                               }));
+    return output;
 }
 
 template <typename scalar_t>
@@ -115,20 +141,13 @@ __global__ void cross_entropy_mixup_fwd_kernel(const scalar_t *__restrict__ logi
     scalar_t max_val = -INFINITY;
     scalar_t sum_exp = 0.0f;
     for (int c = threadIdx.x; c < num_classes; c += blockDim.x) {
-        // Calculate warp-wise max first
         scalar_t logit = logits[batch_idx * num_classes + c];
         scalar_t old_max = max_val;
         max_val = fmaxf(old_max, warp_max(logit));
         max_val = __shfl_sync(0xffffffff, max_val, 0);
-
-        // Rescale online sum
-        sum_exp *= expf(old_max - max_val);
-
-        // Calculate warp-wise sum
-        scalar_t new_sum = warp_sum(expf(logit - max_val));
-        new_sum = __shfl_sync(0xffffffff, new_sum, 0);
-
-        sum_exp += new_sum;
+        scalar_t update = warp_sum(expf(logit - max_val));
+        update = __shfl_sync(0xffffffff, update, 0);
+        sum_exp = __fma_rn(sum_exp, expf(old_max - max_val), update);
     }
     const scalar_t log_sum_exp = logf(sum_exp);
 
@@ -184,6 +203,7 @@ torch::Tensor cross_entropy_mixup_fwd(const torch::Tensor &logits, const torch::
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("get_weights", &get_weights, "Get MixUp weights (CUDA)");
     m.def("mixup", &mixup, "MixUp operation (CUDA)");
     m.def("cross_entropy_mixup_fwd", &cross_entropy_mixup_fwd, "Cross-entropy with MixUp (CUDA)");
 }
