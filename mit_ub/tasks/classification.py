@@ -5,14 +5,13 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.structs import State
 from deep_helpers.tasks import Task
 from torch import Tensor
 
-from ..data import is_mixed, is_mixed_with_unknown, mixup, mixup_dense_label, sample_mixup_parameters
 from ..model import AnyModelConfig, ViT, ViTConfig
+from ..data import bce_mixup, cross_entropy_mixup, is_mixed, mixup
 from ..model.helpers import grid_to_tokens
 from .distillation import DistillationConfig, DistillationWithProbe
 from .jepa import JEPAConfig, JEPAWithProbe
@@ -29,44 +28,31 @@ def is_valid_binary_label(label: Tensor) -> Tensor:
 def categorical_loss(
     logits: Tensor,
     label: Tensor,
-    num_classes: int,
-    mixup_weight: Tensor | None = None,
+    mixup_seed: int | None = None,
+    mixup_prob: float = 0.2,
+    mixup_alpha: float = 1.0,
 ) -> Tensor:
-    # Filter valid labels
-    mask = is_valid_categorical_label(label)
-
-    # Apply mixup to labels if needed
-    if mixup_weight is not None:
-        label = mixup_dense_label(label, mixup_weight, num_classes=num_classes)
-        mask = mask & ~is_mixed_with_unknown(mixup_weight, mask)
-
-    if not mask.any():
-        return logits.new_zeros(1)
-
-    loss = F.cross_entropy(logits[mask], label[mask])
-    assert loss >= 0.0, f"Loss is negative: {loss}"
-    return loss
+    if mixup_seed is None:
+        mixup_seed = 0
+        mixup_prob = 0.0
+    result = cross_entropy_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha)
+    result = result[result >= 0.0].mean()
+    return result
 
 
 def binary_loss(
     logits: Tensor,
     label: Tensor,
-    mixup_weight: Tensor | None = None,
+    mixup_seed: int | None = None,
+    mixup_prob: float = 0.2,
+    mixup_alpha: float = 1.0,
 ) -> Tensor:
-    # Filter valid labels
-    mask = is_valid_binary_label(label)
-
-    # Apply mixup to labels if needed
-    if mixup_weight is not None:
-        label = mixup(label, mixup_weight)
-        mask = mask & ~is_mixed_with_unknown(mixup_weight, mask)
-
-    if not mask.any():
-        return logits.new_zeros(1)
-
-    loss = F.binary_cross_entropy_with_logits(logits[mask].flatten(), label[mask].flatten().float())
-    assert loss >= 0.0, f"Loss is negative: {loss}"
-    return loss
+    if mixup_seed is None:
+        mixup_seed = 0
+        mixup_prob = 0.0
+    result = bce_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha)
+    result = result[result >= 0.0].mean()
+    return result
 
 
 @torch.no_grad()
@@ -75,13 +61,19 @@ def update_metrics(
     pred: Tensor,
     label: Tensor,
     loss: Tensor,
-    mixup_weight: Tensor | None,
+    mixup_seed: int | None,
+    mixup_prob: float,
+    mixup_alpha: float,
     is_binary: bool,
     metric_names: Sequence[str] = ("acc", "auroc"),
 ) -> None:
+    if mixup_seed is None:
+        mixup_seed = 0
+        mixup_prob = 0.0
+
     # Filter valid labels without mixup for metric computation
     mask = is_valid_binary_label(label) if is_binary else is_valid_categorical_label(label)
-    mask = mask & ~is_mixed(mixup_weight) if mixup_weight is not None else mask
+    mask = mask & ~is_mixed(pred.shape[0], mixup_prob, mixup_alpha, mixup_seed)
     if not mask.any():
         return
 
@@ -99,7 +91,7 @@ def step_classification_from_features(
     label: Tensor,
     probe: nn.Module,
     config: "ClassificationConfig",
-    mixup_weight: Tensor | None = None,
+    mixup_seed: int | None = None,
     metrics: tm.MetricCollection | None = None,
     metric_names: Sequence[str] = ("acc", "macro_acc", "auroc"),
 ) -> Dict[str, Tensor]:
@@ -109,10 +101,12 @@ def step_classification_from_features(
     assert pred_logits.requires_grad or not probe.training
 
     # compute loss
+    mixup_prob = config.mixup_prob
+    mixup_alpha = config.mixup_alpha
     if config.is_binary:
-        loss = binary_loss(pred_logits, label, mixup_weight)
+        loss = binary_loss(pred_logits, label, mixup_seed, mixup_prob, mixup_alpha)
     else:
-        loss = categorical_loss(pred_logits, label, config.num_classes, mixup_weight)
+        loss = categorical_loss(pred_logits, label, mixup_seed, mixup_prob, mixup_alpha)
     assert loss >= 0.0, f"Loss is negative: {loss}"
 
     # logits -> predictions
@@ -124,7 +118,7 @@ def step_classification_from_features(
 
     # log metrics
     if metrics is not None:
-        update_metrics(metrics, pred, label, loss, mixup_weight, config.is_binary, metric_names)
+        update_metrics(metrics, pred, label, loss, mixup_seed, mixup_prob, mixup_alpha, config.is_binary, metric_names)
 
     return {
         "loss": loss,
@@ -278,14 +272,14 @@ class ClassificationTask(Task):
         # get inputs
         x = batch["img"]
         y = batch[self.config.label_key].long()
-        N = y.shape[0]
+        y.shape[0]
 
         # mixup input
         if self.training and self.config.mixup_prob > 0:
-            mixup_weight = sample_mixup_parameters(N, self.config.mixup_prob, self.config.mixup_alpha, device=x.device)
-            x = mixup(x, mixup_weight)
+            mixup_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+            x = mixup(x, self.config.mixup_prob, self.config.mixup_alpha, mixup_seed)
         else:
-            mixup_weight = None
+            mixup_seed = None
 
         # forward backbone
         # NOTE: We don't use forward() here because step_classification_from_features()
@@ -306,7 +300,7 @@ class ClassificationTask(Task):
             y,
             self.classification_head,
             self.config,
-            mixup_weight,
+            mixup_seed,
             metrics,
         )
 
@@ -316,7 +310,7 @@ class ClassificationTask(Task):
             },
             "pred_logits": output["pred_logits"],
             "pred": output["pred"],
-            "mixup_weight": mixup_weight,
+            "mixup_seed": mixup_seed,
         }
 
         return output
@@ -379,7 +373,7 @@ class JEPAWithClassification(JEPAWithProbe):
     ) -> Dict[str, Any]:
         # Get inputs
         features = self.get_probe_features_from_output(output)
-        mixup_weight = output.get("mixup_weight", None)
+        mixup_seed = output.get("mixup_seed", None)
         N = features.shape[0]
         y = self.create_gt(batch).view(N)
 
@@ -389,7 +383,7 @@ class JEPAWithClassification(JEPAWithProbe):
             y,
             self.linear_probe,
             self.classification_config,
-            mixup_weight,
+            mixup_seed,
             metrics,
         )
 
