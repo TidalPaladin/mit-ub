@@ -589,8 +589,12 @@ class JEPA(Task):
                 mixup_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
                 x = mixup(x, self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, mixup_seed)
                 full_target = mixup(full_target, self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, mixup_seed)
-                target_cls_token = mixup(target_cls_token, self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, mixup_seed)
-                siglip_target = mixup(siglip_target, self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, mixup_seed)
+                target_cls_token = mixup(
+                    target_cls_token, self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, mixup_seed
+                )
+                siglip_target = mixup(
+                    siglip_target, self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, mixup_seed
+                )
                 torch.cuda.nvtx.range_pop()
             else:
                 mixup_seed = None

@@ -5,13 +5,12 @@ from typing import Any, Dict, List, Optional, Sequence, cast
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.structs import State
 from deep_helpers.tasks import Task
 from torch import Tensor
 
-from ..data import mixup, cross_entropy_mixup
+from ..data import bce_mixup, cross_entropy_mixup, is_mixed, mixup
 from ..model import AdaptiveViTConfig, AnyModelConfig, ViT, ViTConfig
 from ..model.helpers import grid_to_tokens
 from ..model.layers.pool import PoolType
@@ -37,7 +36,9 @@ def categorical_loss(
     if mixup_seed is None:
         mixup_seed = 0
         mixup_prob = 0.0
-    return cross_entropy_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha)
+    result = cross_entropy_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha)
+    result = result[result >= 0.0].mean()
+    return result
 
 
 def binary_loss(
@@ -47,20 +48,12 @@ def binary_loss(
     mixup_prob: float = 0.2,
     mixup_alpha: float = 1.0,
 ) -> Tensor:
-    # Filter valid labels
-    mask = is_valid_binary_label(label)
-
-    # Apply mixup to labels if needed
-    if mixup_seed is not None:
-        label = mixup(label, mixup_weight)
-        mask = mask & ~is_mixed_with_unknown(mixup_weight, mask)
-
-    if not mask.any():
-        return logits.new_zeros(1)
-
-    loss = F.binary_cross_entropy_with_logits(logits[mask].flatten(), label[mask].flatten().float())
-    assert loss >= 0.0, f"Loss is negative: {loss}"
-    return loss
+    if mixup_seed is None:
+        mixup_seed = 0
+        mixup_prob = 0.0
+    result = bce_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha)
+    result = result[result >= 0.0].mean()
+    return result
 
 
 @torch.no_grad()
@@ -75,9 +68,13 @@ def update_metrics(
     is_binary: bool,
     metric_names: Sequence[str] = ("acc", "auroc"),
 ) -> None:
+    if mixup_seed is None:
+        mixup_seed = 0
+        mixup_prob = 0.0
+
     # Filter valid labels without mixup for metric computation
     mask = is_valid_binary_label(label) if is_binary else is_valid_categorical_label(label)
-    mask = mask & ~is_mixed(mixup_weight) if mixup_weight is not None else mask
+    mask = mask & ~is_mixed(pred.shape[0], mixup_prob, mixup_alpha, mixup_seed)
     if not mask.any():
         return
 
@@ -122,7 +119,7 @@ def step_classification_from_features(
 
     # log metrics
     if metrics is not None:
-        update_metrics(metrics, pred, label, loss, mixup_seed, config.is_binary, metric_names)
+        update_metrics(metrics, pred, label, loss, mixup_seed, mixup_prob, mixup_alpha, config.is_binary, metric_names)
 
     return {
         "loss": loss,
@@ -280,7 +277,7 @@ class ClassificationTask(Task):
         # get inputs
         x = batch["img"]
         y = batch[self.config.label_key].long()
-        N = y.shape[0]
+        y.shape[0]
 
         # mixup input
         if self.training and self.config.mixup_prob > 0:
@@ -309,8 +306,6 @@ class ClassificationTask(Task):
             self.classification_head,
             self.config,
             mixup_seed,
-            self.config.mixup_prob,
-            self.config.mixup_alpha,
             metrics,
         )
 
@@ -384,7 +379,7 @@ class JEPAWithClassification(JEPAWithProbe):
     ) -> Dict[str, Any]:
         # Get inputs
         features = self.get_probe_features_from_output(output)
-        mixup_weight = output.get("mixup_weight", None)
+        mixup_seed = output.get("mixup_seed", None)
         N = features.shape[0]
         y = self.create_gt(batch).view(N)
 

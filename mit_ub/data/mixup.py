@@ -1,15 +1,16 @@
-import torch
-import torch.nn.functional as F
-from torch import Tensor
+import timeit
+from argparse import ArgumentParser, Namespace
 from pathlib import Path
 from typing import Tuple
-from torch.utils.cpp_extension import load
-from argparse import ArgumentParser, Namespace
-from PIL import Image
+
 import numpy as np
-import timeit
-from torchvision.utils import make_grid
+import torch
+from PIL import Image
+from torch import Tensor
 from torch.autograd import Function
+from torch.utils.cpp_extension import load
+from torchvision.utils import make_grid
+
 
 if torch.cuda.is_available():
     _mixup_cuda = load(
@@ -21,15 +22,30 @@ else:
     _mixup_cuda = None
 
 
-
 @torch.no_grad()
-def _get_weights(batch_size: int, mixup_prob: float = 0.2, mixup_alpha: float = 1.0, seed: int | None = None) -> Tensor:
+def get_weights(batch_size: int, mixup_prob: float = 0.2, mixup_alpha: float = 1.0, seed: int | None = None, device: torch.device = torch.device("cuda")) -> Tensor:
     if _mixup_cuda is None:
         raise RuntimeError("MixUp is not available on this system")
 
     if seed is None:
         seed = int(torch.randint(0, 2**31 - 1, (1,), dtype=torch.int64).item())
-    return _mixup_cuda.get_weights(batch_size, mixup_prob, mixup_alpha, seed)
+    return _mixup_cuda.get_weights(batch_size, mixup_prob, mixup_alpha, seed, device)
+
+
+@torch.no_grad()
+def is_mixed(
+    batch_size: int,
+    mixup_prob: float = 0.2,
+    mixup_alpha: float = 1.0,
+    seed: int | None = None,
+    device: torch.device = torch.device("cuda"),
+) -> Tensor:
+    if _mixup_cuda is None:
+        raise RuntimeError("MixUp is not available on this system")
+
+    if seed is None:
+        seed = int(torch.randint(0, 2**31 - 1, (1,), dtype=torch.int64).item())
+    return _mixup_cuda.is_mixed(batch_size, mixup_prob, mixup_alpha, seed, device)
 
 
 @torch.no_grad()
@@ -59,6 +75,7 @@ def mixup(x: Tensor, mixup_prob: float = 0.2, mixup_alpha: float = 1.0, seed: in
 class CrossEntropyMixup(Function):
     @staticmethod
     def forward(ctx, logits: Tensor, labels: Tensor, mixup_prob: float, mixup_alpha: float, seed: int) -> Tensor:
+        assert _mixup_cuda is not None
         ctx.mixup_prob = mixup_prob
         ctx.mixup_alpha = mixup_alpha
         ctx.seed = seed
@@ -68,15 +85,20 @@ class CrossEntropyMixup(Function):
 
     @staticmethod
     def backward(ctx, grad_output: Tensor) -> Tuple[Tensor, None, None, None, None]:
+        assert _mixup_cuda is not None
         logits, labels, denom, max_val = ctx.saved_tensors
         mixup_prob = ctx.mixup_prob
         mixup_alpha = ctx.mixup_alpha
         seed = ctx.seed
-        grad = _mixup_cuda.cross_entropy_mixup_bwd(logits, labels, denom, max_val, grad_output, mixup_prob, mixup_alpha, seed)
+        grad = _mixup_cuda.cross_entropy_mixup_bwd(
+            logits, labels, denom, max_val, grad_output, mixup_prob, mixup_alpha, seed
+        )
         return grad, None, None, None, None
 
 
-def cross_entropy_mixup(logits: Tensor, labels: Tensor, seed: int, mixup_prob: float = 0.2, mixup_alpha: float = 1.0) -> Tensor:
+def cross_entropy_mixup(
+    logits: Tensor, labels: Tensor, seed: int, mixup_prob: float = 0.2, mixup_alpha: float = 1.0
+) -> Tensor:
     """Cross entropy loss with MixUp.
 
     Applies MixUp to the target labels by mixing them with a shifted version of the batch.
@@ -111,6 +133,7 @@ def cross_entropy_mixup(logits: Tensor, labels: Tensor, seed: int, mixup_prob: f
 class BCEMixup(Function):
     @staticmethod
     def forward(ctx, logits: Tensor, labels: Tensor, mixup_prob: float, mixup_alpha: float, seed: int) -> Tensor:
+        assert _mixup_cuda is not None
         ctx.mixup_prob = mixup_prob
         ctx.mixup_alpha = mixup_alpha
         ctx.seed = seed
@@ -120,6 +143,7 @@ class BCEMixup(Function):
 
     @staticmethod
     def backward(ctx, grad_output: Tensor) -> Tuple[Tensor, None, None, None, None]:
+        assert _mixup_cuda is not None
         logits, labels = ctx.saved_tensors
         mixup_prob = ctx.mixup_prob
         mixup_alpha = ctx.mixup_alpha
@@ -166,8 +190,6 @@ def parse_args() -> Namespace:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--mixup-alpha", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("-c", "--cuda", default=False, action="store_true", help="Use CUDA kernel")
-    parser.add_argument("-f", "--fused", default=False, action="store_true", help="Use fused CUDA kernel")
     parser.add_argument("-p", "--prob", type=float, default=0.2, help="Probability of applying mixup")
     parser.add_argument("-a", "--alpha", type=float, default=1.0, help="Alpha parameter for the Beta distribution")
     return parser.parse_args()
@@ -187,17 +209,12 @@ def main(args: Namespace):
     image = image.repeat(args.batch_size, 1, 1, 1)
 
     torch.manual_seed(args.seed)
-    if args.cuda:
-        image = image.cuda()
+    image = image.cuda()
 
     torch.random.manual_seed(args.seed)
     torch.cuda.synchronize()
     start = timeit.default_timer()
-    if args.cuda and args.fused:
-        out = fused_mixup(image, args.prob, args.alpha, args.seed)
-    else:
-        weight = sample_mixup_parameters(image.shape[0], mixup_prob=args.prob, mixup_alpha=args.alpha, device=image.device)
-        out = mixup(image, weight)
+    out = mixup(image, args.prob, args.alpha, args.seed)
     torch.cuda.synchronize()
     end = timeit.default_timer()
     print(f"Time taken: {end - start} seconds")

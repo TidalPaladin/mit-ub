@@ -72,13 +72,32 @@ __global__ void get_weights_kernel(scalar_t *__restrict__ output, const float mi
     }
 }
 
-torch::Tensor get_weights(const int64_t batch_size, const float mixup_prob, const float mixup_alpha,
-                          const int64_t seed) {
-    auto output = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+torch::Tensor get_weights(const int64_t batch_size, const float mixup_prob, const float mixup_alpha, const int64_t seed,
+                          const torch::Device &device) {
+    TORCH_CHECK(device.is_cuda(), "Device must be CUDA");
+    auto output = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
     AT_DISPATCH_FLOATING_TYPES(output.scalar_type(), "get_weights", ([&] {
                                    get_weights_kernel<scalar_t><<<batch_size, 1>>>(
                                        output.data_ptr<scalar_t>(), mixup_prob, mixup_alpha, batch_size, seed);
                                }));
+    return output;
+}
+
+__global__ void is_mixed_kernel(bool *__restrict__ output, const float mixup_prob, const float mixup_alpha,
+                                const int64_t batch_size, const int64_t seed) {
+    const int batch_idx = blockIdx.x;
+    if (batch_idx >= batch_size) return;
+    curandState batch_state;
+    curand_init(seed + batch_idx, 0, 0, &batch_state);
+    const bool apply_mixup = curand_uniform(&batch_state) < mixup_prob;
+    output[batch_idx] = apply_mixup;
+}
+
+torch::Tensor is_mixed(const int64_t batch_size, const float mixup_prob, const float mixup_alpha, const int64_t seed,
+                       const torch::Device &device) {
+    TORCH_CHECK(device.is_cuda(), "Device must be CUDA");
+    auto output = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kBool).device(device));
+    is_mixed_kernel<<<batch_size, 1>>>(output.data_ptr<bool>(), mixup_prob, mixup_alpha, batch_size, seed);
     return output;
 }
 
@@ -474,8 +493,14 @@ torch::Tensor bce_mixup_bwd(const torch::Tensor &logits, const torch::Tensor &la
     return output;
 }
 
+torch::Tensor select_unmixed(const torch::Tensor &input, const float mixup_prob, const float mixup_alpha,
+                             const int64_t seed) {
+    TORCH_CHECK(input.dim() >= 2, "Input must be >=2D tensor");
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("get_weights", &get_weights, "Get MixUp weights (CUDA)");
+    m.def("is_mixed", &is_mixed, "Get mask of MixUp batches (CUDA)");
     m.def("mixup", &mixup, "MixUp operation (CUDA)");
     m.def("cross_entropy_mixup_fwd", &cross_entropy_mixup_fwd, "Cross-entropy with MixUp (CUDA)");
     m.def("cross_entropy_mixup_bwd", &cross_entropy_mixup_bwd, "Backward pass for Cross-entropy with MixUp (CUDA)");
