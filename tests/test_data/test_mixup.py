@@ -143,3 +143,73 @@ class TestMixUp:
         loss = cross_entropy_mixup(logits, labels, mixup_prob=0.5, mixup_alpha=1.0, seed=0)
         loss = loss[loss != -1.0]
         assert_close(loss, expected)
+    
+    def test_cross_entropy_mixup_prob_0_backward(self):
+        torch.random.manual_seed(0)
+        batch = 32
+        nclass = 4
+        logits = torch.randn(batch, nclass, device="cuda", requires_grad=True)
+        labels = torch.randint(0, nclass, (batch,), device="cuda")
+
+        expected = F.cross_entropy(logits, labels, reduction="none")
+        expected.sum().backward()
+        expected_grad = logits.grad
+        logits.grad = None
+
+        loss = cross_entropy_mixup(logits, labels, mixup_prob=0.0, mixup_alpha=1.0, seed=0)
+        loss.sum().backward()
+        assert_close(logits.grad, expected_grad, atol=1e-4, rtol=0)
+
+    def test_cross_entropy_mixup_backward(self):
+        torch.random.manual_seed(0)
+        B, C = 32, 8
+        logits = torch.randn(B, C, device="cuda", requires_grad=True)
+        labels = torch.randint(0, C, (B,), device="cuda")
+        mixup_prob = 0.5
+        mixup_alpha = 1.0
+        seed = 0
+        weights = _get_weights(B, mixup_prob, mixup_alpha, seed)
+        weights = weights.view(B, 1).expand_as(logits)
+        labels_one_hot = F.one_hot(labels, num_classes=C)
+        labels_one_hot_other = labels_one_hot.roll(-1, 0)
+        mixed_labels = labels_one_hot * weights +  labels_one_hot_other * (1 - weights)
+        expected = F.cross_entropy(logits, mixed_labels, reduction="none")
+        expected.sum().backward()
+        expected_grad = logits.grad
+        logits.grad = None
+
+        loss = cross_entropy_mixup(logits, labels, mixup_prob=0.5, mixup_alpha=1.0, seed=0)
+        loss.sum().backward()
+
+        assert_close(logits.grad, expected_grad, atol=1e-4, rtol=0)
+
+    def test_cross_entropy_mixup_backward_ignore_unknown(self):
+        torch.random.manual_seed(0)
+        B, C = 32, 8
+        logits = torch.randn(B, C, device="cuda", requires_grad=True)
+        labels = torch.randint(0, C, (B,), device="cuda")
+        seed = 0
+        mixup_prob = 0.5
+        mixup_alpha = 1.0
+        unknown_stride = 4
+
+        # To reject unknowns in the baseline case we set one hot to a large negative value
+        # and mask any mixed results that are negative along the class dimension
+        labels_one_hot = F.one_hot(labels, num_classes=C)
+        labels_one_hot[::unknown_stride] = -1000
+        labels_one_hot_other = labels_one_hot.roll(-1, 0)
+        weights = _get_weights(B, mixup_prob, mixup_alpha, seed).view(B, 1).expand_as(logits)
+        mixed_labels = labels_one_hot * weights +  labels_one_hot_other * (1 - weights)
+        valid = mixed_labels.sum(-1) > 0
+        _logits = logits[valid]
+        _mixed_labels = mixed_labels[valid]
+        expected = F.cross_entropy(_logits, _mixed_labels, reduction="none")
+        expected.sum().backward()
+        expected_grad = logits.grad
+        logits.grad = None
+
+        labels[::unknown_stride] = -1
+        loss = cross_entropy_mixup(logits, labels, mixup_prob=0.5, mixup_alpha=1.0, seed=0)
+        loss = loss[loss != -1.0]
+        loss.sum().backward()
+        assert_close(logits.grad, expected_grad, atol=1e-4, rtol=0)

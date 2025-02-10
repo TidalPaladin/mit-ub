@@ -121,7 +121,8 @@ __device__ __forceinline__ scalar_t warp_sum(scalar_t val) {
 
 template <typename scalar_t>
 __global__ void cross_entropy_mixup_fwd_kernel(const scalar_t *__restrict__ logits, const int64_t *__restrict__ labels,
-                                               scalar_t *__restrict__ output, const float mixup_prob,
+                                               scalar_t *__restrict__ output, float *__restrict__ denom,
+                                               float *__restrict__ max_val_buffer, const float mixup_prob,
                                                const float mixup_alpha, const int64_t batch_size,
                                                const int64_t num_classes, const int64_t seed) {
     const int batch_idx = blockIdx.x;
@@ -141,26 +142,32 @@ __global__ void cross_entropy_mixup_fwd_kernel(const scalar_t *__restrict__ logi
     // Check for unknown label, set loss to -1
     if (label_idx == UNKNOWN_LABEL) {
         output[batch_idx] = -1.0f;
+        denom[batch_idx] = 1.0f;
+        max_val_buffer[batch_idx] = -INFINITY;
         return;
     }
 
-    // Softmax using online softmax trick
-    scalar_t max_val = -INFINITY;
-    scalar_t sum_exp = 0.0f;
+    // Softmax using online softmax trick (FP32 buffers)
+    float max_val = -INFINITY;
+    float sum_exp = 0.0f;
     for (int c = threadIdx.x; c < num_classes; c += blockDim.x) {
-        scalar_t logit = logits[batch_idx * num_classes + c];
-        scalar_t old_max = max_val;
+        float logit = static_cast<float>(logits[batch_idx * num_classes + c]);
+        float old_max = max_val;
         max_val = fmaxf(old_max, warp_max(logit));
         max_val = __shfl_sync(0xffffffff, max_val, 0);
-        scalar_t update = warp_sum(expf(logit - max_val));
+        float update = warp_sum(expf(logit - max_val));
         update = __shfl_sync(0xffffffff, update, 0);
         sum_exp = __fma_rn(sum_exp, expf(old_max - max_val), update);
     }
-    const scalar_t log_sum_exp = logf(sum_exp);
+    const float log_sum_exp = logf(sum_exp);
+    if (threadIdx.x == 0) {
+        denom[batch_idx] = sum_exp;
+        max_val_buffer[batch_idx] = max_val;
+    }
 
     if (apply_mixup) {
         // Generate MixUp weight using same method as image MixUp
-        const scalar_t weight = sample_beta(&batch_state, mixup_alpha);
+        const float weight = sample_beta(&batch_state, mixup_alpha);
 
         // Get the next batch's label for mixing
         const int mixup_batch_idx = (batch_idx + 1) % batch_size;
@@ -171,25 +178,29 @@ __global__ void cross_entropy_mixup_fwd_kernel(const scalar_t *__restrict__ logi
         }
 
         // Original label contribution
-        const scalar_t log_softmax_val_orig = logits[batch_idx * num_classes + label_idx] - max_val - log_sum_exp;
+        const float log_softmax_val_orig = logits[batch_idx * num_classes + label_idx] - max_val - log_sum_exp;
         loss -= weight * log_softmax_val_orig;
 
         // Mixed label contribution
-        const scalar_t log_softmax_val_mix = logits[batch_idx * num_classes + mixup_label_idx] - max_val - log_sum_exp;
+        const float log_softmax_val_mix = logits[batch_idx * num_classes + mixup_label_idx] - max_val - log_sum_exp;
         loss -= (1.0f - weight) * log_softmax_val_mix;
     } else {
         // Standard cross entropy without MixUp
-        const scalar_t log_softmax_val = logits[batch_idx * num_classes + label_idx] - max_val - log_sum_exp;
+        const float log_softmax_val =
+            static_cast<float>(logits[batch_idx * num_classes + label_idx]) - max_val - log_sum_exp;
         loss = -log_softmax_val;
     }
 
     if (threadIdx.x == 0) {
-        output[batch_idx] = loss;
+        output[batch_idx] = static_cast<scalar_t>(loss);
     }
 }
 
-torch::Tensor cross_entropy_mixup_fwd(const torch::Tensor &logits, const torch::Tensor &labels, const float mixup_prob,
-                                      const float mixup_alpha, const int64_t seed) {
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> cross_entropy_mixup_fwd(const torch::Tensor &logits,
+                                                                                const torch::Tensor &labels,
+                                                                                const float mixup_prob,
+                                                                                const float mixup_alpha,
+                                                                                const int64_t seed) {
     TORCH_CHECK(logits.dim() == 2, "Logits must be 2D tensor");
     TORCH_CHECK(labels.dim() == 1, "Labels must be 1D tensor");
     TORCH_CHECK(logits.size(0) == labels.size(0), "Batch sizes must match");
@@ -197,7 +208,9 @@ torch::Tensor cross_entropy_mixup_fwd(const torch::Tensor &logits, const torch::
 
     const auto batch_size = logits.size(0);
     const auto num_classes = logits.size(1);
-    auto output = torch::zeros({batch_size}, logits.options());
+    auto output = torch::empty({batch_size}, logits.options());
+    auto denom = torch::empty({batch_size}, logits.options().dtype(torch::kFloat32));
+    auto max_val_buffer = torch::empty({batch_size}, logits.options().dtype(torch::kFloat32));
 
     const size_t block_size = WARP_SIZE;
     const size_t num_blocks = batch_size;
@@ -206,9 +219,104 @@ torch::Tensor cross_entropy_mixup_fwd(const torch::Tensor &logits, const torch::
     AT_DISPATCH_FLOATING_TYPES(logits.scalar_type(), "cross_entropy_mixup_fwd", ([&] {
                                    cross_entropy_mixup_fwd_kernel<scalar_t>
                                        <<<blocks, block_size>>>(logits.data_ptr<scalar_t>(), labels.data_ptr<int64_t>(),
-                                                                output.data_ptr<scalar_t>(), mixup_prob, mixup_alpha,
-                                                                batch_size, num_classes, seed);
+                                                                output.data_ptr<scalar_t>(), denom.data_ptr<float>(),
+                                                                max_val_buffer.data_ptr<float>(), mixup_prob,
+                                                                mixup_alpha, batch_size, num_classes, seed);
                                }));
+
+    return std::make_tuple(output, denom, max_val_buffer);
+}
+
+template <typename scalar_t>
+__global__ void cross_entropy_mixup_bwd_kernel(const scalar_t *__restrict__ logits, const int64_t *__restrict__ labels,
+                                               const float *__restrict__ denom_buffer,
+                                               const float *__restrict__ max_val_buffer,
+                                               const scalar_t *__restrict__ grad_output, scalar_t *__restrict__ output,
+                                               const float mixup_prob, const float mixup_alpha,
+                                               const int64_t batch_size, const int64_t num_classes,
+                                               const int64_t seed) {
+    const int batch_idx = blockIdx.y;
+    const int seq_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t idx = batch_idx * num_classes + seq_idx;
+    if (seq_idx >= num_classes || batch_idx >= batch_size) return;
+
+    // Initialize RNG state for this batch element
+    curandState batch_state;
+    curand_init(seed + batch_idx, 0, 0, &batch_state);
+
+    // Determine if we apply MixUp
+    const bool apply_mixup = curand_uniform(&batch_state) < mixup_prob;
+
+    // Get the label for current batch
+    const int label_idx = static_cast<int>(labels[batch_idx]);
+
+    // Check for unknown label, set grad_output to 0
+    if (label_idx == UNKNOWN_LABEL) {
+        output[idx] = 0.0f;
+        return;
+    }
+
+    // Get the logit to compute gradient for and compute a probability using stored denominator
+    const float max_val = max_val_buffer[batch_idx];
+    const float logit = static_cast<float>(logits[idx]) - max_val;
+    const float sum_exp = denom_buffer[batch_idx];
+    const float prob = expf(logit) / sum_exp;
+
+    // Compute the target probability accounting for MixUp
+    float target_prob = 0.0f;
+    if (apply_mixup) {
+        // Generate MixUp weight using same method as image MixUp
+        const float weight = sample_beta(&batch_state, mixup_alpha);
+
+        // Check if the mixed label is unknown
+        const int mixup_batch_idx = (batch_idx + 1) % batch_size;
+        const int mixup_label_idx = static_cast<int>(labels[mixup_batch_idx]);
+        if (mixup_label_idx == UNKNOWN_LABEL) {
+            output[idx] = 0.0f;
+            return;
+        }
+
+        const float target = (seq_idx == label_idx) ? 1.0f : 0.0f;
+        const float mixed_target = (seq_idx == mixup_label_idx) ? 1.0f : 0.0f;
+        target_prob = weight * target + (1.0f - weight) * mixed_target;
+    } else {
+        target_prob = seq_idx == label_idx ? 1.0f : 0.0f;
+    }
+
+    // Compute the gradient for this logit
+    const float grad = (prob - target_prob);
+
+    // Apply gradient to output
+    output[idx] = static_cast<scalar_t>(grad);
+}
+
+torch::Tensor cross_entropy_mixup_bwd(const torch::Tensor &logits, const torch::Tensor &labels,
+                                      const torch::Tensor &denom, const torch::Tensor &max_val,
+                                      const torch::Tensor &grad_output, const float mixup_prob, const float mixup_alpha,
+                                      const int64_t seed) {
+    TORCH_CHECK(logits.dim() == 2, "Logits must be 2D tensor");
+    TORCH_CHECK(labels.dim() == 1, "Labels must be 1D tensor");
+    TORCH_CHECK(logits.size(0) == labels.size(0), "Batch sizes must match");
+    TORCH_CHECK(labels.scalar_type() == torch::kInt64, "Labels must be torch.long");
+
+    const auto batch_size = logits.size(0);
+    const auto num_classes = logits.size(1);
+    auto output = torch::empty_like(logits);
+
+    AT_DISPATCH_FLOATING_TYPES(
+        logits.scalar_type(), "cross_entropy_mixup_bwd", ([&] {
+            // Calculate grid dimensions
+            int min_grid_size;
+            int block_size;
+            cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
+                                               (void *)cross_entropy_mixup_bwd_kernel<scalar_t>, 0, 0);
+            const unsigned int blocks_x = (num_classes + block_size - 1) / block_size;
+            const dim3 blocks(blocks_x, batch_size);
+            cross_entropy_mixup_bwd_kernel<scalar_t><<<blocks, block_size>>>(
+                logits.data_ptr<scalar_t>(), labels.data_ptr<int64_t>(), denom.data_ptr<float>(),
+                max_val.data_ptr<float>(), grad_output.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), mixup_prob,
+                mixup_alpha, batch_size, num_classes, seed);
+        }));
 
     return output;
 }
@@ -217,4 +325,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("get_weights", &get_weights, "Get MixUp weights (CUDA)");
     m.def("mixup", &mixup, "MixUp operation (CUDA)");
     m.def("cross_entropy_mixup_fwd", &cross_entropy_mixup_fwd, "Cross-entropy with MixUp (CUDA)");
+    m.def("cross_entropy_mixup_bwd", &cross_entropy_mixup_bwd, "Backward pass for Cross-entropy with MixUp (CUDA)");
 }

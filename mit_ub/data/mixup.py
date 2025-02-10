@@ -176,11 +176,21 @@ def fused_mixup(x: Tensor, mixup_prob: float = 0.2, mixup_alpha: float = 1.0, se
 class CrossEntropyMixup(Function):
     @staticmethod
     def forward(ctx, logits: Tensor, labels: Tensor, mixup_prob: float, mixup_alpha: float, seed: int) -> Tensor:
-        return _mixup_cuda.cross_entropy_mixup_fwd(logits, labels, mixup_prob, mixup_alpha, seed)
+        ctx.mixup_prob = mixup_prob
+        ctx.mixup_alpha = mixup_alpha
+        ctx.seed = seed
+        loss, denom, max_val = _mixup_cuda.cross_entropy_mixup_fwd(logits, labels, mixup_prob, mixup_alpha, seed)
+        ctx.save_for_backward(logits, labels, denom, max_val)
+        return loss
 
     @staticmethod
-    def backward(ctx, grad_output: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-        raise NotImplementedError("Backward pass is not implemented for CrossEntropyMixup")
+    def backward(ctx, grad_output: Tensor) -> Tuple[Tensor, None, None, None, None]:
+        logits, labels, denom, max_val = ctx.saved_tensors
+        mixup_prob = ctx.mixup_prob
+        mixup_alpha = ctx.mixup_alpha
+        seed = ctx.seed
+        grad = _mixup_cuda.cross_entropy_mixup_bwd(logits, labels, denom, max_val, grad_output, mixup_prob, mixup_alpha, seed)
+        return grad, None, None, None, None
 
 
 def cross_entropy_mixup(logits: Tensor, labels: Tensor, mixup_prob: float, mixup_alpha: float, seed: int | None = None) -> Tensor:
