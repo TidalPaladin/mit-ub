@@ -10,8 +10,8 @@ from deep_helpers.structs import State
 from deep_helpers.tasks import Task
 from torch import Tensor
 
-from ..model import AnyModelConfig, ViT, ViTConfig
 from ..data import bce_mixup, cross_entropy_mixup, is_mixed, mixup
+from ..model import AnyModelConfig, ViT, ViTConfig
 from ..model.helpers import grid_to_tokens
 from .distillation import DistillationConfig, DistillationWithProbe
 from .jepa import JEPAConfig, JEPAWithProbe

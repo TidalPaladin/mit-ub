@@ -64,14 +64,15 @@ class TestMixUp:
         assert_close(y1, y2)
         assert not torch.allclose(y1, y3)
 
-    def test_mixup(self):
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+    def test_mixup(self, dtype):
         torch.random.manual_seed(0)
         B = 32
-        x = torch.randn(B, 1, device="cuda")
+        x = torch.randn(B, 1, device="cuda", dtype=dtype)
         seed = 0
         mixup_prob = 0.5
         mixup_alpha = 1.0
-        weights = get_weights(B, mixup_prob, mixup_alpha, seed)
+        weights = get_weights(B, mixup_prob, mixup_alpha, seed).type_as(x)
         weights = weights.view(B, 1).expand_as(x)
         other = x.roll(-1, 0)
         expected = x * weights + other * (1 - weights)
@@ -113,15 +114,16 @@ class TestCrossEntropyMixup:
         expected = F.cross_entropy(logits, labels, reduction="none")
         assert_close(loss, expected)
 
-    def test_cross_entropy_mixup(self):
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+    def test_cross_entropy_mixup(self, dtype):
         torch.random.manual_seed(0)
         B, C = 32, 8
-        logits = torch.randn(B, C, device="cuda")
+        logits = torch.randn(B, C, device="cuda", dtype=dtype)
         labels = torch.randint(0, C, (B,), device="cuda")
         mixup_prob = 0.5
         mixup_alpha = 1.0
         seed = 0
-        weights = get_weights(B, mixup_prob, mixup_alpha, seed)
+        weights = get_weights(B, mixup_prob, mixup_alpha, seed).type_as(logits)
         weights = weights.view(B, 1).expand_as(logits)
         labels_one_hot = F.one_hot(labels, num_classes=C)
         labels_one_hot_other = labels_one_hot.roll(-1, 0)
@@ -210,10 +212,11 @@ class TestCrossEntropyMixup:
         loss.sum().backward()
         assert_close(logits.grad, expected_grad, atol=1e-4, rtol=0)
 
-    def test_cross_entropy_mixup_backward(self):
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+    def test_cross_entropy_mixup_backward(self, dtype):
         torch.random.manual_seed(0)
         B, C = 32, 8
-        logits = torch.randn(B, C, device="cuda", requires_grad=True)
+        logits = torch.randn(B, C, device="cuda", requires_grad=True, dtype=dtype)
         labels = torch.randint(0, C, (B,), device="cuda")
         mixup_prob = 0.5
         mixup_alpha = 1.0
@@ -231,7 +234,8 @@ class TestCrossEntropyMixup:
         loss = cross_entropy_mixup(logits, labels, mixup_prob=0.5, mixup_alpha=1.0, seed=0)
         loss.sum().backward()
 
-        assert_close(logits.grad, expected_grad, atol=1e-4, rtol=0)
+        atol = 1e-4 if dtype == torch.float32 else 1e-2
+        assert_close(logits.grad, expected_grad, atol=atol, rtol=0)
 
     def test_cross_entropy_mixup_backward_ignore_unknown(self):
         torch.random.manual_seed(0)
@@ -295,21 +299,23 @@ class TestBCEMixup:
         expected = F.binary_cross_entropy_with_logits(logits, labels, reduction="none")
         assert_close(loss, expected)
 
-    def test_bce_mixup(self):
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+    def test_bce_mixup(self, dtype):
         torch.random.manual_seed(0)
         B, C = 32, 8
-        logits = torch.randn(B, C, device="cuda")
-        labels = torch.rand(B, C, device="cuda")
+        logits = torch.randn(B, C, device="cuda", dtype=dtype)
+        labels = torch.rand(B, C, device="cuda", dtype=dtype)
         mixup_prob = 0.5
         mixup_alpha = 1.0
         seed = 0
-        weights = get_weights(B, mixup_prob, mixup_alpha, seed)
+        weights = get_weights(B, mixup_prob, mixup_alpha, seed).type_as(logits)
         weights = weights.view(B, 1).expand_as(logits)
         mixed_labels = labels * weights + (1 - weights) * labels.roll(-1, 0)
         expected = F.binary_cross_entropy_with_logits(logits, mixed_labels, reduction="none")
 
         loss = bce_mixup(logits, labels, mixup_prob=0.5, mixup_alpha=1.0, seed=0)
-        assert_close(loss, expected)
+        atol = 1e-4 if dtype == torch.float32 else 1e-1
+        assert_close(loss, expected, atol=atol, rtol=0)
 
     def test_bce_mixup_ignore_unknown(self):
         torch.random.manual_seed(0)
@@ -349,11 +355,12 @@ class TestBCEMixup:
         loss.sum().backward()
         assert_close(logits.grad, expected_grad, atol=1e-4, rtol=0)
 
-    def test_bce_mixup_backward(self):
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+    def test_bce_mixup_backward(self, dtype):
         torch.random.manual_seed(0)
         B, C = 32, 8
-        logits = torch.randn(B, C, device="cuda", requires_grad=True)
-        labels = torch.rand(B, C, device="cuda")
+        logits = torch.randn(B, C, device="cuda", requires_grad=True, dtype=dtype)
+        labels = torch.rand(B, C, device="cuda", dtype=dtype)
         mixup_prob = 0.5
         mixup_alpha = 1.0
         seed = 0
@@ -367,8 +374,8 @@ class TestBCEMixup:
 
         loss = bce_mixup(logits, labels, mixup_prob=0.5, mixup_alpha=1.0, seed=0)
         loss.sum().backward()
-
-        assert_close(logits.grad, expected_grad, atol=1e-4, rtol=0)
+        atol = 1e-4 if dtype == torch.float32 else 1e-2
+        assert_close(logits.grad, expected_grad, atol=atol, rtol=0)
 
     def test_bce_mixup_backward_ignore_unknown(self):
         torch.random.manual_seed(0)

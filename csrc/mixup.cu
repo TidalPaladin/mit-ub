@@ -142,8 +142,8 @@ torch::Tensor mixup(const torch::Tensor &input, const float mixup_prob, const fl
     const int64_t batch_size = input.size(0);
     const int64_t seq_len = input.numel() / batch_size;
 
-    AT_DISPATCH_FLOATING_TYPES(
-        input.scalar_type(), "mixup", ([&] {
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half, at::ScalarType::BFloat16, input.scalar_type(), "mixup", ([&] {
             int min_grid_size;
             int block_size;
             cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size, (void *)mixup_kernel<scalar_t>, 0, 0);
@@ -250,13 +250,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> cross_entropy_mixup_fwd(
     const size_t num_blocks = batch_size;
     const dim3 blocks(num_blocks);
 
-    AT_DISPATCH_FLOATING_TYPES(logits.scalar_type(), "cross_entropy_mixup_fwd", ([&] {
-                                   cross_entropy_mixup_fwd_kernel<scalar_t>
-                                       <<<blocks, block_size>>>(logits.data_ptr<scalar_t>(), labels.data_ptr<int64_t>(),
-                                                                output.data_ptr<scalar_t>(), denom.data_ptr<float>(),
-                                                                max_val_buffer.data_ptr<float>(), mixup_prob,
-                                                                mixup_alpha, batch_size, num_classes, seed);
-                               }));
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half, at::ScalarType::BFloat16, logits.scalar_type(), "cross_entropy_mixup_fwd", ([&] {
+            cross_entropy_mixup_fwd_kernel<scalar_t><<<blocks, block_size>>>(
+                logits.data_ptr<scalar_t>(), labels.data_ptr<int64_t>(), output.data_ptr<scalar_t>(),
+                denom.data_ptr<float>(), max_val_buffer.data_ptr<float>(), mixup_prob, mixup_alpha, batch_size,
+                num_classes, seed);
+        }));
 
     return std::make_tuple(output, denom, max_val_buffer);
 }
@@ -337,8 +337,8 @@ torch::Tensor cross_entropy_mixup_bwd(const torch::Tensor &logits, const torch::
     const auto num_classes = logits.size(1);
     auto output = torch::empty_like(logits);
 
-    AT_DISPATCH_FLOATING_TYPES(
-        logits.scalar_type(), "cross_entropy_mixup_bwd", ([&] {
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half, at::ScalarType::BFloat16, logits.scalar_type(), "cross_entropy_mixup_bwd", ([&] {
             // Calculate grid dimensions
             int min_grid_size;
             int block_size;
@@ -408,17 +408,18 @@ torch::Tensor bce_mixup_fwd(const torch::Tensor &logits, const torch::Tensor &la
     const auto seq_len = logits.numel() / batch_size;
     auto output = torch::empty_like(logits);
 
-    AT_DISPATCH_FLOATING_TYPES(logits.scalar_type(), "bce_mixup_fwd", ([&] {
-                                   int min_grid_size;
-                                   int block_size;
-                                   cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
-                                                                      (void *)bce_mixup_fwd_kernel<scalar_t>, 0, 0);
-                                   const unsigned int blocks_x = (seq_len + block_size - 1) / block_size;
-                                   const dim3 blocks(blocks_x, batch_size);
-                                   bce_mixup_fwd_kernel<scalar_t><<<blocks, block_size>>>(
-                                       logits.data_ptr<scalar_t>(), labels.data_ptr<scalar_t>(),
-                                       output.data_ptr<scalar_t>(), mixup_prob, mixup_alpha, batch_size, seq_len, seed);
-                               }));
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half, at::ScalarType::BFloat16, logits.scalar_type(), "bce_mixup_fwd", ([&] {
+            int min_grid_size;
+            int block_size;
+            cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size, (void *)bce_mixup_fwd_kernel<scalar_t>, 0,
+                                               0);
+            const unsigned int blocks_x = (seq_len + block_size - 1) / block_size;
+            const dim3 blocks(blocks_x, batch_size);
+            bce_mixup_fwd_kernel<scalar_t><<<blocks, block_size>>>(
+                logits.data_ptr<scalar_t>(), labels.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), mixup_prob,
+                mixup_alpha, batch_size, seq_len, seed);
+        }));
 
     return output;
 }
@@ -477,18 +478,18 @@ torch::Tensor bce_mixup_bwd(const torch::Tensor &logits, const torch::Tensor &la
     const auto seq_len = logits.numel() / batch_size;
     auto output = torch::empty_like(logits);
 
-    AT_DISPATCH_FLOATING_TYPES(logits.scalar_type(), "bce_mixup_bwd", ([&] {
-                                   int min_grid_size;
-                                   int block_size;
-                                   cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
-                                                                      (void *)bce_mixup_bwd_kernel<scalar_t>, 0, 0);
-                                   const unsigned int blocks_x = (seq_len + block_size - 1) / block_size;
-                                   const dim3 blocks(blocks_x, batch_size);
-                                   bce_mixup_bwd_kernel<scalar_t><<<blocks, block_size>>>(
-                                       logits.data_ptr<scalar_t>(), labels.data_ptr<scalar_t>(),
-                                       grad_output.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), mixup_prob,
-                                       mixup_alpha, batch_size, seq_len, seed);
-                               }));
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half, at::ScalarType::BFloat16, logits.scalar_type(), "bce_mixup_bwd", ([&] {
+            int min_grid_size;
+            int block_size;
+            cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size, (void *)bce_mixup_bwd_kernel<scalar_t>, 0,
+                                               0);
+            const unsigned int blocks_x = (seq_len + block_size - 1) / block_size;
+            const dim3 blocks(blocks_x, batch_size);
+            bce_mixup_bwd_kernel<scalar_t><<<blocks, block_size>>>(
+                logits.data_ptr<scalar_t>(), labels.data_ptr<scalar_t>(), grad_output.data_ptr<scalar_t>(),
+                output.data_ptr<scalar_t>(), mixup_prob, mixup_alpha, batch_size, seq_len, seed);
+        }));
 
     return output;
 }
