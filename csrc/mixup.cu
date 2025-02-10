@@ -9,6 +9,7 @@ Implements a fused kernel for applying MixUp to a batch of images or categorical
 #include <torch/extension.h>
 
 #define WARP_SIZE 32
+#define UNKNOWN_LABEL -1
 
 __device__ __forceinline__ float sample_beta(curandState *state, const float alpha) {
     const float divisor = 1.0f / alpha;
@@ -137,6 +138,12 @@ __global__ void cross_entropy_mixup_fwd_kernel(const scalar_t *__restrict__ logi
     const int label_idx = static_cast<int>(labels[batch_idx]);
     scalar_t loss = 0.0f;
 
+    // Check for unknown label, set loss to -1
+    if (label_idx == UNKNOWN_LABEL) {
+        output[batch_idx] = -1.0f;
+        return;
+    }
+
     // Softmax using online softmax trick
     scalar_t max_val = -INFINITY;
     scalar_t sum_exp = 0.0f;
@@ -158,6 +165,10 @@ __global__ void cross_entropy_mixup_fwd_kernel(const scalar_t *__restrict__ logi
         // Get the next batch's label for mixing
         const int mixup_batch_idx = (batch_idx + 1) % batch_size;
         const int mixup_label_idx = static_cast<int>(labels[mixup_batch_idx]);
+        if (mixup_label_idx == UNKNOWN_LABEL) {
+            output[batch_idx] = -1.0f;
+            return;
+        }
 
         // Original label contribution
         const scalar_t log_softmax_val_orig = logits[batch_idx * num_classes + label_idx] - max_val - log_sum_exp;
