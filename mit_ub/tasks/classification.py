@@ -53,8 +53,7 @@ def binary_loss(
         mixup_prob = 0.0
     if label.dim() == 1:
         label = label.view(-1, 1)
-    if not label.is_floating_point():
-        label = label.float()
+    label = label.type_as(logits)
     result = bce_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha)
     result = result[result >= 0.0].mean()
     return result
