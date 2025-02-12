@@ -136,7 +136,7 @@ def create_metrics(config: "ClassificationConfig") -> tm.MetricCollection:
     if config.is_binary:
         metrics = tm.MetricCollection(
             {
-                "acc": tm.Accuracy(task="binary"),
+                "acc": tm.Accuracy(task="binary", average="micro"),
                 "macro_acc": tm.Accuracy(task="binary", average="macro"),
                 "auroc": tm.AUROC(task="binary"),
                 "bce_loss": tm.MeanMetric(),
@@ -145,7 +145,7 @@ def create_metrics(config: "ClassificationConfig") -> tm.MetricCollection:
     else:
         metrics = tm.MetricCollection(
             {
-                "acc": tm.Accuracy(task="multiclass", num_classes=config.num_classes),
+                "acc": tm.Accuracy(task="multiclass", num_classes=config.num_classes, average="micro"),
                 "macro_acc": tm.Accuracy(task="multiclass", average="macro", num_classes=config.num_classes),
                 "ce_loss": tm.MeanMetric(),
             }
