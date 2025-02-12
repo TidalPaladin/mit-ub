@@ -23,7 +23,13 @@ else:
 
 
 @torch.no_grad()
-def get_weights(batch_size: int, mixup_prob: float = 0.2, mixup_alpha: float = 1.0, seed: int | None = None, device: torch.device = torch.device("cuda")) -> Tensor:
+def get_weights(
+    batch_size: int,
+    mixup_prob: float = 0.2,
+    mixup_alpha: float = 1.0,
+    seed: int | None = None,
+    device: torch.device = torch.device("cuda"),
+) -> Tensor:
     if _mixup_cuda is None:
         raise RuntimeError("MixUp is not available on this system")
 

@@ -541,6 +541,8 @@ class JEPA(Task):
     ) -> Dict[str, Any]:
         torch.compiler.cudagraph_mark_step_begin()
         x: Tensor = batch["img"]
+        if not x.device.type == "cuda":
+            raise ValueError("JEPA only supports CUDA")
 
         # ema update from previous step when training
         if state.mode == Mode.TRAIN:
@@ -577,10 +579,7 @@ class JEPA(Task):
             # apply random noise
             if self.training and self.jepa_config.use_noise:
                 torch.cuda.nvtx.range_push("noise")
-                if x.device.type == "cuda":
-                    x = self.random_noise.apply_batched_cuda(x, inplace=True)
-                else:
-                    x = self.random_noise.apply_batched(x)
+                x = self.random_noise.apply_batched_cuda(x, inplace=True)
                 torch.cuda.nvtx.range_pop()
 
             # apply mixup, not overwriting full_target

@@ -51,6 +51,10 @@ def binary_loss(
     if mixup_seed is None:
         mixup_seed = 0
         mixup_prob = 0.0
+    if label.dim() == 1:
+        label = label.view(-1, 1)
+    if not label.is_floating_point():
+        label = label.float()
     result = bce_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha)
     result = result[result >= 0.0].mean()
     return result
@@ -276,6 +280,8 @@ class ClassificationTask(Task):
     ) -> Dict[str, Any]:
         # get inputs
         x = batch["img"]
+        if not x.device.type == "cuda":
+            raise ValueError("Classification only supports CUDA")
         y = batch[self.config.label_key].long()
         y.shape[0]
 
