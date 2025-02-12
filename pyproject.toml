@@ -71,7 +71,7 @@ pythonPlatform = "Linux"
 version = { source = "scm" }
 
 [tool.pdm.build]
-includes = ["csrc"]
+includes = ["mit_ub", "csrc"]
 
 [tool.pdm.dev-dependencies]
 test = [
