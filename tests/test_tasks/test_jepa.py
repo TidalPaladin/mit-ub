@@ -280,16 +280,9 @@ class TestJEPA:
         assert opt.param_groups[0]["weight_decay"] == 1.0
         assert opt.param_groups[1]["weight_decay"] == 0.5
 
-    @pytest.mark.cuda
-    def test_fit(self, task, cifar10_datamodule, logger):
+    def test_fit(self, task, cifar10_datamodule, gpu_trainer):
         task.weight_decay_final = 4.0
-        trainer = pl.Trainer(
-            accelerator="gpu",
-            devices=1,
-            fast_dev_run=True,
-            logger=logger,
-        )
-        trainer.fit(task, datamodule=cifar10_datamodule)
+        gpu_trainer.fit(task, datamodule=cifar10_datamodule)
 
     @pytest.fixture
     def task_siglip(self, optimizer_init, backbone):
@@ -298,13 +291,6 @@ class TestJEPA:
         config.siglip_weight = 0.5
         return JEPA(backbone, optimizer_init=optimizer_init, jepa_config=config)
 
-    @pytest.mark.cuda
-    def test_fit_siglip(self, task_siglip, cifar10_datamodule, logger):
+    def test_fit_siglip(self, task_siglip, cifar10_datamodule, gpu_trainer):
         task_siglip.weight_decay_final = 4.0
-        trainer = pl.Trainer(
-            accelerator="gpu",
-            devices=1,
-            fast_dev_run=True,
-            logger=logger,
-        )
-        trainer.fit(task_siglip, datamodule=cifar10_datamodule)
+        gpu_trainer.fit(task_siglip, datamodule=cifar10_datamodule)

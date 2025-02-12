@@ -1,5 +1,4 @@
 import pytest
-import pytorch_lightning as pl
 import torch
 from deep_helpers.structs import Mode, State
 
@@ -58,12 +57,5 @@ class TestDistillation:
         else:
             assert set(metrics.keys()) == base_keys
 
-    @pytest.mark.cuda
-    def test_fit(self, task, cifar10_datamodule, logger):
-        trainer = pl.Trainer(
-            accelerator="gpu",
-            devices=1,
-            fast_dev_run=True,
-            logger=logger,
-        )
-        trainer.fit(task, datamodule=cifar10_datamodule)
+    def test_fit(self, task, cifar10_datamodule, gpu_trainer):
+        gpu_trainer.fit(task, datamodule=cifar10_datamodule)

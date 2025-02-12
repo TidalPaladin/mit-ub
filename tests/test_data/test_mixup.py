@@ -81,6 +81,7 @@ class TestMixUp:
         assert_close(y, expected)
 
 
+@pytest.mark.cuda
 class TestCrossEntropyMixup:
 
     @pytest.mark.parametrize(
@@ -269,6 +270,7 @@ class TestCrossEntropyMixup:
         assert_close(logits.grad, expected_grad, atol=1e-4, rtol=0)
 
 
+@pytest.mark.cuda
 class TestBCEMixup:
 
     @pytest.mark.parametrize(

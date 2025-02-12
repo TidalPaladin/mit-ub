@@ -194,6 +194,8 @@ class Distillation(Task):
     ) -> Dict[str, Any]:
         torch.compiler.cudagraph_mark_step_begin()
         x: Tensor = batch["img"]
+        if not x.device.type == "cuda":
+            raise ValueError("Distillation only supports CUDA")
 
         with torch.inference_mode():
             # generate ground truth with forward pass of teacher backbone
