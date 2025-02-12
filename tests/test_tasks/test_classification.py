@@ -1,5 +1,4 @@
 import pytest
-import pytorch_lightning as pl
 import torch
 from deep_helpers.structs import Mode, State
 
@@ -53,34 +52,20 @@ class TestClassificationTask:
         base_keys = {"bce_loss", "acc", "macro_acc", "auroc"}
         assert set(metrics.keys()) == base_keys
 
-    def test_fit(self, task, cifar10_datamodule, logger):
-        trainer = pl.Trainer(
-            accelerator="cpu",
-            fast_dev_run=True,
-            logger=logger,
-        )
-        trainer.fit(task, datamodule=cifar10_datamodule)
+    def test_fit(self, task, cifar10_datamodule, gpu_trainer):
+        gpu_trainer.fit(task, datamodule=cifar10_datamodule)
 
-    def test_fit_binary(self, binary_task, cifar10_datamodule_binary, logger):
-        trainer = pl.Trainer(
-            accelerator="cpu",
-            fast_dev_run=True,
-            logger=logger,
-        )
-        trainer.fit(binary_task, datamodule=cifar10_datamodule_binary)
+    def test_fit_binary(self, binary_task, cifar10_datamodule_binary, gpu_trainer):
+        gpu_trainer.fit(binary_task, datamodule=cifar10_datamodule_binary)
 
     @pytest.fixture
     def task_convnext(self, optimizer_init, convnext_dummy):
         config = ClassificationConfig(num_classes=10, pool_type="avg")
         return ClassificationTask(convnext_dummy, classification_config=config, optimizer_init=optimizer_init)
 
-    def test_fit_convnext(self, task_convnext, cifar10_datamodule, logger):
-        trainer = pl.Trainer(
-            accelerator="cpu",
-            fast_dev_run=True,
-            logger=logger,
-        )
-        trainer.fit(task_convnext, datamodule=cifar10_datamodule)
+    @pytest.mark.cuda
+    def test_fit_convnext(self, task_convnext, cifar10_datamodule, gpu_trainer):
+        gpu_trainer.fit(task_convnext, datamodule=cifar10_datamodule)
 
 
 class TestJEPAWithClassification:
@@ -171,21 +156,13 @@ class TestJEPAWithClassification:
         else:
             assert set(metrics.keys()) == base_keys
 
-    def test_fit(self, task, cifar10_datamodule, logger):
-        trainer = pl.Trainer(
-            accelerator="cpu",
-            fast_dev_run=True,
-            logger=logger,
-        )
-        trainer.fit(task, datamodule=cifar10_datamodule)
+    @pytest.mark.cuda
+    def test_fit(self, task, cifar10_datamodule, gpu_trainer):
+        gpu_trainer.fit(task, datamodule=cifar10_datamodule)
 
-    def test_fit_binary(self, binary_task, cifar10_datamodule_binary, logger):
-        trainer = pl.Trainer(
-            accelerator="cpu",
-            fast_dev_run=True,
-            logger=logger,
-        )
-        trainer.fit(binary_task, datamodule=cifar10_datamodule_binary)
+    @pytest.mark.cuda
+    def test_fit_binary(self, binary_task, cifar10_datamodule_binary, gpu_trainer):
+        gpu_trainer.fit(binary_task, datamodule=cifar10_datamodule_binary)
 
 
 class TestDistillationWithClassification:
@@ -273,18 +250,8 @@ class TestDistillationWithClassification:
         else:
             assert set(metrics.keys()) == base_keys
 
-    def test_fit(self, task, cifar10_datamodule, logger):
-        trainer = pl.Trainer(
-            accelerator="cpu",
-            fast_dev_run=True,
-            logger=logger,
-        )
-        trainer.fit(task, datamodule=cifar10_datamodule)
+    def test_fit(self, task, cifar10_datamodule, gpu_trainer):
+        gpu_trainer.fit(task, datamodule=cifar10_datamodule)
 
-    def test_fit_binary(self, binary_task, cifar10_datamodule_binary, logger):
-        trainer = pl.Trainer(
-            accelerator="cpu",
-            fast_dev_run=True,
-            logger=logger,
-        )
-        trainer.fit(binary_task, datamodule=cifar10_datamodule_binary)
+    def test_fit_binary(self, binary_task, cifar10_datamodule_binary, gpu_trainer):
+        gpu_trainer.fit(binary_task, datamodule=cifar10_datamodule_binary)

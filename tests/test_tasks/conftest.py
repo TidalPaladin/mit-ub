@@ -1,4 +1,6 @@
 import pytest
+import pytorch_lightning as pl
+import torch
 
 from mit_ub.model import AdaptiveViTConfig, ConvNextConfig, ViTConfig
 
@@ -94,3 +96,15 @@ def backbone(request):
         return request.getfixturevalue("vit_adaptive_dummy")
     else:
         pytest.fail(f"Unsupported backbone: {request.param}")
+
+
+@pytest.fixture
+def gpu_trainer(logger):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    return pl.Trainer(
+        accelerator="gpu",
+        devices=1,
+        fast_dev_run=True,
+        logger=logger,
+    )
