@@ -403,3 +403,92 @@ class TestBCEMixup:
         loss = loss[loss != -1.0]
         loss.sum().backward()
         assert_close(logits.grad, expected_grad, atol=1e-4, rtol=0)
+
+    @pytest.mark.parametrize("pos_weight", [0.2, 0.5, 0.8])
+    def test_bce_mixup_pos_weight(self, pos_weight):
+        torch.random.manual_seed(0)
+        B, C = 32, 8
+        logits = torch.randn(B, C, device="cuda")
+        labels = torch.rand(B, C, device="cuda")
+        seed = 0
+        mixup_prob = 0.0  # Disable mixup to test just pos_weight
+        mixup_alpha = 1.0
+
+        # Compute expected loss with manual weighting
+        loss = F.binary_cross_entropy_with_logits(logits, labels, reduction="none")
+        expected = loss * (labels * pos_weight + (1 - labels) * (1 - pos_weight))
+
+        # Compute actual loss with pos_weight
+        actual = bce_mixup(
+            logits, labels, seed=seed, mixup_prob=mixup_prob, mixup_alpha=mixup_alpha, pos_weight=pos_weight
+        )
+        assert_close(actual, expected, atol=1e-4, rtol=0)
+
+    @pytest.mark.parametrize("pos_weight", [0.2, 0.5, 0.8])
+    def test_bce_mixup_pos_weight_backward(self, pos_weight):
+        torch.random.manual_seed(0)
+        B, C = 32, 8
+        logits = torch.randn(B, C, device="cuda", requires_grad=True)
+        labels = torch.rand(B, C, device="cuda")
+        seed = 0
+        mixup_prob = 0.0  # Disable mixup to test just pos_weight
+        mixup_alpha = 1.0
+
+        # Compute expected gradient with manual weighting
+        def manual_weighted_bce(logits, labels, pos_weight):
+            loss = F.binary_cross_entropy_with_logits(logits, labels, reduction="none")
+            return loss * (labels * pos_weight + (1 - labels) * (1 - pos_weight))
+
+        expected = manual_weighted_bce(logits, labels, pos_weight)
+        expected.sum().backward()
+        expected_grad = logits.grad
+        logits.grad = None
+
+        # Compute actual gradient with pos_weight
+        actual = bce_mixup(
+            logits, labels, seed=seed, mixup_prob=mixup_prob, mixup_alpha=mixup_alpha, pos_weight=pos_weight
+        )
+        actual.sum().backward()
+        assert_close(logits.grad, expected_grad, atol=1e-4, rtol=0)
+
+    @pytest.mark.parametrize("pos_weight", [0.2, 0.5, 0.8])
+    def test_bce_mixup_pos_weight_with_mixup(self, pos_weight):
+        torch.random.manual_seed(0)
+        B, C = 32, 8
+        logits = torch.randn(B, C, device="cuda", requires_grad=True)
+        labels = torch.rand(B, C, device="cuda")
+        seed = 0
+        mixup_prob = 1.0  # Always apply mixup
+        mixup_alpha = 1.0
+
+        # Get mixup weights for manual computation
+        weights = get_weights(B, mixup_prob, mixup_alpha, seed).view(B, 1).expand_as(logits)
+        mixed_labels = labels * weights + (1 - weights) * labels.roll(-1, 0)
+
+        # Compute expected loss with manual weighting
+        loss = F.binary_cross_entropy_with_logits(logits, mixed_labels, reduction="none")
+        expected = loss * (mixed_labels * pos_weight + (1 - mixed_labels) * (1 - pos_weight))
+        expected.sum().backward()
+        expected_grad = logits.grad
+        logits.grad = None
+
+        # Compute actual loss with pos_weight
+        actual = bce_mixup(
+            logits, labels, seed=seed, mixup_prob=mixup_prob, mixup_alpha=mixup_alpha, pos_weight=pos_weight
+        )
+        actual.sum().backward()
+        assert_close(actual, expected, atol=1e-4, rtol=0)
+        assert_close(logits.grad, expected_grad, atol=1e-4, rtol=0)
+
+    def test_bce_mixup_invalid_pos_weight(self):
+        torch.random.manual_seed(0)
+        B, C = 32, 8
+        logits = torch.randn(B, C, device="cuda")
+        labels = torch.rand(B, C, device="cuda")
+        seed = 0
+
+        with pytest.raises(ValueError, match="pos_weight must be in range"):
+            bce_mixup(logits, labels, seed=seed, pos_weight=-0.1)
+
+        with pytest.raises(ValueError, match="pos_weight must be in range"):
+            bce_mixup(logits, labels, seed=seed, pos_weight=1.1)

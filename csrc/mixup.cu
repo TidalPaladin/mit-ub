@@ -18,8 +18,8 @@ __device__ __forceinline__ float sample_beta(curandState *state, const float alp
     return u / (u + v);
 }
 
-template <typename scalar_t>
-__device__ __forceinline__ scalar_t lerp(scalar_t val, scalar_t mixup_val, scalar_t weight) {
+template <typename scalar_t, typename weight_t>
+__device__ __forceinline__ scalar_t lerp(scalar_t val, scalar_t mixup_val, weight_t weight) {
     // w * x + (1 - w) * y = w * (x - y) + y
     return __fmaf_rn(weight, val - mixup_val, mixup_val);
 }
@@ -358,7 +358,8 @@ torch::Tensor cross_entropy_mixup_bwd(const torch::Tensor &logits, const torch::
 template <typename scalar_t>
 __global__ void bce_mixup_fwd_kernel(const scalar_t *__restrict__ logits, const scalar_t *__restrict__ labels,
                                      scalar_t *__restrict__ output, const float mixup_prob, const float mixup_alpha,
-                                     const int64_t batch_size, const int64_t seq_len, const int64_t seed) {
+                                     const float pos_weight, const int64_t batch_size, const int64_t seq_len,
+                                     const int64_t seed) {
     const int batch_idx = blockIdx.y;
     const int seq_idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t idx = batch_idx * seq_len + seq_idx;
@@ -391,18 +392,26 @@ __global__ void bce_mixup_fwd_kernel(const scalar_t *__restrict__ logits, const 
         const scalar_t weight = sample_beta(&batch_state, mixup_alpha);
         const scalar_t mixed_target = lerp(target, mixup_target, weight);
         loss = softplus(logit) - logit * mixed_target;
+        if (pos_weight >= 0.0f) {
+            loss *= lerp(mixed_target, 1 - mixed_target, pos_weight);
+        }
     } else {
         loss = softplus(logit) - logit * target;
+        if (pos_weight >= 0.0f) {
+            loss *= lerp(target, 1 - target, pos_weight);
+        }
     }
 
     output[idx] = loss;
 }
 
 torch::Tensor bce_mixup_fwd(const torch::Tensor &logits, const torch::Tensor &labels, const float mixup_prob,
-                            const float mixup_alpha, const int64_t seed) {
+                            const float mixup_alpha, const float pos_weight, const int64_t seed) {
     TORCH_CHECK(logits.dim() >= 2, "Logits must be >=2D tensor");
     TORCH_CHECK(labels.dim() >= 2, "Labels must be >=2D tensor");
     TORCH_CHECK(logits.sizes() == labels.sizes(), "Logits and labels must have the same shape");
+    TORCH_CHECK(pos_weight < 0.0f || (pos_weight >= 0.0f && pos_weight <= 1.0f),
+                "pos_weight must be in range [0, 1] or -1 for no weighting");
 
     const auto batch_size = logits.size(0);
     const auto seq_len = logits.numel() / batch_size;
@@ -418,7 +427,7 @@ torch::Tensor bce_mixup_fwd(const torch::Tensor &logits, const torch::Tensor &la
             const dim3 blocks(blocks_x, batch_size);
             bce_mixup_fwd_kernel<scalar_t><<<blocks, block_size>>>(
                 logits.data_ptr<scalar_t>(), labels.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), mixup_prob,
-                mixup_alpha, batch_size, seq_len, seed);
+                mixup_alpha, pos_weight, batch_size, seq_len, seed);
         }));
 
     return output;
@@ -427,8 +436,8 @@ torch::Tensor bce_mixup_fwd(const torch::Tensor &logits, const torch::Tensor &la
 template <typename scalar_t>
 __global__ void bce_mixup_bwd_kernel(const scalar_t *__restrict__ logits, const scalar_t *__restrict__ labels,
                                      const scalar_t *__restrict__ grad_output, scalar_t *__restrict__ output,
-                                     const float mixup_prob, const float mixup_alpha, const int64_t batch_size,
-                                     const int64_t seq_len, const int64_t seed) {
+                                     const float mixup_prob, const float mixup_alpha, const float pos_weight,
+                                     const int64_t batch_size, const int64_t seq_len, const int64_t seed) {
     const int batch_idx = blockIdx.y;
     const int seq_idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t idx = batch_idx * seq_len + seq_idx;
@@ -461,18 +470,27 @@ __global__ void bce_mixup_bwd_kernel(const scalar_t *__restrict__ logits, const 
         const scalar_t weight = sample_beta(&batch_state, mixup_alpha);
         const scalar_t mixed_target = lerp(target, mixup_target, weight);
         grad = stable_sigmoid(logit) - mixed_target;
+        if (pos_weight >= 0.0f) {
+            grad *= lerp(mixed_target, 1 - mixed_target, pos_weight);
+        }
     } else {
         grad = stable_sigmoid(logit) - target;
+        if (pos_weight >= 0.0f) {
+            grad *= lerp(target, 1 - target, pos_weight);
+        }
     }
 
     output[idx] = grad;
 }
 
 torch::Tensor bce_mixup_bwd(const torch::Tensor &logits, const torch::Tensor &labels, const torch::Tensor &grad_output,
-                            const float mixup_prob, const float mixup_alpha, const int64_t seed) {
+                            const float mixup_prob, const float mixup_alpha, const float pos_weight,
+                            const int64_t seed) {
     TORCH_CHECK(logits.dim() >= 2, "Logits must be >=2D tensor");
     TORCH_CHECK(labels.dim() >= 2, "Labels must be >=2D tensor");
     TORCH_CHECK(logits.sizes() == labels.sizes(), "Logits and labels must have the same shape");
+    TORCH_CHECK(pos_weight < 0.0f || (pos_weight >= 0.0f && pos_weight <= 1.0f),
+                "pos_weight must be in range [0, 1] or -1 for no weighting");
 
     const auto batch_size = logits.size(0);
     const auto seq_len = logits.numel() / batch_size;
@@ -488,7 +506,7 @@ torch::Tensor bce_mixup_bwd(const torch::Tensor &logits, const torch::Tensor &la
             const dim3 blocks(blocks_x, batch_size);
             bce_mixup_bwd_kernel<scalar_t><<<blocks, block_size>>>(
                 logits.data_ptr<scalar_t>(), labels.data_ptr<scalar_t>(), grad_output.data_ptr<scalar_t>(),
-                output.data_ptr<scalar_t>(), mixup_prob, mixup_alpha, batch_size, seq_len, seed);
+                output.data_ptr<scalar_t>(), mixup_prob, mixup_alpha, pos_weight, batch_size, seq_len, seed);
         }));
 
     return output;

@@ -58,6 +58,7 @@ def binary_loss(
     mixup_seed: int | None = None,
     mixup_prob: float = 0.2,
     mixup_alpha: float = 1.0,
+    pos_weight: float | None = None,
 ) -> Tensor:
     if mixup_seed is None:
         mixup_seed = 0
@@ -65,7 +66,7 @@ def binary_loss(
     if label.dim() == 1:
         label = label.view(-1, 1)
     label = label.type_as(logits)
-    result = bce_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha)
+    result = bce_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha, pos_weight)
     result = result[result >= 0.0].mean()
     return result
 
@@ -119,7 +120,7 @@ def step_classification_from_features(
     mixup_prob = config.mixup_prob
     mixup_alpha = config.mixup_alpha
     if config.is_binary:
-        loss = binary_loss(pred_logits, label, mixup_seed, mixup_prob, mixup_alpha)
+        loss = binary_loss(pred_logits, label, mixup_seed, mixup_prob, mixup_alpha, config.pos_weight)
     else:
         loss = categorical_loss(pred_logits, label, mixup_seed, mixup_prob, mixup_alpha)
     assert loss >= 0.0, f"Loss is negative: {loss}"
@@ -185,6 +186,7 @@ class ClassificationConfig:
         salt_pepper_pixel_prob: Probability of applying salt and pepper noise to a given pixel.
         noise_prob: Probability of applying a given noise transform.
         noise_clip: If True, clip the noise to the range [0, 1].
+        pos_weight: Weight for the positive class in binary classification.
     """
 
     num_classes: int
@@ -205,6 +207,9 @@ class ClassificationConfig:
     salt_pepper_pixel_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX)
     noise_prob: float = DEFAULT_NOISE_PROB
     noise_clip: bool = True
+
+    # Binary classification
+    pos_weight: float | None = None
 
     def __post_init__(self) -> None:
         if self.num_classes <= 0:
