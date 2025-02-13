@@ -18,8 +18,8 @@ __device__ __forceinline__ float sample_beta(curandState *state, const float alp
     return u / (u + v);
 }
 
-template <typename scalar_t>
-__device__ __forceinline__ scalar_t lerp(scalar_t val, scalar_t mixup_val, scalar_t weight) {
+template <typename scalar_t, typename weight_t>
+__device__ __forceinline__ scalar_t lerp(scalar_t val, scalar_t mixup_val, weight_t weight) {
     // w * x + (1 - w) * y = w * (x - y) + y
     return __fmaf_rn(weight, val - mixup_val, mixup_val);
 }
@@ -393,12 +393,12 @@ __global__ void bce_mixup_fwd_kernel(const scalar_t *__restrict__ logits, const 
         const scalar_t mixed_target = lerp(target, mixup_target, weight);
         loss = softplus(logit) - logit * mixed_target;
         if (pos_weight >= 0.0f) {
-            loss *= mixed_target * pos_weight + (1.0f - mixed_target) * (1.0f - pos_weight);
+            loss *= lerp(mixed_target, 1 - mixed_target, pos_weight);
         }
     } else {
         loss = softplus(logit) - logit * target;
         if (pos_weight >= 0.0f) {
-            loss *= target * pos_weight + (1.0f - target) * (1.0f - pos_weight);
+            loss *= lerp(target, 1 - target, pos_weight);
         }
     }
 
@@ -471,12 +471,12 @@ __global__ void bce_mixup_bwd_kernel(const scalar_t *__restrict__ logits, const 
         const scalar_t mixed_target = lerp(target, mixup_target, weight);
         grad = stable_sigmoid(logit) - mixed_target;
         if (pos_weight >= 0.0f) {
-            grad *= mixed_target * pos_weight + (1.0f - mixed_target) * (1.0f - pos_weight);
+            grad *= lerp(mixed_target, 1 - mixed_target, pos_weight);
         }
     } else {
         grad = stable_sigmoid(logit) - target;
         if (pos_weight >= 0.0f) {
-            grad *= target * pos_weight + (1.0f - target) * (1.0f - pos_weight);
+            grad *= lerp(target, 1 - target, pos_weight);
         }
     }
 
