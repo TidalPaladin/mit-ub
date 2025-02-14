@@ -207,6 +207,7 @@ class JEPAConfig:
         uniform_noise_scale: Scale of the uniform noise to apply to the input.
         multiplicative_noise_scale: Scale of the multiplicative noise to apply to the input.
         salt_pepper_prob: Proportion of salt and pepper noise to apply to the input.
+        salt_pepper_pixel_prob: Probability of applying salt and pepper noise to a given pixel.
         noise_prob: Probability of applying a given noise transform.
         noise_clip: If True, clip the noise to the range [0, 1].
         weight_decay_final: Final weight decay value. If set, the weight decay will be linearly

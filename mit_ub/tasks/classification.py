@@ -1,7 +1,7 @@
 from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -11,6 +11,17 @@ from deep_helpers.tasks import Task
 from torch import Tensor
 
 from ..data import bce_mixup, cross_entropy_mixup, is_mixed, mixup
+from ..data.noise import (
+    DEFAULT_NOISE_PROB,
+    MULTIPLICATIVE_NOISE_MAX,
+    MULTIPLICATIVE_NOISE_MIN,
+    SALT_PEPPER_NOISE_MAX,
+    SALT_PEPPER_NOISE_MIN,
+    SALT_PEPPER_NOISE_PROB,
+    UNIFORM_NOISE_MAX,
+    UNIFORM_NOISE_MIN,
+    RandomNoise,
+)
 from ..model import AnyModelConfig, ViT, ViTConfig
 from ..model.helpers import grid_to_tokens
 from .distillation import DistillationConfig, DistillationWithProbe
@@ -46,15 +57,15 @@ def binary_loss(
     mixup_seed: int | None = None,
     mixup_prob: float = 0.2,
     mixup_alpha: float = 1.0,
+    pos_weight: float | None = None,
 ) -> Tensor:
     if mixup_seed is None:
         mixup_seed = 0
         mixup_prob = 0.0
     if label.dim() == 1:
         label = label.view(-1, 1)
-    if not label.is_floating_point():
-        label = label.float()
-    result = bce_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha)
+    label = label.type_as(logits)
+    result = bce_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha, pos_weight)
     result = result[result >= 0.0].mean()
     return result
 
@@ -108,7 +119,7 @@ def step_classification_from_features(
     mixup_prob = config.mixup_prob
     mixup_alpha = config.mixup_alpha
     if config.is_binary:
-        loss = binary_loss(pred_logits, label, mixup_seed, mixup_prob, mixup_alpha)
+        loss = binary_loss(pred_logits, label, mixup_seed, mixup_prob, mixup_alpha, config.pos_weight)
     else:
         loss = categorical_loss(pred_logits, label, mixup_seed, mixup_prob, mixup_alpha)
     assert loss >= 0.0, f"Loss is negative: {loss}"
@@ -167,6 +178,14 @@ class ClassificationConfig:
         mlp_tower: If True, use a MLP tower instead of a simple linear layer.
         tower_input_norm: If True, apply input normalization to the tower.
             Input normalization should not be necessary for backbones that already have an output normalization layer.
+        use_noise: If True, apply noise to the input.
+        uniform_noise_scale: Scale of the uniform noise to apply to the input.
+        multiplicative_noise_scale: Scale of the multiplicative noise to apply to the input.
+        salt_pepper_prob: Proportion of salt and pepper noise to apply to the input.
+        salt_pepper_pixel_prob: Probability of applying salt and pepper noise to a given pixel.
+        noise_prob: Probability of applying a given noise transform.
+        noise_clip: If True, clip the noise to the range [0, 1].
+        pos_weight: Weight for the positive class in binary classification.
     """
 
     num_classes: int
@@ -178,6 +197,18 @@ class ClassificationConfig:
     label_key: str = "label"
     mlp_tower: bool = False
     tower_input_norm: bool = False
+
+    # Noise
+    use_noise: bool = True
+    uniform_noise_scale: float | Tuple[float, float] = (UNIFORM_NOISE_MIN, UNIFORM_NOISE_MAX)
+    multiplicative_noise_scale: float | Tuple[float, float] = (MULTIPLICATIVE_NOISE_MIN, MULTIPLICATIVE_NOISE_MAX)
+    salt_pepper_prob: float = SALT_PEPPER_NOISE_PROB
+    salt_pepper_pixel_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX)
+    noise_prob: float = DEFAULT_NOISE_PROB
+    noise_clip: bool = True
+
+    # Binary classification
+    pos_weight: float | None = None
 
     def __post_init__(self) -> None:
         if self.num_classes <= 0:
@@ -253,6 +284,15 @@ class ClassificationTask(Task):
         )
         self.save_hyperparameters()
 
+        self.random_noise = RandomNoise(
+            self.config.noise_prob,
+            self.config.uniform_noise_scale,
+            self.config.multiplicative_noise_scale,
+            self.config.salt_pepper_prob,
+            self.config.salt_pepper_pixel_prob,
+            self.config.noise_clip,
+        )
+
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
         return create_metrics(self.config)
 
@@ -279,6 +319,12 @@ class ClassificationTask(Task):
             raise ValueError("Classification only supports CUDA")
         y = batch[self.config.label_key].long()
         y.shape[0]
+
+        # apply noise
+        if self.training and self.config.use_noise:
+            torch.cuda.nvtx.range_push("noise")
+            x = self.random_noise.apply_batched_cuda(x, inplace=True)
+            torch.cuda.nvtx.range_pop()
 
         # mixup input
         if self.training and self.config.mixup_prob > 0:

@@ -138,27 +138,44 @@ def cross_entropy_mixup(
 
 class BCEMixup(Function):
     @staticmethod
-    def forward(ctx, logits: Tensor, labels: Tensor, mixup_prob: float, mixup_alpha: float, seed: int) -> Tensor:
+    def forward(
+        ctx,
+        logits: Tensor,
+        labels: Tensor,
+        mixup_prob: float,
+        mixup_alpha: float,
+        seed: int,
+        pos_weight: float | None = None,
+    ) -> Tensor:
         assert _mixup_cuda is not None
         ctx.mixup_prob = mixup_prob
         ctx.mixup_alpha = mixup_alpha
         ctx.seed = seed
-        loss = _mixup_cuda.bce_mixup_fwd(logits, labels, mixup_prob, mixup_alpha, seed)
+        ctx.pos_weight = -1.0 if pos_weight is None else pos_weight
+        loss = _mixup_cuda.bce_mixup_fwd(logits, labels, mixup_prob, mixup_alpha, ctx.pos_weight, seed)
         ctx.save_for_backward(logits, labels)
         return loss
 
     @staticmethod
-    def backward(ctx, grad_output: Tensor) -> Tuple[Tensor, None, None, None, None]:
+    def backward(ctx, grad_output: Tensor) -> Tuple[Tensor, None, None, None, None, None]:
         assert _mixup_cuda is not None
         logits, labels = ctx.saved_tensors
         mixup_prob = ctx.mixup_prob
         mixup_alpha = ctx.mixup_alpha
         seed = ctx.seed
-        grad = _mixup_cuda.bce_mixup_bwd(logits, labels, grad_output, mixup_prob, mixup_alpha, seed)
-        return grad, None, None, None, None
+        pos_weight = ctx.pos_weight
+        grad = _mixup_cuda.bce_mixup_bwd(logits, labels, grad_output, mixup_prob, mixup_alpha, pos_weight, seed)
+        return grad, None, None, None, None, None
 
 
-def bce_mixup(logits: Tensor, labels: Tensor, seed: int, mixup_prob: float = 0.2, mixup_alpha: float = 1.0) -> Tensor:
+def bce_mixup(
+    logits: Tensor,
+    labels: Tensor,
+    seed: int,
+    mixup_prob: float = 0.2,
+    mixup_alpha: float = 1.0,
+    pos_weight: float | None = None,
+) -> Tensor:
     """BCE loss with MixUp.
 
     Applies MixUp to the target labels by mixing them with a shifted version of the batch.
@@ -175,6 +192,8 @@ def bce_mixup(logits: Tensor, labels: Tensor, seed: int, mixup_prob: float = 0.2
             to the input.
         mixup_prob: Probability of applying mixup to each sample
         mixup_alpha: Alpha parameter for Beta distribution used to sample mixup weight
+        pos_weight: Optional weight for positive examples in range [0, 1]. If provided, positive
+            examples are weighted by pos_weight and negative examples by (1 - pos_weight).
 
     Returns:
         The cross entropy loss for each sample in the batch. Samples with unknown
@@ -187,7 +206,9 @@ def bce_mixup(logits: Tensor, labels: Tensor, seed: int, mixup_prob: float = 0.2
     """
     if _mixup_cuda is None:
         raise RuntimeError("MixUp is not available on this system")
-    return BCEMixup.apply(logits, labels, mixup_prob, mixup_alpha, seed)
+    if pos_weight is not None and not (0 <= pos_weight <= 1):
+        raise ValueError("pos_weight must be in range [0, 1]")
+    return BCEMixup.apply(logits, labels, mixup_prob, mixup_alpha, seed, pos_weight)
 
 
 def parse_args() -> Namespace:
