@@ -165,6 +165,8 @@ fit:
             - "bias"
             - "siglip_b"
             - "siglip_t"
+            - "layer_norm_weight"
+            - "layer_norm_bias"
           weight_decay: 0.0
         # Output projections (higher weight decay)
         - params:
