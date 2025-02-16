@@ -214,9 +214,6 @@ class JEPAConfig:
             annealed from the current value to this value over the course of training.
         mlp_tower: If True, use a MLP tower on the JEPA predictor output instead of a simple linear layer.
             Empirically it seems better to not use a MLP tower.
-        tower_input_norm: If True, apply input normalization to the tower.
-            Input normalization should not be necessary for backbones that already have an output normalization layer.
-            Only has an effect if ``mlp_tower`` is ``True``.
         loss_fn: Loss function to use for the JEPA loss. Can be ``smooth_l1`` or ``cosine``.
         siglip_weight: Weight of the SigLIP loss. If 0, SigLIP does not contribute to the backbone gradients.
         siglip_gamma: Gamma value for the SigLIP focal loss. If None, use binary cross entropy.
@@ -242,7 +239,6 @@ class JEPAConfig:
     noise_clip: bool = True
     weight_decay_final: float | None = None
     mlp_tower: bool = False
-    tower_input_norm: bool = False
     loss_fn: str = "smooth_l1"
 
     # SigLIP parameters

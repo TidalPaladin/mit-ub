@@ -44,9 +44,7 @@ class DistillationConfig:
         noise_clip: If True, clip the noise to the range [0, 1].
         salt_pepper_prob: Proportion of salt and pepper noise to apply to the input.
         student_pool_type: Type of pooling to use for the student backbone.
-        student_pool_input_norm: If True, apply input normalization to the student pool.
         teacher_pool_type: Type of pooling to use for the teacher backbone.
-        teacher_pool_input_norm: If True, apply input normalization to the teacher pool.
         teacher_resolution: If provided, resize the teacher input to this resolution.
             The user must ensure that the teacher backbone is compatible with this resolution,
             and that the size of the student's and teacher's outputs are equal under this resolution.
@@ -62,9 +60,7 @@ class DistillationConfig:
     salt_pepper_prob: float = SALT_PEPPER_NOISE_PROB
     salt_pepper_pixel_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX)
     student_pool_type: str | None = None
-    student_pool_input_norm: bool = False
     teacher_pool_type: str | None = None
-    teacher_pool_input_norm: bool = False
     teacher_resolution: Sequence[int] | None = None
 
     def __post_init__(self) -> None:

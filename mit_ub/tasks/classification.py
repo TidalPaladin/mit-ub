@@ -176,8 +176,6 @@ class ClassificationConfig:
         pool_type: Type of pooling to use.
         label_key: Key in the batch dictionary that contains the label.
         mlp_tower: If True, use a MLP tower instead of a simple linear layer.
-        tower_input_norm: If True, apply input normalization to the tower.
-            Input normalization should not be necessary for backbones that already have an output normalization layer.
         use_noise: If True, apply noise to the input.
         uniform_noise_scale: Scale of the uniform noise to apply to the input.
         multiplicative_noise_scale: Scale of the multiplicative noise to apply to the input.
@@ -196,7 +194,6 @@ class ClassificationConfig:
     pool_type: str | None = None
     label_key: str = "label"
     mlp_tower: bool = False
-    tower_input_norm: bool = False
 
     # Noise
     use_noise: bool = True
@@ -280,7 +277,6 @@ class ClassificationTask(Task):
             out_dim=self.config.num_classes if not self.config.is_binary else 1,
             pool_type=self.config.pool_type,
             use_mlp=self.config.mlp_tower,
-            input_norm=self.config.tower_input_norm,
         )
         self.save_hyperparameters()
 
