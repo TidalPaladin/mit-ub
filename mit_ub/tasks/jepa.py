@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple, cast
+from typing import Any, Dict, Final, Iterator, List, Optional, Tuple, cast
 
 import torch
 import torch.distributed as dist
@@ -14,10 +14,11 @@ import torchmetrics as tm
 import transformer_engine.pytorch as te
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
-from lightning_utilities.core.rank_zero import rank_zero_info
+from lightning_utilities.core.rank_zero import rank_zero_info, rank_zero_warn
 from torch import Tensor
 from torch.optim.optimizer import Optimizer
 from torchvision.ops import sigmoid_focal_loss
+from torchvision.utils import make_grid, save_image
 
 from ..data.mixup import mixup
 from ..data.noise import (
@@ -37,6 +38,9 @@ from ..model import ViT, ViTConfig
 from ..model.helpers import compile_backend, compile_is_disabled, max_autotune
 from ..tokens import apply_mask, generate_non_overlapping_mask, mask_is_ragged
 from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
+
+
+MAX_SAVE_IMAGES: Final = 32
 
 
 sigmoid_focal_loss = torch.compile(
@@ -576,6 +580,21 @@ class JEPA(Task):
                 mixup_seed = None
 
             target = apply_mask(target_mask, full_target, fill_value=None)
+
+        # save image of first batch
+        if (
+            self.training
+            and self.trainer.global_step == 0
+            and self.trainer.global_rank == 0
+            and batch_idx % self.trainer.accumulate_grad_batches == 0
+        ):
+            try:
+                grid = make_grid(x[:MAX_SAVE_IMAGES], nrow=4)
+                path = Path(self.logger.experiment.dir) / "first_batch.png"
+                rank_zero_info(f"Saving first batch to {path}")
+                save_image(grid, path)
+            except Exception as e:
+                rank_zero_warn(f"Error saving first batch: {e}")
 
         # generate predictions by encoding the context and then running the encoded context
         # plus the positional target queries through the predictor
