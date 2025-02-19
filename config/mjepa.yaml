@@ -73,7 +73,6 @@ fit:
         num_classes: 10
         pool_type: null
         mlp_tower: false
-        tower_input_norm: false
 
       #checkpoint: ...
 
@@ -122,7 +121,6 @@ fit:
 
         # Use a simple linear layer on the JEPA predictor output projection
         mlp_tower: false
-        tower_input_norm: false
 
         # A SigLIP style predictor is used between the student context and teacher output.
         # When this weight is zero, there is a stop gradient applied to the SigLIP pathway.
@@ -132,6 +130,9 @@ fit:
         siglip_t: 10.0
         siglip_b: -10.0
         trainable_siglip_params: true
+
+        # Augmentations
+        invert_prob: 0.1
 
       # Use SOAP optimizer and a reciplrocal square root learning rate schedule.
       # SOAP is empirically much faster than AdamW for this task.
@@ -199,7 +200,7 @@ fit:
             - class_path: torchvision.transforms.v2.RandomResizedCrop
               init_args:
                 size: [32, 32]
-                scale: [0.5, 1.0]
+                scale: [0.75, 1.0]
                 ratio: [0.75, 1.33]
 
             - class_path: torchvision.transforms.v2.RandomApply
@@ -208,7 +209,7 @@ fit:
                 transforms:
                   - class_path: mit_ub.data.RandomRotation
                     init_args:
-                      degrees: 45
+                      degrees: 15
 
             - class_path: torchvision.transforms.v2.ColorJitter
               init_args:

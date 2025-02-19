@@ -12,14 +12,14 @@ from torchvision.transforms.v2 import Compose, RandomApply, Transform
 from torchvision.utils import make_grid
 
 
-UNIFORM_NOISE_MIN: Final = -0.25
-UNIFORM_NOISE_MAX: Final = 0.25
-MULTIPLICATIVE_NOISE_MIN: Final = 0.5
-MULTIPLICATIVE_NOISE_MAX: Final = 1.5
+UNIFORM_NOISE_MIN: Final = -0.1
+UNIFORM_NOISE_MAX: Final = 0.1
+MULTIPLICATIVE_NOISE_MIN: Final = 0.8
+MULTIPLICATIVE_NOISE_MAX: Final = 1.2
 SALT_PEPPER_NOISE_PROB: Final = 0.1
 SALT_PEPPER_NOISE_MIN: Final = 0.01
 SALT_PEPPER_NOISE_MAX: Final = 0.05
-DEFAULT_NOISE_PROB: Final = 0.25
+DEFAULT_NOISE_PROB: Final = 0.1
 
 
 def to_tuple(x: float | Sequence[float]) -> Tuple[float, float]:
