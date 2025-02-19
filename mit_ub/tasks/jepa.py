@@ -20,6 +20,7 @@ from torch.optim.optimizer import Optimizer
 from torchvision.ops import sigmoid_focal_loss
 from torchvision.utils import make_grid, save_image
 
+from ..data.invert import invert_
 from ..data.mixup import mixup
 from ..data.noise import (
     DEFAULT_NOISE_PROB,
@@ -214,6 +215,7 @@ class JEPAConfig:
         salt_pepper_pixel_prob: Probability of applying salt and pepper noise to a given pixel.
         noise_prob: Probability of applying a given noise transform.
         noise_clip: If True, clip the noise to the range [0, 1].
+        invert_prob: Probability of inverting the input.
         weight_decay_final: Final weight decay value. If set, the weight decay will be linearly
             annealed from the current value to this value over the course of training.
         mlp_tower: If True, use a MLP tower on the JEPA predictor output instead of a simple linear layer.
@@ -241,6 +243,7 @@ class JEPAConfig:
     salt_pepper_pixel_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX)
     noise_prob: float = DEFAULT_NOISE_PROB
     noise_clip: bool = True
+    invert_prob: float = 0.0
     weight_decay_final: float | None = None
     mlp_tower: bool = False
     loss_fn: str = "smooth_l1"
@@ -273,6 +276,8 @@ class JEPAConfig:
             raise ValueError("siglip_gamma must be non-negative")
         if self.loss_fn not in ["smooth_l1", "cosine"]:
             raise ValueError("loss_fn must be one of ['smooth_l1', 'cosine']")
+        if not 0 <= self.invert_prob <= 1:
+            raise ValueError("invert_prob must be in the range [0, 1]")
 
 
 class JEPA(Task):
@@ -578,6 +583,13 @@ class JEPA(Task):
                 torch.cuda.nvtx.range_pop()
             else:
                 mixup_seed = None
+
+            # invert input
+            if self.training and self.jepa_config.invert_prob > 0:
+                torch.cuda.nvtx.range_push("invert")
+                invert_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+                invert_(x, self.jepa_config.invert_prob, invert_seed)
+                torch.cuda.nvtx.range_pop()
 
             target = apply_mask(target_mask, full_target, fill_value=None)
 
