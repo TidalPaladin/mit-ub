@@ -355,7 +355,6 @@ class JEPA(Task):
         self.jepa_head = te.LayerNormLinear(
             self.backbone.config.hidden_size,
             self.backbone.config.hidden_size,
-            init_method=nn.init.orthogonal_,
         )
 
         # SigLIP pooling layer
@@ -363,7 +362,6 @@ class JEPA(Task):
         self.siglip_head = te.LayerNormLinear(
             self.backbone.config.hidden_size,
             self.backbone.config.hidden_size,
-            init_method=nn.init.orthogonal_,
         )
         self.siglip_t = nn.Parameter(torch.empty(1))
         self.siglip_b = nn.Parameter(torch.empty(1))
