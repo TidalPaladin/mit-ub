@@ -296,7 +296,7 @@ class DistillationWithProbe(Distillation, ABC):
             log_train_metrics_on_epoch,
             parameter_groups,
         )
-        self.linear_probe = self.create_probe_head()
+        self.classification_head = self.create_probe_head()
         self.probe_key = probe_key
 
     @abstractmethod

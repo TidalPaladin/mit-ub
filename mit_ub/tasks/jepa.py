@@ -725,7 +725,7 @@ class JEPAWithProbe(JEPA, ABC):
             parameter_groups,
         )
         self.probe_key = probe_key
-        self.linear_probe = self.create_probe_head()
+        self.classification_head = self.create_probe_head()
 
     @abstractmethod
     def create_probe_head(self) -> nn.Module:
