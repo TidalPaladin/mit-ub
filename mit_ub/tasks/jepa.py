@@ -202,8 +202,6 @@ class JEPAConfig:
         target_ratio: Ratio of the input to sample as a prediction target.
         scale: Integer scale at which to sample contiguous blocks of context tokens.
             Increasing this ensures more adjacent tokens appear together in the context.
-        context_subsample_ratio: Sampling ratio for encoded context just before passing
-            it to the predictor.
         ema_config: Configuration for EMA updates.
         predictor_depth: Depth of the predictor network.
         mixup_alpha: Alpha parameter for the Beta distribution used to sample the mixup weight.
@@ -231,7 +229,6 @@ class JEPAConfig:
     context_ratio: float = 0.5
     target_ratio: float = 0.25
     scale: int = 4
-    context_subsample_ratio: float = 0.5
     ema_config: EMAConfig = field(default_factory=lambda: EMAConfig())
     predictor_depth: int = 4
     mixup_alpha: float = 1.0
@@ -260,8 +257,6 @@ class JEPAConfig:
             raise ValueError("context_ratio must be in the range (0, 1]")
         if not 0 < self.target_ratio <= 1:
             raise ValueError("target_ratio must be in the range (0, 1]")
-        if not 0 < self.context_subsample_ratio <= 1:
-            raise ValueError("context_subsample_ratio must be in the range (0, 1]")
         if not 0 < self.mixup_alpha:
             raise ValueError("mixup_alpha must be positive")
         if not 0 <= self.mixup_prob <= 1:

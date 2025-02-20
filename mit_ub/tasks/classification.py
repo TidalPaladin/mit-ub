@@ -429,7 +429,7 @@ class JEPAWithClassification(JEPAWithProbe):
         probe_output = step_classification_from_features(
             features,
             y,
-            self.linear_probe,
+            self.classification_head,
             self.classification_config,
             mixup_seed,
             metrics,
@@ -509,7 +509,7 @@ class DistillationWithClassification(DistillationWithProbe):
         probe_output = step_classification_from_features(
             features,
             y,
-            self.linear_probe,
+            self.classification_head,
             self.classification_config,
             mixup_weight,
             metrics,
