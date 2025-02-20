@@ -4,8 +4,6 @@
 #include <curand_kernel.h>
 #include <torch/extension.h>
 
-#define WARP_SIZE 32
-
 template <typename scalar_t>
 __global__ void invert_kernel(const scalar_t *__restrict__ input, scalar_t *__restrict__ output,
                               const float invert_prob, const int64_t batch_size, const int64_t seq_len,
