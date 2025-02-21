@@ -8,6 +8,7 @@ import torch.nn as nn
 import torchmetrics as tm
 from deep_helpers.structs import State
 from deep_helpers.tasks import Task
+from lightning_utilities.core.rank_zero import rank_zero_warn
 from torch import Tensor
 
 from ..data import bce_mixup, cross_entropy_mixup, is_mixed, mixup
@@ -25,7 +26,7 @@ from ..data.noise import (
 from ..model import AnyModelConfig, ViT, ViTConfig
 from ..model.helpers import grid_to_tokens
 from .distillation import DistillationConfig, DistillationWithProbe
-from .jepa import JEPAConfig, JEPAWithProbe
+from .jepa import JEPAConfig, JEPAWithProbe, save_first_batch
 
 
 def is_valid_categorical_label(label: Tensor) -> Tensor:
@@ -328,6 +329,21 @@ class ClassificationTask(Task):
             x = mixup(x, self.config.mixup_prob, self.config.mixup_alpha, mixup_seed)
         else:
             mixup_seed = None
+
+        # save image of first batch
+        if (
+            self.training
+            and self.trainer.global_step == 0
+            and self.trainer.global_rank == 0
+            and batch_idx % self.trainer.accumulate_grad_batches == 0
+        ):
+            try:
+                experiment = getattr(self.logger, "experiment", None)
+                assert experiment is not None
+                path = Path(experiment.dir) / "first_batch.png"
+                save_first_batch(x, path)
+            except Exception as e:
+                rank_zero_warn(f"Error saving first batch: {e}")
 
         # forward backbone
         # NOTE: We don't use forward() here because step_classification_from_features()

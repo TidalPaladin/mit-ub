@@ -14,7 +14,7 @@ import torchmetrics as tm
 import transformer_engine.pytorch as te
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
-from lightning_utilities.core.rank_zero import rank_zero_info, rank_zero_warn
+from lightning_utilities.core.rank_zero import rank_zero_info, rank_zero_only, rank_zero_warn
 from torch import Tensor
 from torch.optim.optimizer import Optimizer
 from torchvision.ops import sigmoid_focal_loss
@@ -54,6 +54,13 @@ sigmoid_focal_loss = torch.compile(
 # Spammed from TE
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+
+@rank_zero_only
+def save_first_batch(x: Tensor, path: Path) -> None:
+    grid = make_grid(x[:MAX_SAVE_IMAGES], nrow=4)
+    rank_zero_info(f"Saving first batch to {path}")
+    save_image(grid, path)
 
 
 @torch.no_grad()
@@ -594,10 +601,10 @@ class JEPA(Task):
             and batch_idx % self.trainer.accumulate_grad_batches == 0
         ):
             try:
-                grid = make_grid(x[:MAX_SAVE_IMAGES], nrow=4)
-                path = Path(self.logger.experiment.dir) / "first_batch.png"
-                rank_zero_info(f"Saving first batch to {path}")
-                save_image(grid, path)
+                experiment = getattr(self.logger, "experiment", None)
+                assert experiment is not None
+                path = Path(experiment.dir) / "first_batch.png"
+                save_first_batch(x, path)
             except Exception as e:
                 rank_zero_warn(f"Error saving first batch: {e}")
 
