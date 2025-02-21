@@ -11,7 +11,7 @@ from deep_helpers.tasks import Task
 from lightning_utilities.core.rank_zero import rank_zero_warn
 from torch import Tensor
 
-from ..data import bce_mixup, cross_entropy_mixup, is_mixed, mixup
+from ..data import bce_mixup, cross_entropy_mixup, invert_, is_mixed, mixup
 from ..data.noise import (
     DEFAULT_NOISE_PROB,
     MULTIPLICATIVE_NOISE_MAX,
@@ -184,6 +184,7 @@ class ClassificationConfig:
         salt_pepper_pixel_prob: Probability of applying salt and pepper noise to a given pixel.
         noise_prob: Probability of applying a given noise transform.
         noise_clip: If True, clip the noise to the range [0, 1].
+        invert_prob: Probability of inverting the input.
         pos_weight: Weight for the positive class in binary classification.
     """
 
@@ -203,6 +204,7 @@ class ClassificationConfig:
     salt_pepper_prob: float = SALT_PEPPER_NOISE_PROB
     salt_pepper_pixel_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX)
     noise_prob: float = DEFAULT_NOISE_PROB
+    invert_prob: float = 0.0
     noise_clip: bool = True
 
     # Binary classification
@@ -215,6 +217,8 @@ class ClassificationConfig:
             raise ValueError("mixup_alpha must be positive")
         if not 0 <= self.mixup_prob <= 1:
             raise ValueError("mixup_prob must be in the range [0, 1]")
+        if not 0 <= self.invert_prob <= 1:
+            raise ValueError("invert_prob must be in the range [0, 1]")
 
     @property
     def is_binary(self) -> bool:
@@ -329,6 +333,13 @@ class ClassificationTask(Task):
             x = mixup(x, self.config.mixup_prob, self.config.mixup_alpha, mixup_seed)
         else:
             mixup_seed = None
+
+        # invert input
+        if self.training and self.config.invert_prob > 0:
+            torch.cuda.nvtx.range_push("invert")
+            invert_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+            invert_(x, self.config.invert_prob, invert_seed)
+            torch.cuda.nvtx.range_pop()
 
         # save image of first batch
         if (
