@@ -19,7 +19,6 @@ fit:
     #gradient_clip_algorithm: norm
 
     default_root_dir: /mnt/flash/mit-ub
-    enable_checkpointing: false
 
     callbacks:
       # Save the best model based on validation loss and most recent model
@@ -172,7 +171,7 @@ fit:
         # Output projections (higher weight decay)
         - params:
             - "jepa_head"
-            - "linear_probe"
+            - "classification_head"
             - "siglip_head"
           weight_decay: 1.0
 

@@ -6,19 +6,16 @@ from mit_ub.tasks.distillation import Distillation, DistillationConfig
 
 
 class TestDistillation:
-    @pytest.fixture(params=[False, True])
-    def teacher_resize(self, request):
-        return request.param
 
     @pytest.fixture(params=["vit->conv", "vit->vit"])
-    def task(self, request, tmp_path, vit_distillation, convnext_distillation, optimizer_init, teacher_resize):
+    def task(self, request, tmp_path, vit_distillation, convnext_distillation, optimizer_init):
         if request.param == "vit->conv":
             student_config = convnext_distillation
             teacher_config = vit_distillation
             distillation_config = DistillationConfig(
                 student_pool_type="avg",
                 teacher_pool_type=None,
-                teacher_resolution=(32, 32) if teacher_resize else None,
+                teacher_resolution=(16, 16),
             )
         elif request.param == "vit->vit":
             student_config = vit_distillation

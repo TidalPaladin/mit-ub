@@ -164,6 +164,7 @@ class TestDistillationWithClassification:
         distillation_config = DistillationConfig(
             student_pool_type="avg",
             teacher_pool_type=None,
+            teacher_resolution=(16, 16),
         )
 
         teacher_checkpoint = tmp_path / "teacher.pth"
@@ -188,6 +189,7 @@ class TestDistillationWithClassification:
         distillation_config = DistillationConfig(
             student_pool_type="avg",
             teacher_pool_type=None,
+            teacher_resolution=(16, 16),
         )
 
         teacher_checkpoint = tmp_path / "teacher.pth"

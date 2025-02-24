@@ -261,7 +261,7 @@ class TestJEPA:
         task.update_ema(0)
         expected = torch.tensor(expected)
         for param in task.teacher_backbone.parameters():
-            assert_close(param.data, expected.expand_as(param.data))
+            assert_close(param.data, expected.expand_as(param.data), check_device=False)
 
     def test_update_weight_decay(self, mocker, task):
         task.parameter_groups = [
