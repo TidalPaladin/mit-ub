@@ -4,12 +4,12 @@ from pathlib import Path
 import torch
 from torch.profiler import ProfilerActivity, profile, record_function
 
-from mit_ub.model import AdaptiveViTConfig, ConvNextConfig, ViTConfig
+from mit_ub.model import ConvNextConfig, ViTConfig
 
 
 def parse_args() -> Namespace:
     parser = ArgumentParser(prog="profile", description="Profile MiT-UB")
-    parser.add_argument("model", choices=["vit", "adaptive-vit", "convnext"], help="Model type to profile")
+    parser.add_argument("model", choices=["vit", "convnext"], help="Model type to profile")
     parser.add_argument("config", type=Path, help="Path to the model config to profile")
     parser.add_argument("size", type=int, nargs="+", help="Input size")
     parser.add_argument("-b", "--batch-size", type=int, default=1, help="Batch size")
@@ -23,8 +23,6 @@ def main(args: Namespace):
     match args.model:
         case "vit":
             config = ViTConfig.from_file(args.config)
-        case "adaptive-vit":
-            config = AdaptiveViTConfig.from_file(args.config)
         case "convnext":
             config = ConvNextConfig.from_file(args.config)
         case _:

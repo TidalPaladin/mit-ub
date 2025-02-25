@@ -1,22 +1,25 @@
 import math
+import warnings
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple, cast
+from typing import Any, Dict, Final, Iterator, List, Optional, Tuple, cast
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics as tm
+import transformer_engine.pytorch as te
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
-from lightning_utilities.core.rank_zero import rank_zero_info
+from lightning_utilities.core.rank_zero import rank_zero_info, rank_zero_only, rank_zero_warn
 from torch import Tensor
 from torch.optim.optimizer import Optimizer
-from torchvision.ops import sigmoid_focal_loss
+from torchvision.utils import make_grid, save_image
 
+from ..data.invert import invert_
 from ..data.mixup import mixup
 from ..data.noise import (
     DEFAULT_NOISE_PROB,
@@ -27,26 +30,29 @@ from ..data.noise import (
     SALT_PEPPER_NOISE_PROB,
     UNIFORM_NOISE_MAX,
     UNIFORM_NOISE_MIN,
-    RandomNoise,
+    apply_noise_batched,
 )
 from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, TokenSimilarity
 from ..metrics.distance import RMSPairwiseDistance, TokenRMSDistance
-from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
-from ..model import AdaptiveViT, AdaptiveViTConfig, ViT, ViTConfig
-from ..model.helpers import compile_backend, compile_is_disabled, max_autotune
-from ..model.layers.layer_scale import has_layer_scale
-from ..model.layers.pos_enc import DEFAULT_POS_ENC_ACTIVATION, RelativeFactorizedPosition
-from ..model.layers.transformer import TransformerDecoderLayer
-from ..tokens import apply_mask, create_mask, generate_non_overlapping_mask, mask_is_ragged
+from ..model import ViT, ViTConfig
+from ..model.helpers import compile_is_disabled
+from ..tokens import apply_mask, generate_non_overlapping_mask, mask_is_ragged
 from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
 
 
-sigmoid_focal_loss = torch.compile(
-    sigmoid_focal_loss,
-    fullgraph=True,
-    backend=compile_backend(),
-    disable=compile_is_disabled(),
-)
+MAX_SAVE_IMAGES: Final = 32
+
+
+# Spammed from TE
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+
+@rank_zero_only
+def save_first_batch(x: Tensor, path: Path) -> None:
+    grid = make_grid(x[:MAX_SAVE_IMAGES], nrow=4)
+    rank_zero_info(f"Saving first batch to {path}")
+    save_image(grid, path)
 
 
 @torch.no_grad()
@@ -95,13 +101,7 @@ def ring_exchange_all(tensor: Tensor, rank: int, world_size: int) -> Iterator[Te
 
 @torch.compile(
     fullgraph=True,
-    backend=compile_backend(),
-    options={
-        "max_autotune": max_autotune(),
-        "epilogue_fusion": True,
-        "shape_padding": True,
-        "triton.cudagraph_trees": max_autotune(),
-    },
+    mode="reduce-overhead",
     disable=compile_is_disabled(),
 )
 def compute_siglip_logits(x1: Tensor, x2: Tensor, t: Tensor, b: Tensor) -> Tensor:
@@ -132,8 +132,7 @@ def compute_siglip_loss(
     b: Tensor,
     rank: int,
     world_size: int,
-    eps: float = 1e-12,
-    gamma: float | None = 2.0,
+    eps: float = 1e-5,
 ) -> Tensor:
     r"""Compute the SigLIP loss across all ranks.
 
@@ -146,7 +145,6 @@ def compute_siglip_loss(
         rank: The rank of the current process.
         world_size: The number of processes in the distributed group.
         eps: The epsilon value to use for normalization.
-        gamma: If set, use focal loss with the provided gamma value.
 
     Returns:
         The SigLIP loss.
@@ -172,13 +170,8 @@ def compute_siglip_loss(
         # the losses for the two permutations.
         logits_x1 = compute_siglip_logits(x1, x2_global.mT, t, b)
         logits_x2 = compute_siglip_logits(x1_global, x2.mT, t, b)
-
-        if gamma is not None:
-            loss_x1 = sigmoid_focal_loss(logits_x1, _target, reduction="sum", gamma=gamma, alpha=-1)
-            loss_x2 = sigmoid_focal_loss(logits_x2, _target, reduction="sum", gamma=gamma, alpha=-1)
-        else:
-            loss_x1 = F.binary_cross_entropy_with_logits(logits_x1, _target, reduction="sum")
-            loss_x2 = F.binary_cross_entropy_with_logits(logits_x2, _target, reduction="sum")
+        loss_x1 = F.binary_cross_entropy_with_logits(logits_x1, _target, reduction="sum")
+        loss_x2 = F.binary_cross_entropy_with_logits(logits_x2, _target, reduction="sum")
 
         loss += (loss_x1 + loss_x2) / (target.numel() * world_size * 2)
 
@@ -195,8 +188,6 @@ class JEPAConfig:
         target_ratio: Ratio of the input to sample as a prediction target.
         scale: Integer scale at which to sample contiguous blocks of context tokens.
             Increasing this ensures more adjacent tokens appear together in the context.
-        context_subsample_ratio: Sampling ratio for encoded context just before passing
-            it to the predictor.
         ema_config: Configuration for EMA updates.
         predictor_depth: Depth of the predictor network.
         mixup_alpha: Alpha parameter for the Beta distribution used to sample the mixup weight.
@@ -208,17 +199,15 @@ class JEPAConfig:
         salt_pepper_pixel_prob: Probability of applying salt and pepper noise to a given pixel.
         noise_prob: Probability of applying a given noise transform.
         noise_clip: If True, clip the noise to the range [0, 1].
+        invert_prob: Probability of inverting the input.
+        solarize_prob: Probability of solarizing the input.
+        solarize_threshold: Threshold for solarizing the input.
         weight_decay_final: Final weight decay value. If set, the weight decay will be linearly
             annealed from the current value to this value over the course of training.
-        self_attn: If True, use self-attention in the predictor.
         mlp_tower: If True, use a MLP tower on the JEPA predictor output instead of a simple linear layer.
             Empirically it seems better to not use a MLP tower.
-        tower_input_norm: If True, apply input normalization to the tower.
-            Input normalization should not be necessary for backbones that already have an output normalization layer.
-            Only has an effect if ``mlp_tower`` is ``True``.
         loss_fn: Loss function to use for the JEPA loss. Can be ``smooth_l1`` or ``cosine``.
         siglip_weight: Weight of the SigLIP loss. If 0, SigLIP does not contribute to the backbone gradients.
-        siglip_gamma: Gamma value for the SigLIP focal loss. If None, use binary cross entropy.
         siglip_t: Temperature parameter for the SigLIP loss.
         siglip_b: Bias parameter for the SigLIP loss.
         trainable_siglip_params: If True, the SigLIP parameters are trainable.
@@ -227,7 +216,6 @@ class JEPAConfig:
     context_ratio: float = 0.5
     target_ratio: float = 0.25
     scale: int = 4
-    context_subsample_ratio: float = 0.5
     ema_config: EMAConfig = field(default_factory=lambda: EMAConfig())
     predictor_depth: int = 4
     mixup_alpha: float = 1.0
@@ -239,15 +227,15 @@ class JEPAConfig:
     salt_pepper_pixel_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX)
     noise_prob: float = DEFAULT_NOISE_PROB
     noise_clip: bool = True
+    invert_prob: float = 0.0
+    solarize_prob: float = 0.0
+    solarize_threshold: float = 0.5
     weight_decay_final: float | None = None
-    self_attn: bool = False
     mlp_tower: bool = False
-    tower_input_norm: bool = False
     loss_fn: str = "smooth_l1"
 
     # SigLIP parameters
     siglip_weight: float = 1.0
-    siglip_gamma: float | None = 2.0
     siglip_t: float = 10.0
     siglip_b: float = -10.0
     trainable_siglip_params: bool = True
@@ -257,8 +245,6 @@ class JEPAConfig:
             raise ValueError("context_ratio must be in the range (0, 1]")
         if not 0 < self.target_ratio <= 1:
             raise ValueError("target_ratio must be in the range (0, 1]")
-        if not 0 < self.context_subsample_ratio <= 1:
-            raise ValueError("context_subsample_ratio must be in the range (0, 1]")
         if not 0 < self.mixup_alpha:
             raise ValueError("mixup_alpha must be positive")
         if not 0 <= self.mixup_prob <= 1:
@@ -269,10 +255,12 @@ class JEPAConfig:
             raise ValueError("weight_decay_final must be non-negative")
         if self.siglip_weight < 0:
             raise ValueError("siglip_weight must be non-negative")
-        if self.siglip_gamma is not None and self.siglip_gamma <= 0:
-            raise ValueError("siglip_gamma must be non-negative")
         if self.loss_fn not in ["smooth_l1", "cosine"]:
             raise ValueError("loss_fn must be one of ['smooth_l1', 'cosine']")
+        if not 0 <= self.invert_prob <= 1:
+            raise ValueError("invert_prob must be in the range [0, 1]")
+        if not 0 <= self.solarize_prob <= 1:
+            raise ValueError("solarize_prob must be in the range [0, 1]")
 
 
 class JEPA(Task):
@@ -298,11 +286,11 @@ class JEPA(Task):
         parameter_groups: Dictionary of parameter groups and their corresponding weight decay values.
     """
 
-    backbone: ViT | AdaptiveViT
+    backbone: ViT
 
     def __init__(
         self,
-        backbone_config: ViTConfig | AdaptiveViTConfig,
+        backbone_config: ViTConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
@@ -331,43 +319,32 @@ class JEPA(Task):
 
         # Backbone and EMA weights
         backbone = backbone_config.instantiate()
-        assert isinstance(backbone, (ViT, AdaptiveViT))
+        assert isinstance(backbone, ViT)
         self.backbone = backbone
         self.teacher_backbone = deepcopy(self.backbone)
         self.teacher_backbone.requires_grad_(False)
         self.teacher_backbone.eval()
 
         # Position encoding / initialization for prediction queries.
-        self.pos_enc = RelativeFactorizedPosition(
-            len(self.backbone.stem.patch_size),
-            self.backbone.config.dim,
-            dropout=0.1,
-            norm=True,
-            norm_type=self.backbone.config.norm_type,
-            activation=self.backbone.get_external_activation(default=DEFAULT_POS_ENC_ACTIVATION),
+        self.pos_enc_proj = te.LayerNormMLP(
+            self.backbone.config.hidden_size,
+            self.backbone.config.hidden_size,
         )
 
         # JEPA predictor
         self.jepa_predictor = nn.ModuleList(
-            [
-                self.backbone.create_decoder_layer(i, self_attn=self.jepa_config.self_attn, kv_norm=False)
-                for i in range(self.jepa_config.predictor_depth)
-            ]
+            [self.backbone.create_decoder_layer(i, drop_path_rate=0.0) for i in range(self.jepa_config.predictor_depth)]
         )
-        self.jepa_head = self.backbone.create_head(
-            self.backbone.config.dim,
-            pool_type=None,
-            use_mlp=self.jepa_config.mlp_tower,
-            input_norm=self.jepa_config.tower_input_norm,
+        self.jepa_head = te.LayerNormLinear(
+            self.backbone.config.hidden_size,
+            self.backbone.config.hidden_size,
         )
 
         # SigLIP pooling layer
         rank_zero_info(f"Using SigLIP weight: {self.jepa_config.siglip_weight}")
-        self.siglip_head = self.backbone.create_head(
-            self.backbone.config.dim,
-            pool_type=None,
-            use_mlp=self.jepa_config.mlp_tower,
-            input_norm=self.jepa_config.tower_input_norm,
+        self.siglip_head = te.LayerNormLinear(
+            self.backbone.config.hidden_size,
+            self.backbone.config.hidden_size,
         )
         self.siglip_t = nn.Parameter(torch.empty(1))
         self.siglip_b = nn.Parameter(torch.empty(1))
@@ -378,16 +355,6 @@ class JEPA(Task):
 
         self.save_hyperparameters()
 
-        # Random noise
-        self.random_noise = RandomNoise(
-            self.jepa_config.noise_prob,
-            self.jepa_config.uniform_noise_scale,
-            self.jepa_config.multiplicative_noise_scale,
-            self.jepa_config.salt_pepper_prob,
-            self.jepa_config.salt_pepper_pixel_prob,
-            self.jepa_config.noise_clip,
-        )
-
     def on_task_checkpoint_loaded(self, path: Path, state_dict: Dict[str, Any]) -> None:
         self.backbone.on_load_checkpoint(state_dict)
 
@@ -395,19 +362,16 @@ class JEPA(Task):
         r"""Gets a MetricCollection for a given state"""
         metrics = tm.MetricCollection(
             {
-                "example_sim": AveragePairwiseCosineSimilarity(self.backbone.config.dim),
-                "micro_token_sim": TokenSimilarity(self.backbone.config.dim),
-                "macro_token_sim": AveragePairwiseCosineSimilarity(self.backbone.config.dim),
-                "example_rms": RMSPairwiseDistance(self.backbone.config.dim),
-                "micro_token_rms": TokenRMSDistance(self.backbone.config.dim),
-                "macro_token_rms": RMSPairwiseDistance(self.backbone.config.dim),
+                "example_sim": AveragePairwiseCosineSimilarity(self.backbone.config.hidden_size),
+                "micro_token_sim": TokenSimilarity(self.backbone.config.hidden_size),
+                "macro_token_sim": AveragePairwiseCosineSimilarity(self.backbone.config.hidden_size),
+                "example_rms": RMSPairwiseDistance(self.backbone.config.hidden_size),
+                "micro_token_rms": TokenRMSDistance(self.backbone.config.hidden_size),
+                "macro_token_rms": RMSPairwiseDistance(self.backbone.config.hidden_size),
                 "jepa_loss": tm.MeanMetric(),
                 "siglip_loss": tm.MeanMetric(),
             }
         )
-        if has_layer_scale(self.backbone) and state.mode == Mode.TRAIN:
-            metrics["layer_scale_max"] = MaxLayerScale()
-            metrics["layer_scale_mean"] = MeanLayerScale()
         if state.mode == Mode.TRAIN:
             metrics["ema_momentum"] = tm.MeanMetric()
             metrics["siglip_t"] = tm.MeanMetric()
@@ -422,33 +386,19 @@ class JEPA(Task):
             Tuple[Tensor, Tensor], self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
         )
         torch.cuda.nvtx.range_pop()
-        B, L, D = context.shape
-
-        # Sample a subset of the context as input to the predictor and project
-        if self.jepa_config.context_subsample_ratio < 1.0:
-            subsample_mask = create_mask(
-                (L,),
-                mask_ratio=1 - self.jepa_config.context_subsample_ratio,
-                batch_size=B,
-                device=context.device,
-            )
-            context = apply_mask(subsample_mask, context, fill_value=None)
-            L = context.shape[1]
-
-        # Add CLS token to context
-        context = torch.cat([cls_token.view(B, 1, -1).expand(B, -1, -1), context], dim=1)
-        assert context.shape == (B, L + 1, D)
 
         # Prepare positional encoding for target queries
-        tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
-        query = self.pos_enc(tokenized_size).expand(B, -1, -1)
+        with torch.no_grad():
+            tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
+            query = self.backbone.stem.pos_enc(tokenized_size)
+        query = self.pos_enc_proj(query).expand(target_mask.shape[0], -1, -1)
         query = apply_mask(target_mask, query, fill_value=None)
 
         # Run query and context through predictor
         torch.cuda.nvtx.range_push("jepa_predictor")
         for block in self.jepa_predictor:
-            block = cast(TransformerDecoderLayer, block)
-            query = block(query, context)
+            block = cast(te.TransformerLayer, block)
+            query = block(query, encoder_output=context, checkpoint_core_attention=self.backbone.config.checkpoint)
         torch.cuda.nvtx.range_pop()
 
         pred = self.jepa_head(query)
@@ -575,12 +525,26 @@ class JEPA(Task):
             torch.cuda.nvtx.range_push("ema_backbone")
             full_target, target_cls_token = cast(Tuple[Tensor, Tensor], self.teacher_backbone(x, reshape=False))
             torch.cuda.nvtx.range_pop()
+
+        # inference_mode() removes version tracking so we must clone the outputs
+        full_target = full_target.clone()
+        target_cls_token = target_cls_token.clone()
+
+        with torch.no_grad():
             siglip_target = torch.eye(full_target.shape[0], device=full_target.device, dtype=torch.float32)
 
             # apply random noise
             if self.training and self.jepa_config.use_noise:
                 torch.cuda.nvtx.range_push("noise")
-                x = self.random_noise.apply_batched_cuda(x, inplace=True)
+                x = apply_noise_batched(
+                    x,
+                    prob=self.jepa_config.noise_prob,
+                    uniform_scale=self.jepa_config.uniform_noise_scale,
+                    multiplicative_scale=self.jepa_config.multiplicative_noise_scale,
+                    salt_pepper_prob=self.jepa_config.salt_pepper_prob,
+                    salt_pepper_pixel_prob=self.jepa_config.salt_pepper_pixel_prob,
+                    clip=self.jepa_config.noise_clip,
+                )
                 torch.cuda.nvtx.range_pop()
 
             # apply mixup, not overwriting full_target
@@ -599,14 +563,35 @@ class JEPA(Task):
             else:
                 mixup_seed = None
 
+            # invert input
+            if self.training and self.jepa_config.invert_prob > 0:
+                torch.cuda.nvtx.range_push("invert")
+                invert_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+                invert_(
+                    x,
+                    self.jepa_config.invert_prob,
+                    self.jepa_config.solarize_prob,
+                    self.jepa_config.solarize_threshold,
+                    invert_seed,
+                )
+                torch.cuda.nvtx.range_pop()
+
             target = apply_mask(target_mask, full_target, fill_value=None)
 
-        # clone inference tensors if training for use with autograd
-        if self.training:
-            x = x.clone()
-            target = target.clone()
-            siglip_target = siglip_target.clone()
-            target_cls_token = target_cls_token.clone()
+        # save image of first batch
+        if (
+            self.training
+            and self.trainer.global_step == 0
+            and self.trainer.global_rank == 0
+            and batch_idx % self.trainer.accumulate_grad_batches == 0
+        ):
+            try:
+                experiment = getattr(self.logger, "experiment", None)
+                assert experiment is not None
+                path = Path(experiment.dir) / "first_batch.png"
+                save_first_batch(x, path)
+            except Exception as e:
+                rank_zero_warn(f"Error saving first batch: {e}")
 
         # generate predictions by encoding the context and then running the encoded context
         # plus the positional target queries through the predictor
@@ -618,9 +603,9 @@ class JEPA(Task):
         # compute loss between target and predictor encoded latents
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
         if self.jepa_config.loss_fn == "smooth_l1":
-            loss_jepa = F.smooth_l1_loss(pred, target)
+            loss_jepa = F.smooth_l1_loss(pred, F.layer_norm(target, target.shape[-1:]))
         elif self.jepa_config.loss_fn == "cosine":
-            loss_jepa = (1 - F.cosine_similarity(pred, target, dim=-1, eps=torch.finfo(pred.dtype).eps)).mean()
+            loss_jepa = (1 - F.cosine_similarity(pred, target, dim=-1, eps=1e-5)).mean()
         else:
             raise ValueError(f"Invalid loss function: {self.jepa_config.loss_fn}")
 
@@ -636,12 +621,11 @@ class JEPA(Task):
             self.siglip_b,
             self.trainer.global_rank,
             self.trainer.world_size,
-            gamma=self.jepa_config.siglip_gamma,
         )
 
         # Compute metrics
         if metrics is not None:
-            with torch.inference_mode():
+            with torch.no_grad():
                 torch.cuda.nvtx.range_push("metrics")
                 metrics["jepa_loss"].update(loss_jepa)
                 metrics["siglip_loss"].update(loss_siglip)
@@ -696,7 +680,7 @@ class JEPA(Task):
 class JEPAWithProbe(JEPA, ABC):
     def __init__(
         self,
-        backbone_config: ViTConfig | AdaptiveViTConfig,
+        backbone_config: ViTConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
         probe_key: str = "target_cls_token",
         optimizer_init: Dict[str, Any] = {},
@@ -725,7 +709,7 @@ class JEPAWithProbe(JEPA, ABC):
             parameter_groups,
         )
         self.probe_key = probe_key
-        self.linear_probe = self.create_probe_head()
+        self.classification_head = self.create_probe_head()
 
     @abstractmethod
     def create_probe_head(self) -> nn.Module:

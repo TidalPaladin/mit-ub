@@ -2,7 +2,7 @@ import pytest
 import pytorch_lightning as pl
 import torch
 
-from mit_ub.model import AdaptiveViTConfig, ConvNextConfig, ViTConfig
+from mit_ub.model import ConvNextConfig, ViTConfig
 
 
 @pytest.fixture
@@ -18,28 +18,13 @@ def vit_dummy():
     dim = 128
     config = ViTConfig(
         in_channels=1,
-        dim=dim,
         patch_size=(2, 2),
         depth=2,
-        nhead=dim // 32,
-        dim_feedforward=dim,
-        dropout=0.1,
-    )
-    return config
-
-
-@pytest.fixture(scope="session")
-def vit_adaptive_dummy():
-    dim = 128
-    config = AdaptiveViTConfig(
-        in_channels=1,
-        dim=dim,
-        patch_size=(2, 2),
-        depth=2,
-        nhead=dim // 32,
-        dim_feedforward=dim,
-        dropout=0.1,
-        target_shape=(8, 8),
+        hidden_size=dim,
+        ffn_hidden_size=dim,
+        num_attention_heads=dim // 32,
+        hidden_dropout=0.1,
+        attention_dropout=0.1,
     )
     return config
 
@@ -49,11 +34,10 @@ def convnext_dummy():
     config = ConvNextConfig(
         in_channels=1,
         depths=(2, 2, 2),
-        dims=(32, 48, 64),
-        dims_feedforward=(128, 192, 256),
-        dropout=0.1,
-        stochastic_depth=0.1,
-        patch_size=2,
+        hidden_sizes=(32, 48, 64),
+        ffn_hidden_sizes=(128, 192, 256),
+        patch_size=(2, 2),
+        kernel_size=(3, 3),
     )
     return config
 
@@ -63,12 +47,13 @@ def vit_distillation():
     dim = 128
     config = ViTConfig(
         in_channels=1,
-        dim=dim,
         patch_size=(4, 4),
         depth=2,
-        nhead=dim // 32,
-        dim_feedforward=dim,
-        dropout=0.1,
+        hidden_size=dim,
+        ffn_hidden_size=dim,
+        num_attention_heads=dim // 32,
+        hidden_dropout=0.1,
+        attention_dropout=0.1,
     )
     return config
 
@@ -78,22 +63,18 @@ def convnext_distillation():
     config = ConvNextConfig(
         in_channels=1,
         depths=(2, 2, 2),
-        up_depths=(2, 2),
-        dims=(32, 48, 64),
-        dims_feedforward=(128, 192, 256),
-        dropout=0.1,
-        stochastic_depth=0.1,
-        patch_size=2,
+        hidden_sizes=(32, 48, 64),
+        ffn_hidden_sizes=(128, 192, 256),
+        patch_size=(2, 2),
+        kernel_size=(3, 3),
     )
     return config
 
 
-@pytest.fixture(scope="session", params=["vit-dummy", "vit-adaptive-dummy"])
+@pytest.fixture(scope="session", params=["vit-dummy"])
 def backbone(request):
     if request.param == "vit-dummy":
         return request.getfixturevalue("vit_dummy")
-    elif request.param == "vit-adaptive-dummy":
-        return request.getfixturevalue("vit_adaptive_dummy")
     else:
         pytest.fail(f"Unsupported backbone: {request.param}")
 

@@ -12,14 +12,19 @@ from torch.utils.cpp_extension import load
 from torchvision.utils import make_grid
 
 
-if torch.cuda.is_available():
-    _mixup_cuda = load(
-        name="mixup_cuda",
-        sources=[str(Path(__file__).parents[2] / "csrc" / "mixup.cu")],
-        extra_cuda_cflags=["-O3"],
-    )
-else:
-    _mixup_cuda = None
+try:
+    import mixup_cuda
+
+    _mixup_cuda = mixup_cuda
+except ImportError:
+    if torch.cuda.is_available():
+        _mixup_cuda = load(
+            name="mixup_cuda",
+            sources=[str(Path(__file__).parents[2] / "csrc" / "mixup.cu")],
+            extra_cuda_cflags=["-O3"],
+        )
+    else:
+        _mixup_cuda = None
 
 
 @torch.no_grad()

@@ -1,58 +1,81 @@
-from dataclasses import dataclass, field
-from typing import Any, ClassVar, Dict, Self, Sequence, Tuple, Type, cast
+from dataclasses import dataclass
+from typing import Any, Callable, ClassVar, Dict, Self, Sequence, Tuple, Type, cast
 
 import torch
 import torch.nn as nn
+import transformer_engine.pytorch as te
 from torch import Tensor
 
 from ...tokens import apply_mask, create_mask
-from ..activations import DEFAULT_MLP_ACTIVATION_STR, DEFAULT_MLP_GATE_ACTIVATION_STR, Activation, get_activation
-from ..config import ModelConfig, SupportsSafeTensors
-from ..helpers import set_checkpointing
-from ..layers.mlp import DEFAULT_MLP_ACTIVATION, MLP, NormType
-from ..layers.pool import PoolType, get_global_pooling_layer
-from ..layers.pos_enc import DEFAULT_POS_ENC_ACTIVATION
-from ..layers.transformer import TransformerDecoderLayer, TransformerEncoderLayer
-from ..stem import PatchEmbed2d, PatchEmbed3d
+from ..config import ModelConfig, SupportsSafeTensors, convert_sequences
+from ..layers import PatchEmbed2d
+from ..layers.pool import get_global_pooling_layer
 from .convnext import tokens_to_grid
 
 
 @dataclass(frozen=True)
 class ViTConfig(ModelConfig):
+    # Inputs
     in_channels: int
-    dim: int
     patch_size: Sequence[int]
+
+    # Transformer
     depth: int
-    nhead: int
-    dim_feedforward: int
-    dropout: float = 0.1
-    stochastic_depth: float = 0.0
-    bias: bool = False
-    activation: str | Activation = DEFAULT_MLP_ACTIVATION_STR
-    gate_activation: str | Activation | None = DEFAULT_MLP_GATE_ACTIVATION_STR
-    num_kv_heads: int | None = None
-    qk_norm: bool = False
-    layer_scale: float | None = None
-    norm_type: NormType = cast(NormType, "layernorm")
+    hidden_size: int
+    ffn_hidden_size: int
+    num_attention_heads: int
+    num_gqa_groups: int | None = None
+    hidden_dropout: float = 0.1
+    attention_dropout: float = 0.1
+    parallel_attention_mlp: bool = False
+    zero_centered_gamma: bool = False
+    normalization: str = "RMSNorm"
+    bias: bool = True
+    activation: str = "srelu"
+    drop_path_rate: float = 0.0
+
+    # Optimizations
+    fuse_qkv_params: bool = False
+    fuse_wgrad_accumulation: bool = False
+
+    # Other
     checkpoint: bool = False
 
-    moe_layers: Sequence[int] = field(default_factory=list)
-    num_experts: int | None = None
-    num_slots: int | None = None
+    def __post_init__(self) -> None:
+        convert_sequences(self, tuple)
+
+    @property
+    def isotropic_output_dim(self) -> int:
+        return self.hidden_size
 
     def instantiate(self) -> "ViT":
         return ViT(self)
 
-    def __post_init__(self):
-        super().__post_init__()
-        if self.norm_type == "RMS_NORM":
-            object.__setattr__(self, "norm_type", NormType.RMS_NORM)
-        if self.norm_type == "LAYER_NORM":
-            object.__setattr__(self, "norm_type", NormType.LAYER_NORM)
+    @property
+    def transformer_kwargs(self) -> Dict[str, Any]:
+        return dict(
+            hidden_size=self.hidden_size,
+            ffn_hidden_size=self.ffn_hidden_size,
+            num_attention_heads=self.num_attention_heads,
+            num_gqa_groups=self.num_gqa_groups,
+            hidden_dropout=self.hidden_dropout,
+            attention_dropout=self.attention_dropout,
+            parallel_attention_mlp=self.parallel_attention_mlp,
+            zero_centered_gamma=self.zero_centered_gamma,
+            normalization=self.normalization,
+            bias=self.bias,
+            activation=self.activation,
+            drop_path_rate=self.drop_path_rate,
+            fuse_qkv_params=self.fuse_qkv_params,
+            fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
+            # Constants
+            self_attn_mask_type="no_mask",
+            attn_input_format="bshd",
+        )
 
 
 class ViT(nn.Module, SupportsSafeTensors):
-    stem: PatchEmbed2d | PatchEmbed3d
+    stem: PatchEmbed2d
     CONFIG_TYPE: ClassVar[Type[ViTConfig]] = ViTConfig
 
     def __init__(self, config: ViTConfig):
@@ -60,26 +83,24 @@ class ViT(nn.Module, SupportsSafeTensors):
         self._config = config
 
         # CLS token
-        self.cls_token = nn.Parameter(torch.randn(config.dim))
+        self.cls_token = nn.Parameter(torch.randn(config.hidden_size))
 
         # Stem tokenizer
-        stem_act = self.get_external_activation(default=DEFAULT_POS_ENC_ACTIVATION)
-        stem_type = PatchEmbed2d if isinstance(config.patch_size, int) or len(config.patch_size) == 2 else PatchEmbed3d
-        self.stem = stem_type(
-            config.in_channels, config.dim, cast(Any, config.patch_size), dropout=config.dropout, activation=stem_act
+        self.stem = PatchEmbed2d(
+            config.in_channels,
+            config.hidden_size,
+            cast(Tuple[int, int], tuple(config.patch_size)),
+            normalization=config.normalization,
         )
 
         # Transformer blocks
         self.blocks = nn.ModuleList([self.create_encoder_layer(i) for i in range(config.depth)])
-        self.embedding_norm = self.create_norm()
-        if config.checkpoint:
-            set_checkpointing(self, config.checkpoint)
 
     @property
     def config(self) -> ViTConfig:
         return self._config
 
-    def create_encoder_layer(self, i: int = 0, **kwargs) -> TransformerEncoderLayer:
+    def create_encoder_layer(self, i: int = 0, **kwargs) -> te.TransformerLayer:
         """
         Creates a Transformer encoder layer.
 
@@ -94,29 +115,14 @@ class ViT(nn.Module, SupportsSafeTensors):
         Keyword Args:
             Additional keyword arguments to override default layer parameters.
         """
-        _kwargs: Dict[str, Any] = dict(
-            d_model=self.config.dim,
-            nhead=self.config.nhead,
-            dim_feedforward=self.config.dim_feedforward,
-            dropout=self.config.dropout,
-            activation=self.config.activation,
-            gate_activation=self.config.gate_activation,
-            num_kv_heads=self.config.num_kv_heads,
-            qk_norm=self.config.qk_norm,
-            num_experts=self.config.num_experts if i in self.config.moe_layers else None,
-            num_slots=self.config.num_slots if i in self.config.moe_layers else None,
-            layer_scale=self.config.layer_scale,
-            stochastic_depth=self.config.stochastic_depth,
-            bias=self.config.bias,
-            norm_type=self.config.norm_type,
-        )
+        _kwargs = self.config.transformer_kwargs
         _kwargs.update(kwargs)
-        layer = TransformerEncoderLayer(**_kwargs)
-        if self.config.checkpoint:
-            set_checkpointing(layer, self.config.checkpoint)
+        _kwargs["layer_number"] = i + 1
+        _kwargs["layer_type"] = "encoder"
+        layer = te.TransformerLayer(**_kwargs)
         return layer
 
-    def create_decoder_layer(self, i: int = 0, d_kv: int | None = None, **kwargs) -> TransformerDecoderLayer:
+    def create_decoder_layer(self, i: int = 0, **kwargs) -> te.TransformerLayer:
         """
         Creates a Transformer decoder layer.
 
@@ -127,33 +133,15 @@ class ViT(nn.Module, SupportsSafeTensors):
 
         Args:
             i: Index of the encoder layer. Default is 0.
-            d_kv: Dimension of the key and value vectors. By default this will be the same as the model dimension.
 
         Keyword Args:
             Additional keyword arguments to override default layer parameters.
         """
-        d_kv = d_kv or self.config.dim
-        _kwargs: Dict[str, Any] = dict(
-            d_model=self.config.dim,
-            nhead=self.config.nhead,
-            d_kv=d_kv,
-            dim_feedforward=self.config.dim_feedforward,
-            dropout=self.config.dropout,
-            activation=self.config.activation,
-            gate_activation=self.config.gate_activation,
-            num_kv_heads=self.config.num_kv_heads,
-            qk_norm=self.config.qk_norm,
-            num_experts=self.config.num_experts if i in self.config.moe_layers else None,
-            num_slots=self.config.num_slots if i in self.config.moe_layers else None,
-            layer_scale=self.config.layer_scale,
-            stochastic_depth=self.config.stochastic_depth,
-            bias=self.config.bias,
-            norm_type=self.config.norm_type,
-        )
+        _kwargs = self.config.transformer_kwargs
         _kwargs.update(kwargs)
-        layer = TransformerDecoderLayer(**_kwargs)
-        if self.config.checkpoint:
-            set_checkpointing(layer, self.config.checkpoint)
+        _kwargs["layer_number"] = i + 1
+        _kwargs["layer_type"] = "decoder"
+        layer = te.TransformerLayer(**_kwargs)
         return layer
 
     def create_norm(self, dim: int | None = None, **kwargs) -> nn.Module:
@@ -162,100 +150,70 @@ class ViT(nn.Module, SupportsSafeTensors):
         Args:
             dim: Dimension of the normalization layer. By default this will be the model dimension.
         """
-        dim = dim or self.config.dim
-        return (
-            nn.LayerNorm(dim, **kwargs) if self.config.norm_type == NormType.LAYER_NORM else nn.RMSNorm(dim, **kwargs)
-        )
-
-    def get_external_activation(self, default: Activation = DEFAULT_MLP_ACTIVATION) -> Activation:
-        r"""Gets an activation function suitable for use in external MLPs.
-
-        Args:
-            default: Default activation to return if an activation cannot be selected.
-
-        This is relevant when GLU variants are used in the transformer MLP layers.
-        This function selects an appropriate nonlinearity based on the model's configuration.
-        """
-        if self.config.activation != "identity":
-            return get_activation(self.config.activation)
-        elif self.config.gate_activation is not None and self.config.gate_activation != "identity":
-            return get_activation(self.config.gate_activation)
-        else:
-            return default
+        dim = dim or self.config.hidden_size
+        return te.LayerNorm(dim, **kwargs) if self.config.normalization == "LayerNorm" else te.RMSNorm(dim, **kwargs)
 
     def create_head(
         self,
         out_dim: int,
-        pool_type: PoolType | None = None,
-        input_norm: bool = True,
-        use_mlp: bool = True,
+        pool_type: str | None = None,
+        use_mlp: bool = False,
+        init_method: Callable | None = None,
         **kwargs,
     ) -> nn.Module:
         r"""Creates a head for the model.
 
-        The head has the following structure:
-            - Norm layer if ``input_norm`` is ``True`` and either ``pool_type`` is not ``None`` or ``use_mlp`` is ``True``.
-            - Pooling layer if ``pool_type`` is not ``None``
-            - MLP if ``use_mlp`` is ``True``. MLP is pre-normalized if ``pool_type`` is not ``None``.
-            - Norm layer
-            - ``nn.Linear`` to project to ``out_dim``
-
-        The following MLP options differ from the backbone defaults:
-            * ``bias`` is set to ``True``
-            * ``stochastic_depth`` is set to ``0.0``
-            * ``layer_scale`` is set to ``None``
-
         Args:
             out_dim: Dimension of the output.
-            input_norm: Whether to apply input normalization.
             pool_type: Type of pooling to apply, or ``None`` to skip pooling.
+            use_mlp: Whether to use an MLP after pooling.
 
         Keyword Args:
             Overrides for the MLP
         """
-        layer = nn.Sequential()
+        if pool_type is None:
+            if use_mlp:
+                layer = nn.Sequential()
+                mlp = te.LayerNormMLP(
+                    self.config.hidden_size,
+                    self.config.ffn_hidden_size,
+                    activation=self.config.activation,
+                    **kwargs,
+                )
+                layer.add_module("mlp", mlp)
+                linear = te.Linear(self.config.hidden_size, out_dim, init_method=init_method, **kwargs)
+                layer.add_module("out", linear)
+                return layer
+            else:
+                return te.LayerNormLinear(
+                    self.config.hidden_size,
+                    out_dim,
+                    init_method=init_method,
+                )
 
-        # Input norm
-        if input_norm and (pool_type is not None or use_mlp):
-            layer.add_module("input_norm", self.create_norm())
-
-        # Pooling layer
-        if pool_type is not None:
-            pool = get_global_pooling_layer(
-                cast(PoolType, kwargs.get("pool_type", pool_type)),
-                self.config.dim,
-                num_heads=kwargs.get("nhead", self.config.nhead),
-                dropout=kwargs.get("dropout", self.config.dropout),
-            )
+        else:
+            layer = nn.Sequential()
+            pool = get_global_pooling_layer(pool_type)
             layer.add_module("pool", pool)
 
-        # MLP
-        if use_mlp:
-            _kwargs = {
-                "in_features": self.config.dim,
-                "hidden_features": self.config.dim_feedforward,
-                "out_features": self.config.dim,
-                "dropout": kwargs.get("dropout", self.config.dropout),
-                "activation": kwargs.get("activation", self.get_external_activation()),
-                "gate_activation": kwargs.get("gate_activation", None),
-                "bias": kwargs.get("bias", True),
-                "norm": kwargs.get("norm", pool_type is not None),
-                "norm_type": kwargs.get("norm_type", self.config.norm_type),
-                "layer_scale": kwargs.get("layer_scale", None),
-                "stochastic_depth": kwargs.get("stochastic_depth", 0.0),
-            }
-            mlp = MLP(**_kwargs)
-            layer.add_module("mlp", mlp)
-
-        # Output norm
-        layer.add_module("output_norm", self.create_norm())
-
-        # Output linear
-        linear = nn.Linear(self.config.dim, out_dim)
-        nn.init.xavier_normal_(linear.weight)
-        nn.init.zeros_(linear.bias)
-        layer.add_module("out", linear)
-        return layer
+            if use_mlp:
+                mlp = te.LayerNormMLP(
+                    self.config.hidden_size,
+                    self.config.ffn_hidden_size,
+                    activation=self.config.activation,
+                )
+                layer.add_module("mlp", mlp)
+                linear = te.Linear(self.config.hidden_size, out_dim, init_method=init_method)
+                layer.add_module("out", linear)
+                return layer
+            else:
+                linear = te.LayerNormLinear(
+                    self.config.hidden_size,
+                    out_dim,
+                    init_method=init_method,
+                )
+                layer.add_module("out", linear)
+                return layer
 
     def on_load_checkpoint(self, state_dict: Dict[str, Any], *args, **kwargs) -> None:
         r"""Called after loading a checkpoint to perform any necessary post-processing."""
@@ -315,8 +273,7 @@ class ViT(nn.Module, SupportsSafeTensors):
 
         # Transformer blocks and output norm
         for block in self.blocks:
-            x = block(x)
-        x = self.embedding_norm(x)
+            x = block(x, checkpoint_core_attention=self.config.checkpoint)
 
         # Extract CLS token
         cls_token = x[:, 0, :].contiguous()

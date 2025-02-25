@@ -1,41 +1,15 @@
-.PHONY: benchmark clean clean-env check quality style tag-version test env upload upload-test
+.PHONY: build benchmark clean clean-env check quality style tag-version test env upload upload-test
 
 PROJECT=mit_ub
 QUALITY_DIRS=$(PROJECT) tests scripts
 CLEAN_DIRS=$(PROJECT) tests scripts
 PYTHON=pdm run python
-BENCHMARK_DIR = ./benchmarks
 
-CONFIG_FILE := config.mk
-ifneq ($(wildcard $(CONFIG_FILE)),)
-include $(CONFIG_FILE)
-endif
+IMAGE_NAME=tidalpaladin/mit-ub
+TAG=latest
 
-#benchmark-one: ## run benchmarks
-#	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 16 \
-#		--mode bwd --providers triton triton-fast -d bf16
-
-benchmark: ## run benchmarks
-	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 16 \
-		--mode fwd --providers triton triton-fast flash -d fp16
-	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
-		--mode fwd --providers triton triton-fast flash -d fp16
-	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 64 \
-		--mode fwd --providers triton triton-fast flash -d fp16
-	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
-		--mode fwd --providers triton triton-fast flash -d fp16 --bias
-	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
-		--mode fwd --providers triton flash -d bf16
-	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 16 \
-		--mode bwd --providers triton triton-fast flash -d fp16
-	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
-		--mode bwd --providers triton triton-fast flash -d fp16
-	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 64 \
-		--mode bwd --providers triton triton-fast flash -d fp16
-	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
-		--mode bwd --providers triton triton-fast flash -d fp16 --bias
-	pdm run python -m mit_ub.model.kernels.flash_attn -o $(BENCHMARK_DIR) -QK 4096 -D 32 \
-		--mode bwd --providers triton flash -d bf16
+build:
+	docker build -t $(IMAGE_NAME):$(TAG) .
 
 check: ## run quality checks and unit tests
 	$(MAKE) style
@@ -65,8 +39,9 @@ deploy: ## installs from lockfile
 init: ## pulls submodules and initializes virtual environment
 	git submodule update --init --recursive
 	which pdm || pip install --user pdm
-	pdm venv create -n $(PROJECT)
-	pdm install -d -G train
+	pdm venv create
+	pdm install -d -G train --no-isolation
+	$(PYTHON) -m pip install "transformer-engine[pytorch]" --no-build-isolation
 
 node_modules: 
 ifeq (, $(shell which npm))

@@ -2,7 +2,6 @@ import pytest
 import torch
 from deep_helpers.structs import Mode, State
 
-from mit_ub.model.layers import has_layer_scale
 from mit_ub.tasks.classification import (
     ClassificationConfig,
     ClassificationTask,
@@ -111,11 +110,7 @@ class TestJEPAWithClassification:
             "macro_token_rms",
             "siglip_loss",
         }
-        train_keys = (
-            {"layer_scale_mean", "layer_scale_max", "ema_momentum", "siglip_t", "siglip_b"}
-            if has_layer_scale(task.backbone)
-            else {"ema_momentum", "siglip_t", "siglip_b"}
-        )
+        train_keys = {"ema_momentum", "siglip_t", "siglip_b"}
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
         else:
@@ -146,11 +141,7 @@ class TestJEPAWithClassification:
             "macro_token_rms",
             "siglip_loss",
         }
-        train_keys = (
-            {"layer_scale_mean", "layer_scale_max", "ema_momentum", "siglip_t", "siglip_b"}
-            if has_layer_scale(binary_task.backbone)
-            else {"ema_momentum", "siglip_t", "siglip_b"}
-        )
+        train_keys = {"ema_momentum", "siglip_t", "siglip_b"}
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
         else:
@@ -173,6 +164,7 @@ class TestDistillationWithClassification:
         distillation_config = DistillationConfig(
             student_pool_type="avg",
             teacher_pool_type=None,
+            teacher_resolution=(16, 16),
         )
 
         teacher_checkpoint = tmp_path / "teacher.pth"
@@ -197,6 +189,7 @@ class TestDistillationWithClassification:
         distillation_config = DistillationConfig(
             student_pool_type="avg",
             teacher_pool_type=None,
+            teacher_resolution=(16, 16),
         )
 
         teacher_checkpoint = tmp_path / "teacher.pth"
@@ -226,7 +219,7 @@ class TestDistillationWithClassification:
     def test_create_metrics(self, task, state):
         metrics = task.create_metrics(state)
         base_keys = {"distill_loss", "distill_loss_cls", "ce_loss", "acc", "macro_acc"}
-        train_keys = {"layer_scale_mean", "layer_scale_max"} if has_layer_scale(task.backbone) else set()
+        train_keys = set()
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
         else:
@@ -244,7 +237,7 @@ class TestDistillationWithClassification:
     def test_create_metrics_binary(self, binary_task, state):
         metrics = binary_task.create_metrics(state)
         base_keys = {"distill_loss", "distill_loss_cls", "bce_loss", "acc", "macro_acc", "auroc"}
-        train_keys = {"layer_scale_mean", "layer_scale_max"} if has_layer_scale(binary_task.backbone) else set()
+        train_keys = set()
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
         else:
