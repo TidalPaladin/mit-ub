@@ -7,50 +7,50 @@ from typing import Any, cast
 import pytest
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import yaml
 from safetensors.torch import save_file
-from torch.testing import assert_close
 
-from mit_ub.model.activations import relu2
 from mit_ub.model.backbone import ViT, ViTConfig
-from mit_ub.model.layers.mlp import MLP, NormType
-from mit_ub.model.layers.pool import PoolType
-from mit_ub.model.layers.pos_enc import RelativeFactorizedPosition
-from mit_ub.tokens import create_mask
 
 
 @pytest.fixture
 def config():
     config = ViTConfig(
         in_channels=3,
-        dim=128,
-        dim_feedforward=256,
         patch_size=(16, 16),
         depth=3,
-        nhead=128 // 16,
+        hidden_size=128,
+        ffn_hidden_size=256,
+        num_attention_heads=128 // 16,
+    )
+    return config
+
+
+@pytest.fixture
+def config_vit():
+    config = ViTConfig(
+        in_channels=3,
+        patch_size=(16, 16),
+        depth=3,
+        hidden_size=128,
+        ffn_hidden_size=256,
+        num_attention_heads=128 // 16,
     )
     return config
 
 
 class TestViTConfig:
 
-    def test_convert_activations(self, config):
-        config = replace(config, activation="relu2", gate_activation="silu")
-        assert config.activation == relu2
-        assert config.gate_activation == F.silu
-
     @pytest.mark.parametrize("ext", [".json", ".yaml", ".yml"])
     def test_from_file(self, tmp_path, ext):
         config = {
             "in_channels": 3,
-            "dim": 128,
-            "dim_feedforward": 256,
+            "hidden_size": 128,
+            "ffn_hidden_size": 256,
             "patch_size": [16, 16],
             "depth": 3,
-            "nhead": 128 // 16,
-            "activation": "relu2",
-            "gate_activation": "silu",
+            "num_attention_heads": 128 // 16,
+            "activation": "srelu",
         }
 
         path = tmp_path / f"config{ext}"
@@ -62,7 +62,7 @@ class TestViTConfig:
 
         config = ViTConfig.from_file(path)
         assert config.in_channels == 3
-        assert config.dim == 128
+        assert config.hidden_size == 128
 
     @pytest.mark.parametrize("ext", [".json", ".yaml", ".yml"])
     def test_save(self, config, tmp_path, ext):
@@ -77,132 +77,128 @@ class TestViTConfig:
         assert isinstance(model, ViT)
 
 
+class TestEncoderLayer:
+    @pytest.mark.cuda
+    def test_forward(self, config):
+        B, L, D = 4, 32, config.hidden_size
+        x = torch.randn(B, L, D, device="cuda")
+        layer = ViT(config).create_encoder_layer().cuda()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            out = layer(x)
+        assert out.shape == (B, L, D)
+
+    @pytest.mark.cuda
+    @pytest.mark.parametrize("checkpoint", [False, True])
+    def test_backward(self, config, checkpoint):
+        B, L, D = 4, 32, config.hidden_size
+        x = torch.randn(B, L, D, device="cuda")
+        layer = ViT(config).create_encoder_layer().cuda()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            out = layer(x, checkpoint_core_attention=checkpoint)
+        out.sum().backward()
+        for name, param in layer.named_parameters():
+            assert param.grad is not None, f"{name} has no gradient"
+            assert not param.grad.isnan().any(), f"{name} has nan gradient"
+
+
+class TestDecoderLayer:
+    @pytest.mark.cuda
+    def test_forward(self, config):
+        B, Lq, Lk, D = 4, 16, 32, config.hidden_size
+        q = torch.randn(B, Lq, D, device="cuda")
+        kv = torch.randn(B, Lk, D, device="cuda")
+        layer = ViT(config).create_decoder_layer().cuda()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            out = layer(q, encoder_output=kv)
+        assert out.shape == (B, Lq, D)
+
+    @pytest.mark.cuda
+    @pytest.mark.parametrize("checkpoint", [False, True])
+    def test_backward(self, config, checkpoint):
+        B, Lq, Lk, D = 4, 16, 32, config.hidden_size
+        q = torch.randn(B, Lq, D, device="cuda")
+        kv = torch.randn(B, Lk, D, device="cuda")
+        layer = ViT(config).create_decoder_layer().cuda()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            out = layer(q, encoder_output=kv, checkpoint_core_attention=checkpoint)
+        out.sum().backward()
+        for name, param in layer.named_parameters():
+            assert param.grad is not None, f"{name} has no gradient"
+            assert not param.grad.isnan().any(), f"{name} has nan gradient"
+
+
+class TestHeadLayer:
+    @pytest.mark.cuda
+    @pytest.mark.parametrize("use_mlp", [True, False])
+    def test_forward_no_pool(self, config, use_mlp):
+        B, L, D = 4, 32, config.hidden_size
+        x = torch.randn(B, L, D, device="cuda")
+        layer = ViT(config).create_head(D, use_mlp=use_mlp).cuda()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            out = layer(x)
+        assert out.shape == (B, L, D)
+
+    @pytest.mark.cuda
+    @pytest.mark.parametrize("use_mlp", [True, False])
+    def test_forward_pool(self, config, use_mlp):
+        B, L, D = 4, 32, config.hidden_size
+        x = torch.randn(B, L, D, device="cuda")
+        layer = ViT(config).create_head(D, pool_type="avg", use_mlp=use_mlp).cuda()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            out = layer(x)
+        assert out.shape == (B, D)
+
+    @pytest.mark.cuda
+    @pytest.mark.parametrize("use_mlp", [True, False])
+    def test_backward_no_pool(self, config, use_mlp):
+        B, L, D = 4, 32, config.hidden_size
+        x = torch.randn(B, L, D, device="cuda")
+        layer = ViT(config).create_head(D, use_mlp=use_mlp).cuda()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            out = layer(x)
+        out.sum().backward()
+        for name, param in layer.named_parameters():
+            assert param.grad is not None, f"{name} has no gradient"
+            assert not param.grad.isnan().any(), f"{name} has nan gradient"
+
+    @pytest.mark.cuda
+    @pytest.mark.parametrize("use_mlp", [True, False])
+    def test_backward_pool(self, config, use_mlp):
+        B, L, D = 4, 32, config.hidden_size
+        x = torch.randn(B, L, D, device="cuda")
+        layer = ViT(config).create_head(D, pool_type="avg", use_mlp=use_mlp).cuda()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            out = layer(x)
+        out.sum().backward()
+        for name, param in layer.named_parameters():
+            assert param.grad is not None, f"{name} has no gradient"
+            assert not param.grad.isnan().any(), f"{name} has nan gradient"
+
+
 class TestViT:
 
-    @pytest.mark.parametrize(
-        "device",
-        [
-            "cpu",
-            pytest.param("cuda", marks=pytest.mark.cuda),
-        ],
-    )
+    @pytest.mark.cuda
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    def test_forward(self, config, device, dtype):
-        x = torch.randn(1, 3, 224, 224, device=device)
-        model = ViT(config).to(device)
-        with torch.autocast(device_type=device, dtype=dtype, enabled=True):
+    def test_forward(self, config, dtype):
+        x = torch.randn(1, 3, 224, 224, device="cuda")
+        model = ViT(config).cuda()
+        with torch.autocast(device_type="cuda", dtype=dtype, enabled=True):
             out, cls_token = model(x)
         assert out.shape[:2] == (1, 128)
         assert cls_token.shape == (1, 128)
 
-    @pytest.mark.parametrize(
-        "device",
-        [
-            "cpu",
-            pytest.param("cuda", marks=pytest.mark.cuda),
-        ],
-    )
+    @pytest.mark.cuda
     @pytest.mark.parametrize("checkpoint", [False, True])
-    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    def test_backward(self, config, device, dtype, checkpoint):
-        x = torch.randn(1, 3, 224, 224, device=device, requires_grad=True)
+    def test_backward(self, config, checkpoint):
+        x = torch.randn(1, 3, 224, 224, device="cuda", requires_grad=True)
         config = replace(config, checkpoint=checkpoint)
-        model = ViT(config).to(device)
-        with torch.autocast(device_type=device, dtype=dtype):
+        model = ViT(config).cuda()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             out, cls_token = model(x)
         (out.sum() + cls_token.sum()).backward()
         for name, param in model.named_parameters():
             assert param.grad is not None, f"{name} has no gradient"
             assert not param.grad.isnan().any(), f"{name} has nan gradient"
-
-    @pytest.mark.parametrize(
-        "device",
-        [
-            "cpu",
-            pytest.param("cuda", marks=pytest.mark.cuda),
-        ],
-    )
-    def test_token_mask(self, config, device):
-        torch.random.manual_seed(0)
-        B, C, H, W = 1, 3, 224, 224
-        D, patch_size, depth = 128, (16, 16), 3
-
-        model = ViT(config).to(device)
-
-        x = torch.randn(B, C, H, W, device=device)
-        mask = model.create_mask(x, unmasked_ratio=0.25, scale=1)
-        with torch.autocast(device_type=device, dtype=torch.float16):
-            out1, _ = model(x, reshape=False)
-            out2, _ = model(x, mask=mask, reshape=False)
-        assert out1.shape != out2.shape
-
-    def test_forward_deterministic(self, config):
-        x = torch.randn(1, 3, 224, 224)
-        config = replace(config, stochastic_depth=0.1, dropout=0.1)
-        model = ViT(config)
-
-        model.train()
-        with torch.autocast(device_type="cpu", dtype=torch.float16):
-            out1, cls1 = model(x)
-            out2, cls2 = model(x)
-        assert not torch.allclose(out1, out2)
-        assert not torch.allclose(cls1, cls2)
-
-        model.eval()
-        with torch.autocast(device_type="cpu", dtype=torch.float16):
-            out1, cls1 = model(x)
-            out2, cls2 = model(x)
-        assert torch.allclose(out1, out2)
-        assert torch.allclose(cls1, cls2)
-
-    def test_trivial_token_mask(self, config):
-        torch.random.manual_seed(0)
-        B, C, H, W = 1, 3, 224, 224
-        model = ViT(config)
-        model.eval()
-
-        mask_size = model.stem.tokenized_size(cast(Any, (H, W)))
-        mask = create_mask(mask_size, batch_size=B, mask_ratio=0.25, scale=1)
-        mask = torch.ones_like(mask).bool()
-        x = torch.randn(B, C, H, W)
-        out1, _ = model(x, reshape=False)
-        out2, _ = model(x, mask=mask, reshape=False)
-        assert_close(out1, out2)
-
-    @pytest.mark.parametrize(
-        "device",
-        [
-            "cpu",
-            pytest.param("cuda", marks=pytest.mark.cuda),
-        ],
-    )
-    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    @pytest.mark.parametrize("pool_type", [PoolType.ATTENTION, None])
-    def test_forward_head(self, config, device, dtype, pool_type):
-        x = torch.randn(1, 3, 224, 224, device=device)
-        model = ViT(config).to(device)
-        head = model.create_head(out_dim=10, pool_type=pool_type).to(device)
-        with torch.autocast(device_type=device, dtype=dtype, enabled=True):
-            features, _ = model(x, reshape=False)
-            out = head(features)
-        exp = (1, 1, 10) if pool_type is not None else (1, 196, 10)
-        assert out.shape == exp
-
-        # Ensure this is present for targeting weight decay
-        assert isinstance(head.get_submodule("mlp"), MLP)
-
-    @pytest.mark.parametrize("norm_type, exp", [(NormType.LAYER_NORM, nn.LayerNorm), (NormType.RMS_NORM, nn.RMSNorm)])
-    def test_norms(self, config, norm_type, exp):
-        config = replace(config, norm_type=norm_type)
-        model = ViT(config)
-        assert isinstance(model.embedding_norm, exp), f"Embedding norm is not {exp}"
-        for layer in model.modules():
-            if hasattr(layer, "norm_type") and not isinstance(layer, RelativeFactorizedPosition):
-                assert layer.norm_type == norm_type, f"Layer norm type is not {norm_type}"
-
-        head = model.create_head(out_dim=10, pool_type=PoolType.ATTENTION)
-        assert isinstance(head.get_submodule("input_norm"), exp), f"Head input norm is not {exp}"
-        assert isinstance(head.get_submodule("output_norm"), exp), f"Head output norm is not {exp}"
 
     @pytest.fixture
     def checkpoint_model(self, config):
@@ -213,7 +209,8 @@ class TestViT:
         model = checkpoint_model
         checkpoint_path = tmp_path / "checkpoint.safetensors"
         state_dict = model.state_dict()
-        save_file(state_dict, checkpoint_path)
+        tensors = {k: v for k, v in state_dict.items() if isinstance(v, torch.Tensor)}
+        save_file(tensors, checkpoint_path)
         return checkpoint_path
 
     @pytest.fixture
@@ -234,7 +231,7 @@ class TestViT:
             param.data.fill_(3.0)
 
         # Load should update the irregular value back to normal
-        loaded = cast(Any, checkpoint_model).load_safetensors(safetensors_checkpoint)
+        loaded = cast(Any, checkpoint_model).load_safetensors(safetensors_checkpoint, strict=False)
         for param in loaded.parameters():
             assert not (param.data == 3.0).all()
 
@@ -244,6 +241,6 @@ class TestViT:
             param.data.fill_(3.0)
 
         # Load should update the irregular value back to normal
-        loaded = ViT.load_tar(tar_checkpoint)
+        loaded = ViT.load_tar(tar_checkpoint, strict=False)
         for param in loaded.parameters():
             assert not (param.data == 3.0).all()

@@ -1,16 +1,17 @@
 from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
 import torchmetrics as tm
 from deep_helpers.structs import State
 from deep_helpers.tasks import Task
+from lightning_utilities.core.rank_zero import rank_zero_warn
 from torch import Tensor
 
-from ..data import bce_mixup, cross_entropy_mixup, is_mixed, mixup
+from ..data import bce_mixup, cross_entropy_mixup, invert_, is_mixed, mixup
 from ..data.noise import (
     DEFAULT_NOISE_PROB,
     MULTIPLICATIVE_NOISE_MAX,
@@ -20,13 +21,12 @@ from ..data.noise import (
     SALT_PEPPER_NOISE_PROB,
     UNIFORM_NOISE_MAX,
     UNIFORM_NOISE_MIN,
-    RandomNoise,
+    apply_noise_batched,
 )
-from ..model import AdaptiveViTConfig, AnyModelConfig, ViT, ViTConfig
+from ..model import AnyModelConfig, ViT, ViTConfig
 from ..model.helpers import grid_to_tokens
-from ..model.layers.pool import PoolType
 from .distillation import DistillationConfig, DistillationWithProbe
-from .jepa import JEPAConfig, JEPAWithProbe
+from .jepa import JEPAConfig, JEPAWithProbe, save_first_batch
 
 
 def is_valid_categorical_label(label: Tensor) -> Tensor:
@@ -177,8 +177,6 @@ class ClassificationConfig:
         pool_type: Type of pooling to use.
         label_key: Key in the batch dictionary that contains the label.
         mlp_tower: If True, use a MLP tower instead of a simple linear layer.
-        tower_input_norm: If True, apply input normalization to the tower.
-            Input normalization should not be necessary for backbones that already have an output normalization layer.
         use_noise: If True, apply noise to the input.
         uniform_noise_scale: Scale of the uniform noise to apply to the input.
         multiplicative_noise_scale: Scale of the multiplicative noise to apply to the input.
@@ -186,6 +184,9 @@ class ClassificationConfig:
         salt_pepper_pixel_prob: Probability of applying salt and pepper noise to a given pixel.
         noise_prob: Probability of applying a given noise transform.
         noise_clip: If True, clip the noise to the range [0, 1].
+        invert_prob: Probability of inverting the input.
+        solarize_prob: Probability of solarizing the input.
+        solarize_threshold: Threshold for solarizing the input.
         pos_weight: Weight for the positive class in binary classification.
     """
 
@@ -194,10 +195,9 @@ class ClassificationConfig:
     mixup_prob: float = 0.2
     freeze_backbone: bool = False
     # TODO: jsonargparse can't handle the strenum it seems
-    pool_type: str | PoolType | None = None
+    pool_type: str | None = None
     label_key: str = "label"
     mlp_tower: bool = False
-    tower_input_norm: bool = False
 
     # Noise
     use_noise: bool = True
@@ -206,6 +206,9 @@ class ClassificationConfig:
     salt_pepper_prob: float = SALT_PEPPER_NOISE_PROB
     salt_pepper_pixel_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX)
     noise_prob: float = DEFAULT_NOISE_PROB
+    invert_prob: float = 0.0
+    solarize_prob: float = 0.0
+    solarize_threshold: float = 0.5
     noise_clip: bool = True
 
     # Binary classification
@@ -218,8 +221,10 @@ class ClassificationConfig:
             raise ValueError("mixup_alpha must be positive")
         if not 0 <= self.mixup_prob <= 1:
             raise ValueError("mixup_prob must be in the range [0, 1]")
-        if isinstance(self.pool_type, str):
-            self.pool_type = PoolType(self.pool_type)
+        if not 0 <= self.invert_prob <= 1:
+            raise ValueError("invert_prob must be in the range [0, 1]")
+        if not 0 <= self.solarize_prob <= 1:
+            raise ValueError("solarize_prob must be in the range [0, 1]")
 
     @property
     def is_binary(self) -> bool:
@@ -279,24 +284,12 @@ class ClassificationTask(Task):
             for param in self.backbone.parameters():
                 param.requires_grad = False
 
-        self.backbone.config.dim
-
         self.classification_head = self.backbone.create_head(
             out_dim=self.config.num_classes if not self.config.is_binary else 1,
-            pool_type=cast(PoolType | None, self.config.pool_type),
+            pool_type=self.config.pool_type,
             use_mlp=self.config.mlp_tower,
-            input_norm=self.config.tower_input_norm,
         )
         self.save_hyperparameters()
-
-        self.random_noise = RandomNoise(
-            self.config.noise_prob,
-            self.config.uniform_noise_scale,
-            self.config.multiplicative_noise_scale,
-            self.config.salt_pepper_prob,
-            self.config.salt_pepper_pixel_prob,
-            self.config.noise_clip,
-        )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
         return create_metrics(self.config)
@@ -328,8 +321,15 @@ class ClassificationTask(Task):
         # apply noise
         if self.training and self.config.use_noise:
             torch.cuda.nvtx.range_push("noise")
-            x = self.random_noise.apply_batched_cuda(x, inplace=True)
-            torch.cuda.nvtx.range_pop()
+            x = apply_noise_batched(
+                x,
+                prob=self.config.noise_prob,
+                uniform_scale=self.config.uniform_noise_scale,
+                multiplicative_scale=self.config.multiplicative_noise_scale,
+                salt_pepper_prob=self.config.salt_pepper_prob,
+                salt_pepper_pixel_prob=self.config.salt_pepper_pixel_prob,
+                clip=self.config.noise_clip,
+            )
 
         # mixup input
         if self.training and self.config.mixup_prob > 0:
@@ -337,6 +337,28 @@ class ClassificationTask(Task):
             x = mixup(x, self.config.mixup_prob, self.config.mixup_alpha, mixup_seed)
         else:
             mixup_seed = None
+
+        # invert input
+        if self.training and self.config.invert_prob > 0:
+            torch.cuda.nvtx.range_push("invert")
+            invert_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+            invert_(x, self.config.invert_prob, self.config.solarize_prob, self.config.solarize_threshold, invert_seed)
+            torch.cuda.nvtx.range_pop()
+
+        # save image of first batch
+        if (
+            self.training
+            and self.trainer.global_step == 0
+            and self.trainer.global_rank == 0
+            and batch_idx % self.trainer.accumulate_grad_batches == 0
+        ):
+            try:
+                experiment = getattr(self.logger, "experiment", None)
+                assert experiment is not None
+                path = Path(experiment.dir) / "first_batch.png"
+                save_first_batch(x, path)
+            except Exception as e:
+                rank_zero_warn(f"Error saving first batch: {e}")
 
         # forward backbone
         # NOTE: We don't use forward() here because step_classification_from_features()
@@ -376,7 +398,7 @@ class ClassificationTask(Task):
 class JEPAWithClassification(JEPAWithProbe):
     def __init__(
         self,
-        backbone_config: ViTConfig | AdaptiveViTConfig,
+        backbone_config: ViTConfig,
         classification_config: ClassificationConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
         probe_key: str = "target_cls_token",
@@ -411,9 +433,8 @@ class JEPAWithClassification(JEPAWithProbe):
     def create_probe_head(self) -> nn.Module:
         return self.backbone.create_head(
             out_dim=self.classification_config.num_classes if not self.classification_config.is_binary else 1,
-            pool_type=cast(PoolType | None, self.classification_config.pool_type),
-            use_mlp=self.classification_config.mlp_tower,
-            input_norm=self.classification_config.tower_input_norm,
+            pool_type=self.classification_config.pool_type,
+            use_mlp=False,
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
@@ -439,7 +460,7 @@ class JEPAWithClassification(JEPAWithProbe):
         probe_output = step_classification_from_features(
             features,
             y,
-            self.linear_probe,
+            self.classification_head,
             self.classification_config,
             mixup_seed,
             metrics,
@@ -492,9 +513,8 @@ class DistillationWithClassification(DistillationWithProbe):
     def create_probe_head(self) -> nn.Module:
         return self.backbone.create_head(
             out_dim=self.classification_config.num_classes if not self.classification_config.is_binary else 1,
-            pool_type=cast(PoolType | None, self.classification_config.pool_type),
-            use_mlp=self.classification_config.mlp_tower,
-            input_norm=self.classification_config.tower_input_norm,
+            pool_type=self.classification_config.pool_type,
+            use_mlp=False,
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
@@ -520,7 +540,7 @@ class DistillationWithClassification(DistillationWithProbe):
         probe_output = step_classification_from_features(
             features,
             y,
-            self.linear_probe,
+            self.classification_head,
             self.classification_config,
             mixup_weight,
             metrics,

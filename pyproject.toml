@@ -1,7 +1,3 @@
-[build-system]
-requires = ["pdm-pep517>=1.0"]
-build-backend = "pdm.pep517.api"
-
 [project]
 name = "mit-ub"
 description = ""
@@ -13,23 +9,19 @@ dependencies = [
     "torch",
     "torchvision",
     "einops",
-    "registry @ git+https://github.com/TidalPaladin/callable-registry.git",
-    "ninja>=1.11.1.3",
+    "transformer-engine>=1.13.0",
+    "ninja",
 ]
 readme = "README.md"
 license = {text = "Apache"}
 dynamic = ["version"]
 
 [project.optional-dependencies]
-docs = [
-    "manim>=0.18.1",
-]
 train = [
   "Pillow",
   "pandas",
   "pytorch-lightning>=2.4",
   "torchmetrics",
-  "bitsandbytes>=0.44.1",
   "jsonargparse[signatures]",
   "deep-helpers @ git+https://github.com/TidalPaladin/deep-helpers.git",
   "pytorch-optimizer",
@@ -70,8 +62,8 @@ pythonPlatform = "Linux"
 [tool.pdm]
 version = { source = "scm" }
 
-[tool.pdm.build]
-includes = ["mit_ub", "csrc"]
+[tool.setuptools.packages]
+find = { include = ["mit_ub", "csrc"] }
 
 [tool.pdm.dev-dependencies]
 test = [

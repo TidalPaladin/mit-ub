@@ -1,19 +1,13 @@
-from .adaptive_vit import AdaptiveViT, AdaptiveViTConfig
-from .convnext import ConvNext, ConvNextConfig
-from .convvit import ConvViT, ConvViTConfig
+from .convnext import ConvNext2d, ConvNextConfig
 from .vit import ViT, ViTConfig
 
 
-AnyModelConfig = ViTConfig | AdaptiveViTConfig | ConvNextConfig | ConvViTConfig
+AnyModelConfig = ViTConfig | ConvNextConfig
 
 __all__ = [
     "ViT",
     "ViTConfig",
-    "AdaptiveViT",
-    "AdaptiveViTConfig",
-    "ConvViT",
-    "ConvViTConfig",
-    "ConvNext",
+    "ConvNext2d",
     "ConvNextConfig",
     "AnyModelConfig",
 ]

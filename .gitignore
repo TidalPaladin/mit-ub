@@ -143,6 +143,7 @@ coverage.xml
 *.csv
 *.html
 *.png
+*.tiff
 
 *.safetensors
 

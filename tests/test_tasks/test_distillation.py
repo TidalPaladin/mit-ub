@@ -2,24 +2,20 @@ import pytest
 import torch
 from deep_helpers.structs import Mode, State
 
-from mit_ub.model.layers.layer_scale import has_layer_scale
 from mit_ub.tasks.distillation import Distillation, DistillationConfig
 
 
 class TestDistillation:
-    @pytest.fixture(params=[False, True])
-    def teacher_resize(self, request):
-        return request.param
 
     @pytest.fixture(params=["vit->conv", "vit->vit"])
-    def task(self, request, tmp_path, vit_distillation, convnext_distillation, optimizer_init, teacher_resize):
+    def task(self, request, tmp_path, vit_distillation, convnext_distillation, optimizer_init):
         if request.param == "vit->conv":
             student_config = convnext_distillation
             teacher_config = vit_distillation
             distillation_config = DistillationConfig(
                 student_pool_type="avg",
                 teacher_pool_type=None,
-                teacher_resolution=(32, 32) if teacher_resize else None,
+                teacher_resolution=(16, 16),
             )
         elif request.param == "vit->vit":
             student_config = vit_distillation
@@ -51,7 +47,7 @@ class TestDistillation:
     def test_create_metrics(self, task, state):
         metrics = task.create_metrics(state)
         base_keys = {"distill_loss", "distill_loss_cls"}
-        train_keys = {"layer_scale_mean", "layer_scale_max"} if has_layer_scale(task.backbone) else set()
+        train_keys = set()
 
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys

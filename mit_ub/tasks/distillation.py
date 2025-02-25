@@ -8,10 +8,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics as tm
 from deep_helpers.helpers import load_checkpoint
-from deep_helpers.structs import Mode, State
+from deep_helpers.structs import State
 from deep_helpers.tasks import Task
 from torch import Tensor
 
+from ..data.invert import invert_
 from ..data.mixup import mixup
 from ..data.noise import (
     DEFAULT_NOISE_PROB,
@@ -22,13 +23,10 @@ from ..data.noise import (
     SALT_PEPPER_NOISE_PROB,
     UNIFORM_NOISE_MAX,
     UNIFORM_NOISE_MIN,
-    RandomNoise,
+    apply_noise_batched,
 )
-from ..metrics.layer_scale import MaxLayerScale, MeanLayerScale
 from ..model import AnyModelConfig, ViT
 from ..model.helpers import grid_to_tokens
-from ..model.layers import has_layer_scale
-from ..model.layers.pool import PoolType
 
 
 @dataclass
@@ -46,12 +44,13 @@ class DistillationConfig:
         noise_clip: If True, clip the noise to the range [0, 1].
         salt_pepper_prob: Proportion of salt and pepper noise to apply to the input.
         student_pool_type: Type of pooling to use for the student backbone.
-        student_pool_input_norm: If True, apply input normalization to the student pool.
         teacher_pool_type: Type of pooling to use for the teacher backbone.
-        teacher_pool_input_norm: If True, apply input normalization to the teacher pool.
         teacher_resolution: If provided, resize the teacher input to this resolution.
             The user must ensure that the teacher backbone is compatible with this resolution,
             and that the size of the student's and teacher's outputs are equal under this resolution.
+        invert_prob: Probability of inverting the input.
+        solarize_prob: Probability of solarizing the input.
+        solarize_threshold: Threshold for solarizing the input.
     """
 
     mixup_alpha: float = 1.0
@@ -63,17 +62,22 @@ class DistillationConfig:
     noise_clip: bool = True
     salt_pepper_prob: float = SALT_PEPPER_NOISE_PROB
     salt_pepper_pixel_prob: float | Tuple[float, float] = (SALT_PEPPER_NOISE_MIN, SALT_PEPPER_NOISE_MAX)
-    student_pool_type: str | PoolType | None = None
-    student_pool_input_norm: bool = False
-    teacher_pool_type: str | PoolType | None = None
-    teacher_pool_input_norm: bool = False
+    student_pool_type: str | None = None
+    teacher_pool_type: str | None = None
     teacher_resolution: Sequence[int] | None = None
+    invert_prob: float = 0.0
+    solarize_prob: float = 0.0
+    solarize_threshold: float = 0.5
 
     def __post_init__(self) -> None:
         if not 0 < self.mixup_alpha:
             raise ValueError("mixup_alpha must be positive")
         if not 0 <= self.mixup_prob <= 1:
             raise ValueError("mixup_prob must be in the range [0, 1]")
+        if not 0 <= self.invert_prob <= 1:
+            raise ValueError("invert_prob must be in the range [0, 1]")
+        if not 0 <= self.solarize_prob <= 1:
+            raise ValueError("solarize_prob must be in the range [0, 1]")
 
 
 class Distillation(Task):
@@ -119,18 +123,16 @@ class Distillation(Task):
         if not isinstance(self.teacher_backbone, ViT):
             raise ValueError("Teacher backbone must be a ViT")
 
-        student_dim = backbone.config.dim
-        teacher_dim = teacher_backbone.config.dim
+        student_dim = backbone.config.isotropic_output_dim
+        teacher_dim = teacher_backbone.config.isotropic_output_dim
         self.proj = nn.Linear(student_dim, teacher_dim) if student_dim != teacher_dim else nn.Identity()
         self.student_pool = self.backbone.create_head(
             out_dim=teacher_dim,
-            pool_type=cast(PoolType | None, self.config.student_pool_type),
-            input_norm=self.config.student_pool_input_norm,
+            pool_type=self.config.student_pool_type,
         )
         self.teacher_pool = self.teacher_backbone.create_head(
             out_dim=teacher_dim,
-            pool_type=cast(PoolType | None, self.config.teacher_pool_type),
-            input_norm=self.config.teacher_pool_input_norm,
+            pool_type=self.config.teacher_pool_type,
         )
 
         # Resize teacher input if necessary
@@ -145,19 +147,10 @@ class Distillation(Task):
         for p in self.teacher_backbone.parameters():
             p.requires_grad = False
 
-        self.random_noise = RandomNoise(
-            self.config.noise_prob,
-            self.config.uniform_noise_scale,
-            self.config.multiplicative_noise_scale,
-            self.config.salt_pepper_prob,
-            self.config.salt_pepper_pixel_prob,
-            self.config.noise_clip,
-        )
-
         self.save_hyperparameters()
 
     def load_teacher_checkpoint(self, teacher_checkpoint: Path) -> nn.Module:
-        state_dict = torch.load(teacher_checkpoint, weights_only=True)
+        state_dict = torch.load(teacher_checkpoint, weights_only=False)
         if "state_dict" in state_dict:
             state_dict = state_dict["state_dict"]
         if any(k.startswith("backbone.") for k in state_dict):
@@ -173,11 +166,6 @@ class Distillation(Task):
                 "distill_loss_cls": tm.MeanMetric(),
             }
         )
-
-        if has_layer_scale(self.backbone) and state.mode == Mode.TRAIN:
-            metrics["layer_scale_max"] = MaxLayerScale()
-            metrics["layer_scale_mean"] = MeanLayerScale()
-
         return metrics
 
     def forward(self, x: Tensor) -> Dict[str, Tensor]:
@@ -215,7 +203,15 @@ class Distillation(Task):
             )
 
             if self.training and self.config.use_noise:
-                x = self.random_noise.apply_batched(x)
+                x = apply_noise_batched(
+                    x,
+                    prob=self.config.noise_prob,
+                    uniform_scale=self.config.uniform_noise_scale,
+                    multiplicative_scale=self.config.multiplicative_noise_scale,
+                    salt_pepper_prob=self.config.salt_pepper_prob,
+                    salt_pepper_pixel_prob=self.config.salt_pepper_pixel_prob,
+                    clip=self.config.noise_clip,
+                )
 
             # apply mixup
             if self.training and self.config.mixup_prob > 0:
@@ -225,6 +221,15 @@ class Distillation(Task):
                 target_cls_token = mixup(target_cls_token, self.config.mixup_prob, self.config.mixup_alpha, mixup_seed)
             else:
                 mixup_seed = None
+
+            # invert input
+            if self.training and self.config.invert_prob > 0:
+                torch.cuda.nvtx.range_push("invert")
+                invert_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+                invert_(
+                    x, self.config.invert_prob, self.config.solarize_prob, self.config.solarize_threshold, invert_seed
+                )
+                torch.cuda.nvtx.range_pop()
 
         if self.training:
             x = x.clone()
@@ -309,7 +314,7 @@ class DistillationWithProbe(Distillation, ABC):
             log_train_metrics_on_epoch,
             parameter_groups,
         )
-        self.linear_probe = self.create_probe_head()
+        self.classification_head = self.create_probe_head()
         self.probe_key = probe_key
 
     @abstractmethod

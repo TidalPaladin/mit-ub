@@ -6,22 +6,16 @@ from mit_ub.model.backbone import ViTConfig
 from mit_ub.profile import entrypoint
 
 
-@pytest.mark.parametrize(
-    "device",
-    [
-        "cpu",
-        pytest.param("cuda", marks=pytest.mark.cuda),
-    ],
-)
+@pytest.mark.cuda
 @pytest.mark.parametrize("training", [False, True])
-def test_profile(tmp_path, capsys, device, training):
+def test_profile(tmp_path, capsys, training):
     config = ViTConfig(
         in_channels=3,
-        dim=128,
-        dim_feedforward=256,
         patch_size=(16, 16),
         depth=3,
-        nhead=128 // 16,
+        hidden_size=128,
+        ffn_hidden_size=256,
+        num_attention_heads=128 // 16,
     )
     config.save(tmp_path / "config.json")
 
@@ -36,7 +30,7 @@ def test_profile(tmp_path, capsys, device, training):
         "-c",
         "3",
         "-d",
-        device,
+        "cuda:0",
     ]
     if training:
         sys.argv.append("-t")

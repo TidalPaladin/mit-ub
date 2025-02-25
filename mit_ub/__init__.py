@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 import importlib.metadata
 
-from .model import AdaptiveViT, ViT
+from .model import ViT
 
 
 __version__ = importlib.metadata.version("mit-ub")
-__all__ = ["ViT", "AdaptiveViT", "__version__"]
+__all__ = ["ViT", "__version__"]

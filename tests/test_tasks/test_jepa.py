@@ -13,7 +13,6 @@ from torch.multiprocessing import spawn  # type: ignore
 from torch.testing import assert_close
 from torchvision.ops import sigmoid_focal_loss
 
-from mit_ub.model.layers import has_layer_scale
 from mit_ub.tasks.jepa import JEPA, EMAConfig, JEPAConfig, compute_siglip_loss, ring_exchange_all
 
 
@@ -43,7 +42,7 @@ def _run_exchange(rank: int, world_size: int):
         dist.destroy_process_group()
 
 
-@pytest.mark.ci_skip
+@pytest.mark.skip(reason="Prone to deadlocks")
 @pytest.mark.parametrize("world_size", [1, 2, 3, 4])
 def test_ring_exchange(world_size):
     spawn(_run_exchange, nprocs=world_size, args=(world_size,))
@@ -62,7 +61,7 @@ def test_compute_siglip_loss_local():
     loss = compute_siglip_loss(x1, x2, target, t, b, rank, world_size, eps=1e-12)
     x1 = F.normalize(x1, dim=-1, eps=1e-12)
     x2 = F.normalize(x2, dim=-1, eps=1e-12)
-    expected = sigmoid_focal_loss(torch.matmul(x1, x2.T) * t.exp() + b, target, reduction="mean", alpha=-1)
+    expected = F.binary_cross_entropy_with_logits(torch.matmul(x1, x2.T) * t.exp() + b, target, reduction="mean")
     assert_close(loss, expected)
 
 
@@ -88,7 +87,7 @@ def _compute_siglip_loss(rank: int, world_size: int, expected: float, B: int, D:
         dist.destroy_process_group()
 
 
-@pytest.mark.ci_skip
+@pytest.mark.skip(reason="Prone to deadlocks")
 @pytest.mark.parametrize("world_size", [1, 2, 3])
 def test_compute_siglip_loss(world_size):
     t = torch.tensor(1.0, requires_grad=True)
@@ -184,11 +183,7 @@ class TestJEPA:
             "macro_token_rms",
             "siglip_loss",
         }
-        train_keys = (
-            {"layer_scale_mean", "layer_scale_max", "ema_momentum", "siglip_t", "siglip_b"}
-            if has_layer_scale(task.backbone)
-            else {"ema_momentum", "siglip_t", "siglip_b"}
-        )
+        train_keys = {"ema_momentum", "siglip_t", "siglip_b"}
 
         if state.mode == Mode.TRAIN:
             assert set(metrics.keys()) == base_keys | train_keys
@@ -266,7 +261,7 @@ class TestJEPA:
         task.update_ema(0)
         expected = torch.tensor(expected)
         for param in task.teacher_backbone.parameters():
-            assert_close(param.data, expected.expand_as(param.data))
+            assert_close(param.data, expected.expand_as(param.data), check_device=False)
 
     def test_update_weight_decay(self, mocker, task):
         task.parameter_groups = [
