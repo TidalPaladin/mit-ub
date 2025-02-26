@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "mit-ub"
 description = ""
@@ -63,7 +67,7 @@ pythonPlatform = "Linux"
 version = { source = "scm" }
 
 [tool.setuptools.packages]
-find = { include = ["mit_ub", "csrc"] }
+find = { include = ["mit_ub", "mit_ub.*", "mit_ub/**/*", "csrc"] }
 
 [tool.pdm.dev-dependencies]
 test = [

@@ -3,7 +3,7 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 from pathlib import Path
 
 setup(
-    name="invert_cuda",
+    name="mit-ub",
     ext_modules=[
         CUDAExtension(
             name="noise_cuda",
