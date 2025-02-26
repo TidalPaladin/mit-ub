@@ -71,7 +71,6 @@ fit:
       classification_config:
         num_classes: 10
         pool_type: null
-        mlp_tower: false
 
       #checkpoint: ...
 
@@ -107,31 +106,24 @@ fit:
         context_ratio: 0.5
         target_ratio: 0.25
 
-        # How much to subsample the encoded context before passing to decoder.
-        # context_ratio = 0.5, context_subsample_ratio = 0.5 -> 1/4 of input given to decoder
-        # At context_subsample_ratio = 1.0, no subsampling of the context is done.
-        # For efficiency, set this such that the subsampled context length is a multiple of 16 (on tensor cores).
-        # This should encourage token redundancy on the part of the backbone.
-        context_subsample_ratio: 0.75
-
         # Scale of context sampling. 
         # At scale=2, tokens are guaranteed to appear in 2x2 contiguous groups.
         scale: 2
-
-        # Use a simple linear layer on the JEPA predictor output projection
-        mlp_tower: false
 
         # A SigLIP style predictor is used between the student context and teacher output.
         # When this weight is zero, there is a stop gradient applied to the SigLIP pathway.
         # Otherwise, the SigLIP predictor can influence backbone updates.
         siglip_weight: 1.0
-        siglip_gamma: null
         siglip_t: 10.0
         siglip_b: -10.0
         trainable_siglip_params: true
 
         # Augmentations
         invert_prob: 0.1
+        solarize_prob: 0.1
+        solarize_threshold: 0.5
+        posterize_prob: 0.1
+        posterize_bits: 6
 
       # Use SOAP optimizer and a reciplrocal square root learning rate schedule.
       # SOAP is empirically much faster than AdamW for this task.
