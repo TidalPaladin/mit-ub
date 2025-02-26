@@ -176,7 +176,6 @@ class ClassificationConfig:
         freeze_backbone: If True, the backbone is frozen during training.
         pool_type: Type of pooling to use.
         label_key: Key in the batch dictionary that contains the label.
-        mlp_tower: If True, use a MLP tower instead of a simple linear layer.
         use_noise: If True, apply noise to the input.
         uniform_noise_scale: Scale of the uniform noise to apply to the input.
         multiplicative_noise_scale: Scale of the multiplicative noise to apply to the input.
@@ -199,7 +198,6 @@ class ClassificationConfig:
     # TODO: jsonargparse can't handle the strenum it seems
     pool_type: str | None = None
     label_key: str = "label"
-    mlp_tower: bool = False
 
     # Noise
     use_noise: bool = True
@@ -295,7 +293,6 @@ class ClassificationTask(Task):
         self.classification_head = self.backbone.create_head(
             out_dim=self.config.num_classes if not self.config.is_binary else 1,
             pool_type=self.config.pool_type,
-            use_mlp=self.config.mlp_tower,
         )
         self.save_hyperparameters()
 

@@ -36,7 +36,6 @@ from ..data.posterize import posterize_
 from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, TokenSimilarity
 from ..metrics.distance import RMSPairwiseDistance, TokenRMSDistance
 from ..model import ViT, ViTConfig
-from ..model.helpers import compile_is_disabled
 from ..tokens import apply_mask, generate_non_overlapping_mask, mask_is_ragged
 from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
 
@@ -100,11 +99,6 @@ def ring_exchange_all(tensor: Tensor, rank: int, world_size: int) -> Iterator[Te
         yield tensor
 
 
-@torch.compile(
-    fullgraph=True,
-    mode="reduce-overhead",
-    disable=compile_is_disabled(),
-)
 def compute_siglip_logits(x1: Tensor, x2: Tensor, t: Tensor, b: Tensor) -> Tensor:
     r"""Compute the logits for the SigLIP loss.
 
@@ -207,8 +201,6 @@ class JEPAConfig:
         posterize_bits: Number of bits to posterize the input to.
         weight_decay_final: Final weight decay value. If set, the weight decay will be linearly
             annealed from the current value to this value over the course of training.
-        mlp_tower: If True, use a MLP tower on the JEPA predictor output instead of a simple linear layer.
-            Empirically it seems better to not use a MLP tower.
         loss_fn: Loss function to use for the JEPA loss. Can be ``smooth_l1`` or ``cosine``.
         siglip_weight: Weight of the SigLIP loss. If 0, SigLIP does not contribute to the backbone gradients.
         siglip_t: Temperature parameter for the SigLIP loss.
@@ -236,7 +228,6 @@ class JEPAConfig:
     posterize_prob: float = 0.0
     posterize_bits: int = 6
     weight_decay_final: float | None = None
-    mlp_tower: bool = False
     loss_fn: str = "smooth_l1"
 
     # SigLIP parameters
@@ -573,7 +564,7 @@ class JEPA(Task):
                 mixup_seed = None
 
             # invert input
-            if self.training and self.jepa_config.invert_prob > 0:
+            if self.training and (self.jepa_config.invert_prob > 0 or self.jepa_config.solarize_prob > 0):
                 torch.cuda.nvtx.range_push("invert")
                 invert_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
                 invert_(
