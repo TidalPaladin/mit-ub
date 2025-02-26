@@ -11,7 +11,7 @@ from deep_helpers.tasks import Task
 from lightning_utilities.core.rank_zero import rank_zero_warn
 from torch import Tensor
 
-from ..data import bce_mixup, cross_entropy_mixup, invert_, is_mixed, mixup
+from ..data import bce_mixup, cross_entropy_mixup, invert_, is_mixed, mixup, posterize_
 from ..data.noise import (
     DEFAULT_NOISE_PROB,
     MULTIPLICATIVE_NOISE_MAX,
@@ -187,6 +187,8 @@ class ClassificationConfig:
         invert_prob: Probability of inverting the input.
         solarize_prob: Probability of solarizing the input.
         solarize_threshold: Threshold for solarizing the input.
+        posterize_prob: Probability of posterizing the input.
+        posterize_bits: Number of bits to posterize the input to.
         pos_weight: Weight for the positive class in binary classification.
     """
 
@@ -209,6 +211,8 @@ class ClassificationConfig:
     invert_prob: float = 0.0
     solarize_prob: float = 0.0
     solarize_threshold: float = 0.5
+    posterize_prob: float = 0.0
+    posterize_bits: int = 6
     noise_clip: bool = True
 
     # Binary classification
@@ -225,6 +229,10 @@ class ClassificationConfig:
             raise ValueError("invert_prob must be in the range [0, 1]")
         if not 0 <= self.solarize_prob <= 1:
             raise ValueError("solarize_prob must be in the range [0, 1]")
+        if not 0 <= self.posterize_prob <= 1:
+            raise ValueError("posterize_prob must be in the range [0, 1]")
+        if self.posterize_bits < 1 or self.posterize_bits > 8:
+            raise ValueError("posterize_bits must be in the range [1, 8]")
 
     @property
     def is_binary(self) -> bool:
@@ -343,6 +351,17 @@ class ClassificationTask(Task):
             torch.cuda.nvtx.range_push("invert")
             invert_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
             invert_(x, self.config.invert_prob, self.config.solarize_prob, self.config.solarize_threshold, invert_seed)
+            torch.cuda.nvtx.range_pop()
+
+        if self.training and self.config.posterize_prob > 0:
+            torch.cuda.nvtx.range_push("posterize")
+            posterize_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+            posterize_(
+                x,
+                self.config.posterize_prob,
+                self.config.posterize_bits,
+                posterize_seed,
+            )
             torch.cuda.nvtx.range_pop()
 
         # save image of first batch

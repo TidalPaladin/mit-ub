@@ -153,8 +153,7 @@ def main(args: Namespace):
     image = image.unsqueeze_(0).expand(args.batch_size, -1, -1, -1)
 
     torch.manual_seed(args.seed)
-    if args.cuda:
-        image = image.cuda()
+    image = image.cuda()
 
     torch.cuda.synchronize()
     start = timeit.default_timer()
