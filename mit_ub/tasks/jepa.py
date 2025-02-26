@@ -32,6 +32,7 @@ from ..data.noise import (
     UNIFORM_NOISE_MIN,
     apply_noise_batched,
 )
+from ..data.posterize import posterize_
 from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, TokenSimilarity
 from ..metrics.distance import RMSPairwiseDistance, TokenRMSDistance
 from ..model import ViT, ViTConfig
@@ -202,6 +203,8 @@ class JEPAConfig:
         invert_prob: Probability of inverting the input.
         solarize_prob: Probability of solarizing the input.
         solarize_threshold: Threshold for solarizing the input.
+        posterize_prob: Probability of posterizing the input.
+        posterize_bits: Number of bits to posterize the input to.
         weight_decay_final: Final weight decay value. If set, the weight decay will be linearly
             annealed from the current value to this value over the course of training.
         mlp_tower: If True, use a MLP tower on the JEPA predictor output instead of a simple linear layer.
@@ -230,6 +233,8 @@ class JEPAConfig:
     invert_prob: float = 0.0
     solarize_prob: float = 0.0
     solarize_threshold: float = 0.5
+    posterize_prob: float = 0.0
+    posterize_bits: int = 6
     weight_decay_final: float | None = None
     mlp_tower: bool = False
     loss_fn: str = "smooth_l1"
@@ -261,6 +266,10 @@ class JEPAConfig:
             raise ValueError("invert_prob must be in the range [0, 1]")
         if not 0 <= self.solarize_prob <= 1:
             raise ValueError("solarize_prob must be in the range [0, 1]")
+        if not 0 <= self.posterize_prob <= 1:
+            raise ValueError("posterize_prob must be in the range [0, 1]")
+        if self.posterize_bits < 1 or self.posterize_bits > 8:
+            raise ValueError("posterize_bits must be in the range [1, 8]")
 
 
 class JEPA(Task):
@@ -573,6 +582,18 @@ class JEPA(Task):
                     self.jepa_config.solarize_prob,
                     self.jepa_config.solarize_threshold,
                     invert_seed,
+                )
+                torch.cuda.nvtx.range_pop()
+
+            # posterize input
+            if self.training and self.jepa_config.posterize_prob > 0:
+                torch.cuda.nvtx.range_push("posterize")
+                posterize_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+                posterize_(
+                    x,
+                    self.jepa_config.posterize_prob,
+                    self.jepa_config.posterize_bits,
+                    posterize_seed,
                 )
                 torch.cuda.nvtx.range_pop()
 
