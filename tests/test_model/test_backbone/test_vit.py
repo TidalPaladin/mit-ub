@@ -8,13 +8,14 @@ import pytest
 import torch
 import torch.nn as nn
 import yaml
+from deep_helpers.safetensors import convert_to_safetensors
 from safetensors.torch import save_file
 
 from mit_ub.model.backbone import ViT, ViTConfig
 
 
-@pytest.fixture
-def config():
+@pytest.fixture(params=[False, True])
+def config(request):
     config = ViTConfig(
         in_channels=3,
         patch_size=(16, 16),
@@ -22,12 +23,13 @@ def config():
         hidden_size=128,
         ffn_hidden_size=256,
         num_attention_heads=128 // 16,
+        fuse_qkv_params=request.param,
     )
     return config
 
 
-@pytest.fixture
-def config_vit():
+@pytest.fixture(params=[False, True])
+def config_vit(request):
     config = ViTConfig(
         in_channels=3,
         patch_size=(16, 16),
@@ -35,6 +37,7 @@ def config_vit():
         hidden_size=128,
         ffn_hidden_size=256,
         num_attention_heads=128 // 16,
+        fuse_qkv_params=request.param,
     )
     return config
 
@@ -205,6 +208,14 @@ class TestViT:
         return ViT(config)
 
     @pytest.fixture
+    def pytorch_checkpoint(self, tmp_path, checkpoint_model):
+        model = checkpoint_model
+        checkpoint_path = tmp_path / "checkpoint.ckpt"
+        state_dict = {k: v for k, v in model.state_dict().items() if isinstance(v, torch.Tensor)}
+        torch.save({"state_dict": state_dict}, checkpoint_path)
+        return checkpoint_path
+
+    @pytest.fixture
     def safetensors_checkpoint(self, tmp_path, checkpoint_model):
         model = checkpoint_model
         checkpoint_path = tmp_path / "checkpoint.safetensors"
@@ -242,5 +253,19 @@ class TestViT:
 
         # Load should update the irregular value back to normal
         loaded = ViT.load_tar(tar_checkpoint, strict=False)
+        for param in loaded.parameters():
+            assert not (param.data == 3.0).all()
+
+    def test_safetensors_convert(self, checkpoint_model: nn.Module, pytorch_checkpoint: Path):
+        # Fill with an irregular value
+        for param in checkpoint_model.parameters():
+            param.data.fill_(3.0)
+
+        # Convert to safetensors
+        safetensors_checkpoint = pytorch_checkpoint.parent / "checkpoint.safetensors"
+        convert_to_safetensors(pytorch_checkpoint, safetensors_checkpoint)
+
+        # Load should update the irregular value back to normal
+        loaded = cast(Any, checkpoint_model).load_safetensors(safetensors_checkpoint, strict=False)
         for param in loaded.parameters():
             assert not (param.data == 3.0).all()
