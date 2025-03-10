@@ -7,9 +7,29 @@ from mit_ub.tasks.classification import (
     ClassificationTask,
     DistillationWithClassification,
     JEPAWithClassification,
+    binary_loss,
+    categorical_loss,
 )
 from mit_ub.tasks.distillation import DistillationConfig
 from mit_ub.tasks.jepa import JEPAConfig
+
+
+@pytest.mark.cuda
+def test_binary_loss_all_unknown():
+    B = 10
+    logits = torch.randn(B, 10, device="cuda")
+    label = torch.full_like(logits, -1)
+    loss = binary_loss(logits, label)
+    assert loss == 0.0
+
+
+@pytest.mark.cuda
+def test_categorical_loss_all_unknown():
+    B = 10
+    logits = torch.randn(B, 10, device="cuda")
+    label = torch.full((B,), -1, device="cuda", dtype=torch.long)
+    loss = categorical_loss(logits, label)
+    assert loss == 0.0
 
 
 class TestClassificationTask:

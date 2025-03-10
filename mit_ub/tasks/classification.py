@@ -48,7 +48,8 @@ def categorical_loss(
         mixup_seed = 0
         mixup_prob = 0.0
     result = cross_entropy_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha)
-    result = result[result >= 0.0].mean()
+    mask = result >= 0.0
+    result = result[mask].mean() if mask.any() else logits.new_tensor(0.0)
     return result
 
 
@@ -67,7 +68,8 @@ def binary_loss(
         label = label.view(-1, 1)
     label = label.type_as(logits)
     result = bce_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha, pos_weight)
-    result = result[result >= 0.0].mean()
+    mask = result >= 0.0
+    result = result[mask].mean() if mask.any() else logits.new_tensor(0.0)
     return result
 
 
