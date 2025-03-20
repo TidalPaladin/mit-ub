@@ -256,6 +256,7 @@ class ClassificationTask(Task):
         log_train_metrics_interval: Interval (in steps) at which to log training metrics.
         log_train_metrics_on_epoch: If True, log training metrics at the end of each epoch.
         weight_decay_exemptions: Set of parameter names to exempt from weight decay.
+        other_configs: Dictionary mapping task names to their ClassificationConfig for auxiliary tasks.
     """
 
     def __init__(
@@ -272,6 +273,7 @@ class ClassificationTask(Task):
         log_train_metrics_interval: int = 1,
         log_train_metrics_on_epoch: bool = False,
         parameter_groups: List[Dict[str, Any]] = [],
+        other_configs: Dict[str, ClassificationConfig] = {},
     ):
         super().__init__(
             optimizer_init,
@@ -286,20 +288,41 @@ class ClassificationTask(Task):
             parameter_groups,
         )
         self.config = classification_config
+        self.other_configs = other_configs
 
         self.backbone = backbone_config.instantiate()
         if self.config.freeze_backbone:
             for param in self.backbone.parameters():
                 param.requires_grad = False
 
+        # Create main classification head
         self.classification_head = self.backbone.create_head(
             out_dim=self.config.num_classes if not self.config.is_binary else 1,
             pool_type=self.config.pool_type,
         )
+
+        # Create auxiliary classification heads
+        self.auxiliary_heads = nn.ModuleDict()
+        for name, config in self.other_configs.items():
+            self.auxiliary_heads[name] = self.backbone.create_head(
+                out_dim=config.num_classes if not config.is_binary else 1,
+                pool_type=config.pool_type,
+            )
+
         self.save_hyperparameters()
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
-        return create_metrics(self.config)
+        metrics = create_metrics(self.config)
+
+        # Add metrics for auxiliary tasks with prefixed names
+        for name, config in self.other_configs.items():
+            aux_metrics = create_metrics(config)
+            prefixed_metrics = {}
+            for metric_name, metric in aux_metrics.items():
+                prefixed_metrics[f"{name}_{metric_name}"] = metric
+            metrics.add_metrics(prefixed_metrics)  # type: ignore
+
+        return metrics
 
     def forward(self, x: Tensor) -> Dict[str, Tensor]:
         with torch.set_grad_enabled(not self.config.freeze_backbone):
@@ -312,8 +335,15 @@ class ClassificationTask(Task):
                 pred = self.backbone(x)
                 pred = grid_to_tokens(pred)
 
+        # Main classification head
         cls = self.classification_head(pred)
-        return {"pred": cls.view(-1, 1)}
+        output = {"pred": cls.view(-1, 1)}
+
+        # Auxiliary classification heads
+        for name, head in self.auxiliary_heads.items():
+            output[f"{name}_pred"] = head(pred).view(-1, 1)
+
+        return output
 
     def step(
         self, batch: Any, batch_idx: int, state: State, metrics: Optional[tm.MetricCollection] = None
@@ -391,7 +421,7 @@ class ClassificationTask(Task):
                 pred = self.backbone(x)
                 pred = grid_to_tokens(pred)
 
-        # step from features
+        # step from features for main task
         output = step_classification_from_features(
             pred,
             y,
@@ -401,7 +431,8 @@ class ClassificationTask(Task):
             metrics,
         )
 
-        output = {
+        # Initialize output dictionary
+        final_output = {
             "log": {
                 "loss_classification": output["loss"],
             },
@@ -410,7 +441,32 @@ class ClassificationTask(Task):
             "mixup_seed": mixup_seed,
         }
 
-        return output
+        # Process auxiliary tasks
+        total_loss = output["loss"]
+        for name, config in self.other_configs.items():
+            # Get auxiliary label
+            aux_y = batch[config.label_key].long()
+
+            # Step from features for auxiliary task
+            aux_output = step_classification_from_features(
+                pred,
+                aux_y,
+                self.auxiliary_heads[name],
+                config,
+                mixup_seed,
+                metrics,
+            )
+
+            # Add auxiliary outputs to final output
+            final_output["log"][f"loss_classification_{name}"] = aux_output["loss"]
+            final_output[f"pred_logits_{name}"] = aux_output["pred_logits"]
+            final_output[f"pred_{name}"] = aux_output["pred"]
+
+            # Add to total loss
+            total_loss = total_loss + aux_output["loss"]
+
+        final_output["log"]["loss_total"] = total_loss
+        return final_output
 
 
 class JEPAWithClassification(JEPAWithProbe):
