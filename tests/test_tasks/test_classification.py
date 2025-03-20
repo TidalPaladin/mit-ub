@@ -43,6 +43,15 @@ class TestClassificationTask:
         config = ClassificationConfig(num_classes=2, pool_type=None)
         return ClassificationTask(backbone, classification_config=config, optimizer_init=optimizer_init)
 
+    @pytest.fixture
+    def task_with_aux(self, optimizer_init, backbone):
+        config = ClassificationConfig(num_classes=10, pool_type=None, label_key="label")
+        aux_config = ClassificationConfig(num_classes=10, pool_type=None, label_key="label")
+        other_configs = {"aux": aux_config}
+        return ClassificationTask(
+            backbone, classification_config=config, optimizer_init=optimizer_init, other_configs=other_configs
+        )
+
     @pytest.mark.parametrize(
         "state",
         [
@@ -71,11 +80,30 @@ class TestClassificationTask:
         base_keys = {"bce_loss", "acc", "macro_acc", "auroc"}
         assert set(metrics.keys()) == base_keys
 
+    @pytest.mark.parametrize(
+        "state",
+        [
+            State(Mode.TRAIN),
+            State(Mode.VAL),
+            State(Mode.VAL, sanity_checking=True),
+            State(Mode.TEST),
+        ],
+    )
+    def test_create_metrics_with_aux(self, task_with_aux, state):
+        metrics = task_with_aux.create_metrics(state)
+        base_keys = {"ce_loss", "acc", "macro_acc"}
+        aux_keys = {"aux_ce_loss", "aux_acc", "aux_macro_acc"}
+        assert set(metrics.keys()) == base_keys | aux_keys
+
     def test_fit(self, task, cifar10_datamodule, gpu_trainer):
         gpu_trainer.fit(task, datamodule=cifar10_datamodule)
 
     def test_fit_binary(self, binary_task, cifar10_datamodule_binary, gpu_trainer):
         gpu_trainer.fit(binary_task, datamodule=cifar10_datamodule_binary)
+
+    @pytest.mark.cuda
+    def test_fit_with_aux(self, task_with_aux, cifar10_datamodule, gpu_trainer):
+        gpu_trainer.fit(task_with_aux, datamodule=cifar10_datamodule)
 
     @pytest.fixture
     def task_convnext(self, optimizer_init, convnext_dummy):
