@@ -100,7 +100,7 @@ def update_metrics(
     for name, metric in metrics.items():
         if name.endswith("_loss") and name != "jepa_loss":
             metric.update(loss)
-        elif name in metric_names:
+        elif any(name.endswith(metric_name) for metric_name in metric_names):
             metric.update(_pred.view_as(_y), _y)
 
 
@@ -421,6 +421,14 @@ class ClassificationTask(Task):
                 pred = self.backbone(x)
                 pred = grid_to_tokens(pred)
 
+        # separate metrics for primary and auxiliary tasks
+        auxiliary_metrics = {name: {} for name in self.other_configs.keys()}
+        for name, config in self.other_configs.items():
+            auxiliary_metrics[name] = {k: v for k, v in metrics.items() if k.startswith(f"{name}_")}
+        primary_metrics = {
+            k: v for k, v in metrics.items() if not any(k.startswith(f"{name}_") for name in self.other_configs.keys())
+        }
+
         # step from features for main task
         output = step_classification_from_features(
             pred,
@@ -428,7 +436,7 @@ class ClassificationTask(Task):
             self.classification_head,
             self.config,
             mixup_seed,
-            metrics,
+            primary_metrics,
         )
 
         # Initialize output dictionary
@@ -454,7 +462,7 @@ class ClassificationTask(Task):
                 self.auxiliary_heads[name],
                 config,
                 mixup_seed,
-                metrics,
+                auxiliary_metrics[name],
             )
 
             # Add auxiliary outputs to final output
