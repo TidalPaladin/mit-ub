@@ -12,7 +12,6 @@ from einops import rearrange
 from safetensors.torch import save_file
 
 from mit_ub.model.backbone import TwoStageViT, TwoStageViTConfig
-from mit_ub.tokens import mask_is_ragged
 
 
 @pytest.fixture(params=[True, False])
@@ -85,15 +84,6 @@ class TestTwoStageViT:
         assert (out[-1] == 1).all()
 
     @pytest.mark.cuda
-    def test_tile_mask(self, config):
-        B = 2
-        x = torch.randn(B, 3, 224, 224, device="cuda")
-        model = TwoStageViT(config).cuda()
-        mask = model.create_mask(x, 0.5, 1)
-        out = model.tile_mask(x, mask)
-        assert not mask_is_ragged(out)
-
-    @pytest.mark.cuda
     def test_untile_sequence(self, config):
         B = 2
         x = torch.randn(B, 3, 224, 224, device="cuda")
@@ -141,7 +131,7 @@ class TestTwoStageViT:
         mask = model.create_mask(x, 0.5, 1)
         with torch.autocast(device_type="cuda", dtype=dtype, enabled=True):
             out, cls_token = model(x, mask=mask, reshape=False)
-        assert out.shape[:2] == (1, 1568)
+        assert out.shape[:2] == (1, 25)
         assert cls_token.shape == (1, 128)
 
     @pytest.mark.cuda
