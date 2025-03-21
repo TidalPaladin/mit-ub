@@ -10,8 +10,9 @@ import torch.nn as nn
 import yaml
 from einops import rearrange
 from safetensors.torch import save_file
+from torch.testing import assert_close
 
-from mit_ub.model.backbone import TwoStageViT, TwoStageViTConfig
+from mit_ub.model.backbone import TwoStageViT, TwoStageViTConfig, ViT
 
 
 @pytest.fixture(params=[True, False])
@@ -101,6 +102,26 @@ class TestTwoStageViT:
         assert (out[1, -Hp * Wp :] == 1.0).all()
         expected_len = Hp * Hp * Hl * Wl
         assert out.shape == (B, expected_len, 3)
+
+    @pytest.mark.cuda
+    def test_forward_stage_one(self, config):
+        x = torch.randn(2, 3, 224, 224, device="cuda")
+        model = TwoStageViT(config).cuda()
+        model.eval()
+
+        Hp, Wp = config.first_stage_size
+        x2 = x[:, :, :Hp, :Wp]
+        x3 = x[:, :, -Hp:, -Wp:]
+
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+            _, expected_cls_token2 = ViT.forward(model, x2, reshape=False)
+            _, expected_cls_token3 = ViT.forward(model, x3, reshape=False)
+
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+            out, cls_tokens = model.forward_stage_one(x)
+
+        assert_close(cls_tokens[:, 0, :], expected_cls_token2)
+        assert_close(cls_tokens[:, -1, :], expected_cls_token3)
 
     @pytest.mark.cuda
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

@@ -35,7 +35,7 @@ from ..data.noise import (
 from ..data.posterize import posterize_
 from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, TokenSimilarity
 from ..metrics.distance import RMSPairwiseDistance, TokenRMSDistance
-from ..model import TwoStageViTConfig, ViT, ViTConfig
+from ..model import TwoStageViT, TwoStageViTConfig, ViT, ViTConfig
 from ..tokens import apply_mask, generate_non_overlapping_mask, mask_is_ragged
 from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
 
@@ -389,8 +389,12 @@ class JEPA(Task):
 
         # Prepare positional encoding for target queries
         with torch.no_grad():
-            tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
-            query = self.backbone.stem.pos_enc(tokenized_size)
+            if isinstance(self.backbone, TwoStageViT):
+                tokenized_size = self.backbone.stage_two_tokenized_size(cast(Any, x.shape[2:]))
+                query = self.backbone.stage_two_pos_enc(tokenized_size)
+            else:
+                tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
+                query = self.backbone.stem.pos_enc(tokenized_size)
         query = self.pos_enc_proj(query).expand(target_mask.shape[0], -1, -1)
         query = apply_mask(target_mask, query, fill_value=None)
 

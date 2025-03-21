@@ -3,6 +3,7 @@ from typing import Any, ClassVar, Self, Sequence, Tuple, Type, cast
 
 import torch
 import torch.nn as nn
+import transformer_engine.pytorch as te
 from einops import rearrange
 from torch import Tensor
 
@@ -37,7 +38,11 @@ class TwoStageViT(ViT):
             param.requires_grad = False
 
         # Stage two
-        self.stage_two_pos_enc_cls = RelativeFactorizedPosition(2, self.config.hidden_size)
+        self.stage_two_cls_token = nn.Parameter(torch.empty(self.config.hidden_size))
+        nn.init.trunc_normal_(self.stage_two_cls_token, std=0.02)
+        self.stage_two_pos_enc = RelativeFactorizedPosition(2, self.config.hidden_size)
+        self.stage_two_norm = te.LayerNorm(self.config.hidden_size)
+        self.stage_two_proj = te.LayerNormLinear(self.config.hidden_size, self.config.hidden_size)
         self.stage_two_blocks = nn.ModuleList([self.create_encoder_layer(i) for i in range(config.second_stage_depth)])
 
     @property
@@ -79,7 +84,7 @@ class TwoStageViT(ViT):
         return rearrange(x, "(b l) ... d -> b (l ...) d", b=batch_size)
 
     @torch.inference_mode()
-    def _forward_stage_one(
+    def forward_stage_one(
         self,
         x: Tensor,
         mask: Tensor | None = None,
@@ -106,25 +111,26 @@ class TwoStageViT(ViT):
 
         # Stage one
         if self.training:
-            x, cls_tokens = self._forward_stage_one(x)
+            x, cls_tokens = self.forward_stage_one(x)
             # Must clone for autograd because of inference_mode()
             x = x.clone()
             cls_tokens = cls_tokens.clone()
         else:
-            x, cls_tokens = self._forward_stage_one(x)
+            x, cls_tokens = self.forward_stage_one(x)
 
         if mask is not None:
             cls_tokens = apply_mask(mask, cls_tokens)
 
-        # Create stage two CLS token as average of stage one CLS tokens
-        stage_two_cls_token = cls_tokens.mean(dim=1, keepdim=True)
+        # Project stage one outputs
+        cls_tokens = self.stage_two_proj(cls_tokens)
 
         # Create query of stage two CLS token and stage one CLS tokens
+        stage_two_cls_token = self.stage_two_cls_token.view(1, 1, -1).expand(B, -1, -1)
         Ht, Wt = self.stage_two_tokenized_size(cast(Any, original_size))
-        pos_enc_cls = self.stage_two_pos_enc_cls((Ht, Wt))
+        pos_enc_cls = self.stage_two_pos_enc((Ht, Wt))
         if mask is not None:
             pos_enc_cls = apply_mask(mask, pos_enc_cls.expand(B, -1, -1))
-        cls_tokens = cls_tokens + pos_enc_cls
+        cls_tokens = self.stage_two_norm(cls_tokens + pos_enc_cls)
         query = torch.cat([stage_two_cls_token, cls_tokens], dim=1)
 
         # Run stage two transformer blocks with optional cross attention to stage one features
