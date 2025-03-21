@@ -8,9 +8,11 @@ import pytest
 import torch
 import torch.nn as nn
 import yaml
+from einops import rearrange
 from safetensors.torch import save_file
 
 from mit_ub.model.backbone import TwoStageViT, TwoStageViTConfig
+from mit_ub.tokens import mask_is_ragged
 
 
 @pytest.fixture(params=[True, False])
@@ -69,6 +71,48 @@ class TestTwoStageViTConfig:
 class TestTwoStageViT:
 
     @pytest.mark.cuda
+    def test_tile_image(self, config):
+        B = 2
+        x = torch.randn(B, 3, 224, 224, device="cuda")
+        Hp, Wp = config.first_stage_size
+        x[0, ..., :Hp, :Wp] = 0
+        x[1, ..., -Hp:, -Wp:] = 1
+        model = TwoStageViT(config).cuda()
+        out = model.tile_image(x)
+        L = out.shape[0] // B
+        assert (out[0] == 0).all()
+        assert (out[L] != 0).any()
+        assert (out[-1] == 1).all()
+
+    @pytest.mark.cuda
+    def test_tile_mask(self, config):
+        B = 2
+        x = torch.randn(B, 3, 224, 224, device="cuda")
+        model = TwoStageViT(config).cuda()
+        mask = model.create_mask(x, 0.5, 1)
+        out = model.tile_mask(x, mask)
+        assert not mask_is_ragged(out)
+
+    @pytest.mark.cuda
+    def test_untile_sequence(self, config):
+        B = 2
+        x = torch.randn(B, 3, 224, 224, device="cuda")
+        model = TwoStageViT(config).cuda()
+        Hp, Wp = config.first_stage_size
+        Hl, Wl = model.stage_two_tokenized_size(x.shape[-2:])
+
+        x[0, ..., :Hp, :Wp] = 0
+        x[1, ..., -Hp:, -Wp:] = 1
+        x = model.tile_image(x)
+        x = rearrange(x, "b c h w -> b (h w) c")
+        out = model.untile_sequence(x, batch_size=B)
+
+        assert (out[0, : Hp * Wp] == 0.0).all()
+        assert (out[1, -Hp * Wp :] == 1.0).all()
+        expected_len = Hp * Hp * Hl * Wl
+        assert out.shape == (B, expected_len, 3)
+
+    @pytest.mark.cuda
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
     def test_forward(self, config, dtype):
         x = torch.randn(1, 3, 224, 224, device="cuda")
@@ -76,6 +120,28 @@ class TestTwoStageViT:
         with torch.autocast(device_type="cuda", dtype=dtype, enabled=True):
             out, cls_token = model(x)
         assert out.shape[:2] == (1, 128)
+        assert cls_token.shape == (1, 128)
+
+    @pytest.mark.cuda
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_forward_batch_independent(self, config, dtype):
+        x = torch.randn(2, 3, 224, 224, device="cuda")
+        x[0] = float("nan")
+        model = TwoStageViT(config).cuda()
+        with torch.autocast(device_type="cuda", dtype=dtype, enabled=True):
+            out, cls_token = model(x)
+        assert not out[1].isnan().any()
+        assert not cls_token[1].isnan().any()
+
+    @pytest.mark.cuda
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_forward_masked(self, config, dtype):
+        x = torch.randn(1, 3, 224, 224, device="cuda")
+        model = TwoStageViT(config).cuda()
+        mask = model.create_mask(x, 0.5, 1)
+        with torch.autocast(device_type="cuda", dtype=dtype, enabled=True):
+            out, cls_token = model(x, mask=mask, reshape=False)
+        assert out.shape[:2] == (1, 1568)
         assert cls_token.shape == (1, 128)
 
     @pytest.mark.cuda

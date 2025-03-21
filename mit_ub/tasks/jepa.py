@@ -35,7 +35,7 @@ from ..data.noise import (
 from ..data.posterize import posterize_
 from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, TokenSimilarity
 from ..metrics.distance import RMSPairwiseDistance, TokenRMSDistance
-from ..model import ViT, ViTConfig
+from ..model import TwoStageViTConfig, ViT, ViTConfig
 from ..tokens import apply_mask, generate_non_overlapping_mask, mask_is_ragged
 from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
 
@@ -290,7 +290,7 @@ class JEPA(Task):
 
     def __init__(
         self,
-        backbone_config: ViTConfig,
+        backbone_config: ViTConfig | TwoStageViTConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
@@ -692,7 +692,7 @@ class JEPA(Task):
 class JEPAWithProbe(JEPA, ABC):
     def __init__(
         self,
-        backbone_config: ViTConfig,
+        backbone_config: ViTConfig | TwoStageViTConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
         probe_key: str = "target_cls_token",
         optimizer_init: Dict[str, Any] = {},

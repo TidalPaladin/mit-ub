@@ -23,7 +23,7 @@ from ..data.noise import (
     UNIFORM_NOISE_MIN,
     apply_noise_batched,
 )
-from ..model import AnyModelConfig, ViT, ViTConfig
+from ..model import AnyModelConfig, TwoStageViTConfig, ViT, ViTConfig
 from ..model.helpers import grid_to_tokens
 from .distillation import DistillationConfig, DistillationWithProbe
 from .jepa import JEPAConfig, JEPAWithProbe, save_first_batch
@@ -480,7 +480,7 @@ class ClassificationTask(Task):
 class JEPAWithClassification(JEPAWithProbe):
     def __init__(
         self,
-        backbone_config: ViTConfig,
+        backbone_config: ViTConfig | TwoStageViTConfig,
         classification_config: ClassificationConfig,
         jepa_config: JEPAConfig = JEPAConfig(),
         probe_key: str = "target_cls_token",

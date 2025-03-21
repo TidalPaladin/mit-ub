@@ -6,7 +6,7 @@ import torch.nn as nn
 from einops import rearrange
 from torch import Tensor
 
-from ...tokens import create_mask
+from ...tokens import apply_mask, create_mask
 from ..layers import RelativeFactorizedPosition
 from .convnext import tokens_to_grid
 from .vit import ViT, ViTConfig
@@ -37,7 +37,11 @@ class TwoStageViT(ViT):
             param.requires_grad = False
 
         # Stage two
-        self.stage_two_pos_enc = RelativeFactorizedPosition(2, self.config.hidden_size)
+        self.stage_two_pos_enc_cls = RelativeFactorizedPosition(2, self.config.hidden_size)
+        if self.config.second_stage_cross_attention:
+            self.stage_two_pos_enc = RelativeFactorizedPosition(2, self.config.hidden_size)
+        else:
+            self.register_module("stage_two_pos_enc", None)
         self.stage_two_blocks = nn.ModuleList(
             [
                 (
@@ -66,7 +70,7 @@ class TwoStageViT(ViT):
         scale: int,
     ) -> Tensor:
         batch_size = input.shape[0]
-        Ht, Wt = self.stage_two_tokenized_size(input.shape[-2:])
+        Hl, Wl = self.stage_two_tokenized_size(input.shape[-2:])
         device = input.device
         original_size = self.config.first_stage_size
         tokenized_size = self.stem.tokenized_size(cast(Any, original_size))
@@ -75,13 +79,27 @@ class TwoStageViT(ViT):
         mask = create_mask(
             tokenized_size,
             mask_ratio=1 - unmasked_ratio,
-            batch_size=batch_size * Ht * Wt,
+            batch_size=batch_size * Hl * Wl,
             scale=scale,
             device=device,
         )
 
-        mask = rearrange(mask, "(b ht wt) l -> b (ht wt l)", ht=Ht, wt=Wt)
+        mask = rearrange(mask, "(b hl wl) l -> b (hl wl l)", hl=Hl, wl=Wl)
         return mask
+
+    def tile_image(self, x: Tensor) -> Tensor:
+        Ht, Wt = self.config.first_stage_size
+        y = rearrange(x, "b c (hl ht) (wl wt) -> (b hl wl) c ht wt", ht=Ht, wt=Wt)
+        assert y.shape[-2:] == (Ht, Wt)
+        return y
+
+    def tile_mask(self, x: Tensor, mask: Tensor) -> Tensor:
+        Ht1, Wt1 = self.stem.tokenized_size(cast(Any, self.config.first_stage_size))
+        Ht2, Wt2 = self.stage_two_tokenized_size(x.shape[-2:])
+        return rearrange(mask, "b (ht2 wt2 ht1 wt1) -> (b ht2 wt2) (ht1 wt1)", ht1=Ht1, wt1=Wt1, ht2=Ht2, wt2=Wt2)
+
+    def untile_sequence(self, x: Tensor, batch_size: int) -> Tensor:
+        return rearrange(x, "(b l) ... d -> b (l ...) d", b=batch_size)
 
     @torch.inference_mode()
     def _forward_stage_one(
@@ -90,12 +108,13 @@ class TwoStageViT(ViT):
         mask: Tensor | None = None,
         mask_fill_value: float | Tensor | None = None,
     ) -> Tuple[Tensor, Tensor]:
-        Hp, Wp = self.config.first_stage_size
-        Ht, Wt = self.stage_two_tokenized_size(x.shape[-2:])
-        x = rearrange(x, "b c (ht hp) (wt wp) -> (b ht wt) c hp wp", hp=Hp, wp=Wp, ht=Ht, wt=Wt)
+        B = x.shape[0]
+        if mask is not None:
+            mask = self.tile_mask(x, mask)
+        x = self.tile_image(x)
         x, cls_token = super().forward(x, reshape=False, mask=mask, mask_fill_value=mask_fill_value)
-        x = rearrange(x, "(b ht wt) l d -> b (l ht wt) d", ht=Ht, wt=Wt)
-        cls_token = rearrange(cls_token, "(b ht wt) d -> b (ht wt) d", ht=Ht, wt=Wt)
+        x = self.untile_sequence(x, B).contiguous()
+        cls_token = self.untile_sequence(cls_token, B).contiguous()
         return x, cls_token
 
     def forward(
@@ -122,9 +141,18 @@ class TwoStageViT(ViT):
 
         # Create query of stage two CLS token and stage one CLS tokens
         Ht, Wt = self.stage_two_tokenized_size(cast(Any, original_size))
-        pos_enc = self.stage_two_pos_enc((Ht, Wt))
-        cls_tokens = cls_tokens + pos_enc
+        pos_enc_cls = self.stage_two_pos_enc_cls((Ht, Wt))
+        cls_tokens = cls_tokens + pos_enc_cls
         query = torch.cat([stage_two_cls_token, cls_tokens], dim=1)
+
+        # When using cross attention, we need to add positional encodings to stage one features
+        if self.config.second_stage_cross_attention:
+            assert self.stage_two_pos_enc is not None
+            Hh, Wh = self.stem.tokenized_size(cast(Any, original_size))
+            pos_enc = self.stage_two_pos_enc((Hh, Wh)).expand(B, -1, -1)
+            if mask is not None:
+                pos_enc = apply_mask(mask, pos_enc)
+            x = x + pos_enc
 
         # Run stage two transformer blocks with optional cross attention to stage one features
         encoder_output = x if self.config.second_stage_cross_attention else None
