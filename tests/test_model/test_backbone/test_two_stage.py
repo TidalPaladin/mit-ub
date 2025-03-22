@@ -373,6 +373,20 @@ class TestWindowedViT:
             assert param.grad is not None or not param.requires_grad, f"{name} has no gradient"
             assert param.grad is None or not param.grad.isnan().any(), f"{name} has nan gradient"
 
+    @pytest.mark.cuda
+    @pytest.mark.parametrize("checkpoint", [False, True])
+    def test_backward_end_to_end(self, windowed_config, checkpoint):
+        x = torch.randn(1, 3, 224, 224, device="cuda", requires_grad=True)
+        config = replace(windowed_config, checkpoint=checkpoint, freeze_first_stage=False)
+        model = WindowedViT(config).cuda()
+        assert all(p.requires_grad for p in model.parameters())
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            out, cls_token = model(x)
+        (out.sum() + cls_token.sum()).backward()
+        for name, param in model.named_parameters():
+            assert param.grad is not None, f"{name} has no gradient"
+            assert not param.grad.isnan().any(), f"{name} has nan gradient"
+
     @pytest.fixture
     def checkpoint_model(self, windowed_config):
         return WindowedViT(windowed_config)

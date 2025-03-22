@@ -172,6 +172,7 @@ class WindowedViT(ViT):
         for param in self.parameters():
             param.requires_grad = not config.freeze_first_stage
         self.global_pos_enc = RelativeFactorizedPosition(2, self.config.hidden_size)
+        self.cls_token_pos_enc = RelativeFactorizedPosition(2, self.config.hidden_size)
         self.global_blocks = nn.ModuleList([self.create_encoder_layer(i) for i in range(config.global_depth)])
 
     @property
@@ -229,21 +230,14 @@ class WindowedViT(ViT):
         mask: Tensor | None = None,
         mask_fill_value: float | Tensor | None = None,
     ) -> Tuple[Tensor, Tensor]:
-        use_inference_mode = not self.training or self.config.freeze_first_stage
-        with torch.inference_mode(mode=use_inference_mode):
-            B = x.shape[0]
-            if mask is not None:
-                mask = self.tile_mask(mask)
-            x = self.tile_image(x)
-            x, cls_token = super().forward(x, reshape=False, mask=mask, mask_fill_value=mask_fill_value)
-            x = self.untile_sequence(x, B).contiguous()
-            cls_token = self.untile_sequence(cls_token, B).contiguous()
-
-        if self.training:
-            x = x.clone()
-            cls_token = cls_token.clone()
-
-        return x, cls_token
+        B = x.shape[0]
+        if mask is not None:
+            mask = self.tile_mask(mask)
+        x = self.tile_image(x)
+        x, cls_tokens = super().forward(x, reshape=False, mask=mask, mask_fill_value=mask_fill_value)
+        x = self.untile_sequence(x, B).contiguous()
+        cls_tokens = self.untile_sequence(cls_tokens, B).contiguous()
+        return x, cls_tokens
 
     def forward(
         self,
@@ -258,8 +252,9 @@ class WindowedViT(ViT):
         # Run on windows
         x, cls_tokens = self.forward_windowed(x, mask=mask, mask_fill_value=mask_fill_value)
 
-        # Global CLS token is mean of window CLS tokens
-        cls_token = cls_tokens.mean(dim=1)
+        # Apply global positional encoding to CLS tokens
+        pos_enc = self.cls_token_pos_enc(self.window_grid_size(original_size))
+        cls_tokens = cls_tokens + pos_enc
 
         # Apply global positional encoding to features
         pos_enc = self.global_pos_enc(tokenized_size)
@@ -268,15 +263,16 @@ class WindowedViT(ViT):
         x = x + pos_enc
 
         # Combine CLS token and features
-        x = torch.cat([cls_token.unsqueeze(1), x], dim=1)
+        x = torch.cat([cls_tokens, x], dim=1)
 
         # Run global transformer blocks with optional cross attention to stage one features
         for block in self.global_blocks:
             x = block(x, checkpoint_core_attention=self.config.checkpoint)
 
         # Extract CLS token
-        cls_token = x[:, 0, :].contiguous()
-        x = x[:, 1:, :].contiguous()
+        num_cls_tokens = cls_tokens.shape[1]
+        cls_token = x[:, :num_cls_tokens, :].mean(dim=1)
+        x = x[:, num_cls_tokens:, :].contiguous()
 
         # Reshape to original grid if requested
         if reshape and mask is not None and mask_fill_value is None:
