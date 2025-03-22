@@ -1,6 +1,17 @@
 import torch
 
-from .backbone import AnyModelConfig, ConvNext2d, ConvNextConfig, TwoStageViT, TwoStageViTConfig, ViT, ViTConfig
+from .backbone import (
+    AnyModelConfig,
+    AnyViTConfig,
+    ConvNext2d,
+    ConvNextConfig,
+    TwoStageViT,
+    TwoStageViTConfig,
+    ViT,
+    ViTConfig,
+    WindowedViT,
+    WindowedViTConfig,
+)
 from .config import ModelConfig, SupportsSafeTensors
 from .helpers import compile_is_disabled
 
@@ -19,4 +30,7 @@ __all__ = [
     "SupportsSafeTensors",
     "TwoStageViT",
     "TwoStageViTConfig",
+    "WindowedViT",
+    "WindowedViTConfig",
+    "AnyViTConfig",
 ]
