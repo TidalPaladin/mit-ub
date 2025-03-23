@@ -16,8 +16,8 @@ from torch.testing import assert_close
 from mit_ub.model.backbone import TwoStageViT, TwoStageViTConfig, ViT, WindowedViT, WindowedViTConfig
 
 
-@pytest.fixture(params=[True, False])
-def config(request):
+@pytest.fixture
+def config():
     config = TwoStageViTConfig(
         in_channels=3,
         patch_size=(4, 4),
@@ -26,7 +26,6 @@ def config(request):
         ffn_hidden_size=256,
         num_attention_heads=128 // 16,
         first_stage_size=(32, 32),
-        second_stage_cross_attention=request.param,
     )
     return config
 
