@@ -5,7 +5,7 @@
 groups = ["default", "quality", "test", "train"]
 strategy = ["inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:ce7e8c746a45bd8435fab8bc2234c21dc62be15a358d60284e5f67d19ced6ac6"
+content_hash = "sha256:d441e4cbed2ba58431a9a26c236f3041154ed3d50b6a57f6dade20d75d191aa1"
 
 [[metadata.targets]]
 requires_python = ">=3.11,<3.13"
@@ -477,6 +477,20 @@ dependencies = [
 files = [
     {file = "flake8-7.1.2-py2.py3-none-any.whl", hash = "sha256:1cbc62e65536f65e6d754dfe6f1bada7f5cf392d6f5db3c2b85892466c3e7c1a"},
     {file = "flake8-7.1.2.tar.gz", hash = "sha256:c586ffd0b41540951ae41af572e6790dbd49fc12b3aa2541685d253d9bd504bd"},
+]
+
+[[package]]
+name = "flash-attn"
+version = "2.6.3"
+requires_python = ">=3.8"
+summary = "Flash Attention: Fast and Memory-Efficient Exact Attention"
+groups = ["default"]
+dependencies = [
+    "einops",
+    "torch",
+]
+files = [
+    {file = "flash_attn-2.6.3.tar.gz", hash = "sha256:5bfae9500ad8e7d2937ebccb4906f3bc464d1bf66eedd0e4adabd520811c7b52"},
 ]
 
 [[package]]
