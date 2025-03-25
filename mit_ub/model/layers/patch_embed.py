@@ -9,6 +9,7 @@ import transformer_engine.pytorch as te
 from einops import rearrange
 from torch import Tensor
 
+from ...tokens import apply_mask
 from ..helpers import to_tuple
 from .pos_enc import RelativeFactorizedPosition
 
@@ -77,7 +78,12 @@ class PatchEmbed2d(nn.Module):
         y = rearrange(y, "b c h w -> b (h w) c")
         return self.norm(y + pos)
 
-    def pack(self, x: List[Tensor], patch_size: List[Tuple[int, int]] | None = None) -> Tuple[Tensor, Tensor]:
+    def pack(
+        self,
+        x: List[Tensor],
+        patch_size: List[Tuple[int, int]] | None = None,
+        mask: List[Tensor] | None = None,
+    ) -> Tuple[Tensor, Tensor]:
         r"""Runs patch embedding and packs the sequences into a single tensor with minimal padding.
         This follows NaViT's method.
         """
@@ -89,9 +95,13 @@ class PatchEmbed2d(nn.Module):
             raise ValueError(f"patch_size must be the same length as x, got {len(patch_size)} and {len(x)}")
         if not all(xi.ndim == 3 for xi in x):
             raise ValueError(f"x must be a list of 3D tensors, got {[xi.shape for xi in x]}")
+        if mask is not None and len(mask) != len(x):
+            raise ValueError(f"mask must be the same length as x, got {len(mask)} and {len(x)}")
 
-        # Run patch embedding, extract sequence lengths, pack into single sequence
+        # Run patch embedding, apply mask, extract sequence lengths, pack into single sequence
         packed = [self.forward(xi[None], pi) for xi, pi in zip(x, patch_size)]
+        if mask is not None:
+            packed = [apply_mask(m, t) for t, m in zip(packed, mask)]
         seq_lens = (
             torch.tensor([0] + [t.shape[1] for t in packed], device=packed[0].device).cumsum(dim=0).to(torch.int32)
         )
