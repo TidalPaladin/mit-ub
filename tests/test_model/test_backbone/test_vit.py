@@ -26,19 +26,6 @@ def config():
     return config
 
 
-@pytest.fixture
-def config_vit():
-    config = ViTConfig(
-        in_channels=3,
-        patch_size=(16, 16),
-        depth=3,
-        hidden_size=128,
-        ffn_hidden_size=256,
-        num_attention_heads=128 // 16,
-    )
-    return config
-
-
 class TestViTConfig:
 
     @pytest.mark.parametrize("ext", [".json", ".yaml", ".yml"])
