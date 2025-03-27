@@ -1,7 +1,7 @@
 from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -422,12 +422,19 @@ class ClassificationTask(Task):
                 pred = grid_to_tokens(pred)
 
         # separate metrics for primary and auxiliary tasks
-        auxiliary_metrics = {name: {} for name in self.other_configs.keys()}
+        auxiliary_metrics = cast(Dict[str, Dict[str, tm.Metric]], {name: {} for name in self.other_configs.keys()})
         for name, config in self.other_configs.items():
-            auxiliary_metrics[name] = {k: v for k, v in metrics.items() if k.startswith(f"{name}_")}
-        primary_metrics = {
-            k: v for k, v in metrics.items() if not any(k.startswith(f"{name}_") for name in self.other_configs.keys())
-        }
+            auxiliary_metrics[name] = {
+                k: cast(tm.Metric, v) for k, v in (metrics or {}).items() if k.startswith(f"{name}_")
+            }
+        primary_metrics = cast(
+            Dict[str, tm.Metric],
+            {
+                k: v
+                for k, v in (metrics or {}).items()
+                if not any(k.startswith(f"{name}_") for name in self.other_configs.keys())
+            },
+        )
 
         # step from features for main task
         output = step_classification_from_features(
@@ -436,7 +443,7 @@ class ClassificationTask(Task):
             self.classification_head,
             self.config,
             mixup_seed,
-            primary_metrics,
+            cast(tm.MetricCollection, primary_metrics),
         )
 
         # Initialize output dictionary
@@ -462,7 +469,7 @@ class ClassificationTask(Task):
                 self.auxiliary_heads[name],
                 config,
                 mixup_seed,
-                auxiliary_metrics[name],
+                cast(tm.MetricCollection, auxiliary_metrics[name]),
             )
 
             # Add auxiliary outputs to final output
