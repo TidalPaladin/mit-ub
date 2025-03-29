@@ -38,6 +38,9 @@ class ModelConfig(ABC):
             case _:
                 raise ValueError(f"Unsupported file extension: {path.suffix}")
 
+        for field_name, field_type in cls.__annotations__.items():
+            if isinstance(field_type, type) and issubclass(field_type, ModelConfig) and field_name in data:
+                data[field_name] = field_type(**data[field_name])  # type: ignore
         return cls(**data)
 
     @classmethod
@@ -70,11 +73,18 @@ class ModelConfig(ABC):
             else:
                 config = json.load(config_file)
 
+        for field_name, field_type in cls.__annotations__.items():
+            if isinstance(field_type, type) and issubclass(field_type, ModelConfig) and field_name in config:
+                config[field_name] = field_type(**config[field_name])  # type: ignore
         return cls(**config)
 
     def _prepare_for_save(self) -> Self:
         config = copy(self)
         config = convert_sequences(config, list)
+        for field_name, field_type in self.__class__.__annotations__.items():
+            if isinstance(field_type, type) and issubclass(field_type, ModelConfig) and field_name in config.__dict__:
+                new_val = asdict(getattr(config, field_name)._prepare_for_save())
+                object.__setattr__(config, field_name, new_val)
         return config
 
     def save(self, path: Path) -> None:
@@ -112,6 +122,11 @@ def convert_sequences(config: T, container: Type[Sequence]) -> T:
 
         object.__setattr__(config, key, container(val))  # type: ignore
         assert isinstance(getattr(config, key), container)
+
+        # Recursive conversion up to depth 2
+        if len(val) > 0 and isinstance(val[0], Sequence):
+            recursive_converted = container([container(v) for v in val])  # type: ignore
+            object.__setattr__(config, key, recursive_converted)
 
     return config
 
