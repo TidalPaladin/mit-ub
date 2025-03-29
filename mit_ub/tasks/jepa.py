@@ -479,6 +479,153 @@ class JEPA(Task):
         )
         return list(updates)
 
+    def forward_teacher(self, x: Tensor) -> Tuple[Tensor, Tensor]:
+        with torch.inference_mode():
+            self.teacher_backbone.eval()
+            torch.cuda.nvtx.range_push("teacher_backbone")
+            full_target, target_cls_token = cast(Tuple[Tensor, Tensor], self.teacher_backbone(x, reshape=False))
+            torch.cuda.nvtx.range_pop()
+
+        # inference_mode() removes version tracking so we must clone the outputs
+        if self.training:
+            full_target = full_target.clone()
+            target_cls_token = target_cls_token.clone()
+        return full_target, target_cls_token
+
+    @torch.no_grad()
+    def apply_noise(self, x: Tensor) -> Tensor:
+        torch.cuda.nvtx.range_push("noise")
+        if self.jepa_config.use_noise and self.training:
+            x = apply_noise_batched(
+                x,
+                prob=self.jepa_config.noise_prob,
+                uniform_scale=self.jepa_config.uniform_noise_scale,
+                multiplicative_scale=self.jepa_config.multiplicative_noise_scale,
+                salt_pepper_prob=self.jepa_config.salt_pepper_prob,
+                salt_pepper_pixel_prob=self.jepa_config.salt_pepper_pixel_prob,
+                clip=self.jepa_config.noise_clip,
+            )
+        torch.cuda.nvtx.range_pop()
+        return x
+
+    @torch.no_grad()
+    def apply_mixup(self, *tensors: Tensor, seed: int | None = None) -> Tuple[int | None, Tuple[Tensor, ...]]:
+        if self.training and self.jepa_config.mixup_prob > 0:
+            torch.cuda.nvtx.range_push("mixup")
+            mixup_seed = int(torch.randint(0, 2**31 - 1, (1,)).item()) if seed is None else seed
+            tensors = cast(
+                Any, [mixup(t, self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, mixup_seed) for t in tensors]
+            )
+            torch.cuda.nvtx.range_pop()
+        else:
+            mixup_seed = None
+        return mixup_seed, tuple(tensors)
+
+    @torch.no_grad()
+    def apply_invert(self, *tensors: Tensor, seed: int | None = None) -> Tuple[Tensor, ...]:
+        if self.training and (self.jepa_config.invert_prob > 0 or self.jepa_config.solarize_prob > 0):
+            torch.cuda.nvtx.range_push("invert")
+            invert_seed = int(torch.randint(0, 2**31 - 1, (1,)).item()) if seed is None else seed
+            for t in tensors:
+                invert_(
+                    t,
+                    self.jepa_config.invert_prob,
+                    self.jepa_config.solarize_prob,
+                    self.jepa_config.solarize_threshold,
+                    invert_seed,
+                )
+            torch.cuda.nvtx.range_pop()
+        return tensors
+
+    @torch.no_grad()
+    def apply_posterize(self, *tensors: Tensor, seed: int | None = None) -> Tuple[Tensor, ...]:
+        if self.training and self.jepa_config.posterize_prob > 0:
+            torch.cuda.nvtx.range_push("posterize")
+            posterize_seed = int(torch.randint(0, 2**31 - 1, (1,)).item()) if seed is None else seed
+            for t in tensors:
+                posterize_(
+                    t,
+                    self.jepa_config.posterize_prob,
+                    self.jepa_config.posterize_bits,
+                    posterize_seed,
+                )
+            torch.cuda.nvtx.range_pop()
+        return tensors
+
+    @rank_zero_only
+    def save_first_batch(self, x: Tensor, batch_idx: int) -> None:
+        if (
+            self.training
+            and self.trainer.global_step == 0
+            and self.trainer.global_rank == 0
+            and batch_idx % self.trainer.accumulate_grad_batches == 0
+        ):
+            try:
+                experiment = getattr(self.logger, "experiment", None)
+                assert experiment is not None
+                path = Path(experiment.dir) / "first_batch.png"
+                save_first_batch(x, path)
+            except Exception as e:
+                rank_zero_warn(f"Error saving first batch: {e}")
+
+    def compute_jepa_loss(self, pred: Tensor, target: Tensor) -> Tensor:
+        assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
+        if self.jepa_config.loss_fn == "smooth_l1":
+            loss_jepa = F.smooth_l1_loss(pred, F.layer_norm(target, target.shape[-1:]))
+        elif self.jepa_config.loss_fn == "cosine":
+            loss_jepa = (1 - F.cosine_similarity(pred, target, dim=-1, eps=1e-5)).mean()
+        else:
+            raise ValueError(f"Invalid loss function: {self.jepa_config.loss_fn}")
+        return loss_jepa
+
+    @torch.no_grad()
+    def compute_metrics(self, metrics: tm.MetricCollection | None, **tensors: Tensor) -> None:
+        if metrics is None:
+            return
+
+        torch.cuda.nvtx.range_push("metrics")
+        metrics["jepa_loss"].update(tensors["loss_jepa"])
+        metrics["siglip_loss"].update(tensors["loss_siglip"])
+        metrics["example_sim"].update(tensors["target_cls_token"])
+        metrics["example_rms"].update(tensors["target_cls_token"])
+        metrics["micro_token_sim"].update(tensors["full_target"])
+        metrics["micro_token_rms"].update(tensors["full_target"])
+        metrics["macro_token_sim"].update(tensors["full_target"])
+        metrics["macro_token_rms"].update(tensors["full_target"])
+
+        if "layer_scale_mean" in metrics:
+            metrics["layer_scale_mean"].update(self.backbone)
+            metrics["layer_scale_max"].update(self.backbone)
+
+        if "ema_momentum" in metrics:
+            metrics["ema_momentum"].update(self.get_ema_momentum())
+        if "siglip_t" in metrics:
+            metrics["siglip_t"].update(self.siglip_t)
+        if "siglip_b" in metrics:
+            metrics["siglip_b"].update(self.siglip_b)
+        torch.cuda.nvtx.range_pop()
+
+    @torch.no_grad()
+    def generate_masks(self, x: Tensor) -> Tuple[Tensor, Tensor]:
+        # generate context mask - will always be non-ragged
+        torch.cuda.nvtx.range_push("context_mask")
+        context_mask = self.backbone.create_mask(x, self.jepa_config.context_ratio, self.jepa_config.scale)
+        assert context_mask.device == x.device, "Context mask device does not match input device"
+        assert not mask_is_ragged(context_mask), "Context mask is ragged"
+        torch.cuda.nvtx.range_pop()
+
+        # generate target mask - select non-ragged target mask from locations not in context mask
+        torch.cuda.nvtx.range_push("target_mask")
+        target_mask = generate_non_overlapping_mask(
+            context_mask, self.jepa_config.context_ratio, self.jepa_config.target_ratio
+        )
+        assert target_mask.device == x.device, "Target mask device does not match input device"
+        assert not mask_is_ragged(target_mask), "Target mask is ragged"
+        assert not (context_mask & target_mask).any(), "Context and target masks overlap"
+        torch.cuda.nvtx.range_pop()
+
+        return context_mask, target_mask
+
     def step(
         self,
         batch: Any,
@@ -498,108 +645,24 @@ class JEPA(Task):
         if self.jepa_config.weight_decay_final is not None:
             self.update_weight_decay()
 
-        # generate context mask - will always be non-ragged
-        torch.cuda.nvtx.range_push("context_mask")
-        context_mask = self.backbone.create_mask(x, self.jepa_config.context_ratio, self.jepa_config.scale)
-        assert context_mask.device == x.device, "Context mask device does not match input device"
-        assert not mask_is_ragged(context_mask), "Context mask is ragged"
-        torch.cuda.nvtx.range_pop()
+        context_mask, target_mask = self.generate_masks(x)
+        full_target, target_cls_token = self.forward_teacher(x)
+        siglip_target = torch.eye(full_target.shape[0], device=full_target.device, dtype=torch.float32)
 
-        # generate target mask - select non-ragged target mask from locations not in context mask
-        torch.cuda.nvtx.range_push("target_mask")
-        target_mask = generate_non_overlapping_mask(
-            context_mask, self.jepa_config.context_ratio, self.jepa_config.target_ratio
-        )
-        assert target_mask.device == x.device, "Target mask device does not match input device"
-        assert not mask_is_ragged(target_mask), "Target mask is ragged"
-        assert not (context_mask & target_mask).any(), "Context and target masks overlap"
-        torch.cuda.nvtx.range_pop()
-
-        # generate ground truth with forward pass of ema backbone on unmasked image
-        with torch.inference_mode():
-            self.teacher_backbone.eval()
-            torch.cuda.nvtx.range_push("ema_backbone")
-            full_target, target_cls_token = cast(Tuple[Tensor, Tensor], self.teacher_backbone(x, reshape=False))
-            torch.cuda.nvtx.range_pop()
-
-        # inference_mode() removes version tracking so we must clone the outputs
-        full_target = full_target.clone()
-        target_cls_token = target_cls_token.clone()
-
+        # apply augmentations
+        # order is noise -> mixup -> invert -> posterize.
+        # mixup must be applied to targets as well
         with torch.no_grad():
-            siglip_target = torch.eye(full_target.shape[0], device=full_target.device, dtype=torch.float32)
-
-            # apply random noise
-            if self.training and self.jepa_config.use_noise:
-                torch.cuda.nvtx.range_push("noise")
-                x = apply_noise_batched(
-                    x,
-                    prob=self.jepa_config.noise_prob,
-                    uniform_scale=self.jepa_config.uniform_noise_scale,
-                    multiplicative_scale=self.jepa_config.multiplicative_noise_scale,
-                    salt_pepper_prob=self.jepa_config.salt_pepper_prob,
-                    salt_pepper_pixel_prob=self.jepa_config.salt_pepper_pixel_prob,
-                    clip=self.jepa_config.noise_clip,
-                )
-                torch.cuda.nvtx.range_pop()
-
-            # apply mixup, not overwriting full_target
-            if self.training and self.jepa_config.mixup_prob > 0:
-                torch.cuda.nvtx.range_push("mixup")
-                mixup_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
-                x = mixup(x, self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, mixup_seed)
-                full_target = mixup(full_target, self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, mixup_seed)
-                target_cls_token = mixup(
-                    target_cls_token, self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, mixup_seed
-                )
-                siglip_target = mixup(
-                    siglip_target, self.jepa_config.mixup_prob, self.jepa_config.mixup_alpha, mixup_seed
-                )
-                torch.cuda.nvtx.range_pop()
-            else:
-                mixup_seed = None
-
-            # invert input
-            if self.training and (self.jepa_config.invert_prob > 0 or self.jepa_config.solarize_prob > 0):
-                torch.cuda.nvtx.range_push("invert")
-                invert_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
-                invert_(
-                    x,
-                    self.jepa_config.invert_prob,
-                    self.jepa_config.solarize_prob,
-                    self.jepa_config.solarize_threshold,
-                    invert_seed,
-                )
-                torch.cuda.nvtx.range_pop()
-
-            # posterize input
-            if self.training and self.jepa_config.posterize_prob > 0:
-                torch.cuda.nvtx.range_push("posterize")
-                posterize_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
-                posterize_(
-                    x,
-                    self.jepa_config.posterize_prob,
-                    self.jepa_config.posterize_bits,
-                    posterize_seed,
-                )
-                torch.cuda.nvtx.range_pop()
-
+            x = self.apply_noise(x)
+            mixup_seed, (x, full_target, target_cls_token, siglip_target) = self.apply_mixup(
+                x, full_target, target_cls_token, siglip_target
+            )
+            x = self.apply_invert(x)[0]
+            x = self.apply_posterize(x)[0]
             target = apply_mask(target_mask, full_target, fill_value=None)
 
-        # save image of first batch
-        if (
-            self.training
-            and self.trainer.global_step == 0
-            and self.trainer.global_rank == 0
-            and batch_idx % self.trainer.accumulate_grad_batches == 0
-        ):
-            try:
-                experiment = getattr(self.logger, "experiment", None)
-                assert experiment is not None
-                path = Path(experiment.dir) / "first_batch.png"
-                save_first_batch(x, path)
-            except Exception as e:
-                rank_zero_warn(f"Error saving first batch: {e}")
+        # save image of first batch with augmentations applied
+        self.save_first_batch(x, batch_idx)
 
         # generate predictions by encoding the context and then running the encoded context
         # plus the positional target queries through the predictor
@@ -609,13 +672,7 @@ class JEPA(Task):
         context: Tensor = pred_dict["jepa_context"]
 
         # compute loss between target and predictor encoded latents
-        assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
-        if self.jepa_config.loss_fn == "smooth_l1":
-            loss_jepa = F.smooth_l1_loss(pred, F.layer_norm(target, target.shape[-1:]))
-        elif self.jepa_config.loss_fn == "cosine":
-            loss_jepa = (1 - F.cosine_similarity(pred, target, dim=-1, eps=1e-5)).mean()
-        else:
-            raise ValueError(f"Invalid loss function: {self.jepa_config.loss_fn}")
+        loss_jepa = self.compute_jepa_loss(pred, target)
 
         # Compute siglip loss across all ranks. When siglip_weight is 0, a stop gradient is applied to the CLS token.
         _pred_cls_token = pred_cls_token.detach() if self.jepa_config.siglip_weight == 0 else pred_cls_token
@@ -632,29 +689,14 @@ class JEPA(Task):
         )
 
         # Compute metrics
-        if metrics is not None:
-            with torch.no_grad():
-                torch.cuda.nvtx.range_push("metrics")
-                metrics["jepa_loss"].update(loss_jepa)
-                metrics["siglip_loss"].update(loss_siglip)
-                metrics["example_sim"].update(target_cls_token)
-                metrics["example_rms"].update(target_cls_token)
-                metrics["micro_token_sim"].update(full_target)
-                metrics["micro_token_rms"].update(full_target)
-                metrics["macro_token_sim"].update(full_target)
-                metrics["macro_token_rms"].update(full_target)
-
-                if "layer_scale_mean" in metrics:
-                    metrics["layer_scale_mean"].update(self.backbone)
-                    metrics["layer_scale_max"].update(self.backbone)
-
-                if "ema_momentum" in metrics:
-                    metrics["ema_momentum"].update(self.get_ema_momentum())
-                if "siglip_t" in metrics:
-                    metrics["siglip_t"].update(self.siglip_t)
-                if "siglip_b" in metrics:
-                    metrics["siglip_b"].update(self.siglip_b)
-                torch.cuda.nvtx.range_pop()
+        self.compute_metrics(
+            metrics,
+            loss_jepa=loss_jepa,
+            loss_siglip=loss_siglip,
+            target_cls_token=target_cls_token,
+            full_target=full_target,
+            context=context,
+        )
 
         output = {
             "log": {
