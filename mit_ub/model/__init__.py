@@ -1,6 +1,6 @@
 import torch
 
-from .backbone import AnyModelConfig, ConvNext2d, ConvNextConfig, ViT, ViTConfig
+from .backbone import AnyModelConfig, ConvNext2d, ConvNextConfig, ViT, ViTConfig, S3, S3Config
 from .config import ModelConfig, SupportsSafeTensors
 from .helpers import compile_is_disabled
 
@@ -17,4 +17,6 @@ __all__ = [
     "AnyModelConfig",
     "ModelConfig",
     "SupportsSafeTensors",
+    "S3",
+    "S3Config",
 ]
