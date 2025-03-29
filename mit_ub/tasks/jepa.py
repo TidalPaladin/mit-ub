@@ -36,6 +36,7 @@ from ..data.posterize import posterize_
 from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, TokenSimilarity
 from ..metrics.distance import RMSPairwiseDistance, TokenRMSDistance
 from ..model import ViT, ViTConfig
+from ..model.layers import RelativeFactorizedPosition
 from ..tokens import apply_mask, generate_non_overlapping_mask, mask_is_ragged
 from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
 
@@ -326,10 +327,7 @@ class JEPA(Task):
         self.teacher_backbone.eval()
 
         # Position encoding / initialization for prediction queries.
-        self.pos_enc_proj = te.LayerNormMLP(
-            self.backbone.config.hidden_size,
-            self.backbone.config.hidden_size,
-        )
+        self.jepa_pos_enc = RelativeFactorizedPosition(2, self.backbone.config.hidden_size)
 
         # JEPA predictor
         self.jepa_predictor = nn.ModuleList(
@@ -388,10 +386,8 @@ class JEPA(Task):
         torch.cuda.nvtx.range_pop()
 
         # Prepare positional encoding for target queries
-        with torch.no_grad():
-            tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
-            query = self.backbone.stem.pos_enc(tokenized_size)
-        query = self.pos_enc_proj(query).expand(target_mask.shape[0], -1, -1)
+        tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
+        query = self.jepa_pos_enc(tokenized_size).expand(target_mask.shape[0], -1, -1)
         query = apply_mask(target_mask, query, fill_value=None)
 
         # Run query and context through predictor
