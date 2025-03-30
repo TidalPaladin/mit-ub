@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import transformer_engine.pytorch as te
+from einops import rearrange
 from torch import Tensor
 
 from ...tokens import apply_mask
@@ -99,13 +100,16 @@ class S3(ViT):
             x: The input image.
 
         Shapes:
-            - x: :math:`(B, C, H, W)`
-            - saliency: :math:`(B, 1, H', W')` where :math:`H'` and :math:`W'` are the height and width
+            - x: :math:`(B, C, H, W)` or :math:`(B, D, C, H, W)`
+            - saliency: :math:`(B*D, 1, H', W')` where :math:`H'` and :math:`W'` are the height and width
                 of the ConvNext output.
 
         Returns:
             A saliency map (as logits) for the input image.
         """
+        if x.ndim == 5:
+            x = rearrange(x, "b d c h w -> (b d) c h w")
+
         # Resize image to match ViT's low resolution input
         x_vit = F.interpolate(x, size=self.config.vit_resolution, mode="bilinear", align_corners=False)
         features_vit, cls_token = super().forward(x_vit, reshape=True)
@@ -127,6 +131,25 @@ class S3(ViT):
         return saliency
 
     def select_tokens(self, x: Tensor, saliency: Tensor) -> List[Tensor]:
+        r"""Selects top-k tokens from the input based on the saliency map.
+
+        Args:
+            x: The input tensor.
+            saliency: The saliency map.
+
+        Shapes:
+            - x: :math:`(B, C, H, W)` or :math:`(B, D, C, H, W)`
+            - saliency: :math:`(B*D, 1, H', W')`
+
+        Returns:
+            A list of tensors, each containing the selected tokens for a given resolution.
+        """
+        # For 3D inputs, fold depth into the batch dimension
+        B = x.shape[0]
+        if is_3d := x.ndim == 5:
+            x = rearrange(x, "b d c h w -> (b d) c h w")
+            assert x.shape[0] == saliency.shape[0]
+
         stages: List[Tensor] = []
         assert isinstance(self.config.token_fracs, Sequence)
         for resolution, token_frac, pos_enc in zip(
@@ -136,24 +159,30 @@ class S3(ViT):
             x_resized = F.interpolate(x, size=resolution, mode="bilinear", align_corners=False)
 
             # Tokenize
-            B, _, *original_size = x_resized.shape
+            _, _, *original_size = x_resized.shape
             tokenized_size = self.stem.tokenized_size(cast(Any, tuple(original_size)))
             x_resized = self.stem(x_resized)
+            if is_3d:
+                x_resized = rearrange(x_resized, "(b d) l ... -> b (d l) ...", b=B)
 
             # Resize the saliency map to match the tokenized size and select top-k tokens
-            saliency_resized = F.interpolate(saliency, size=tokenized_size, mode="bilinear", align_corners=False).view(
-                B, -1
-            )
+            saliency_resized = F.interpolate(saliency, size=tokenized_size, mode="bilinear", align_corners=False)
+            if is_3d:
+                saliency_resized = rearrange(saliency_resized, "(b d) ... -> b (d ...)", b=B)
+            else:
+                saliency_resized = rearrange(saliency_resized, "b ... -> b (...)", b=B)
+
             k = int(token_frac * math.prod(tokenized_size))
             _, indices = torch.topk(saliency_resized, k, dim=-1)
 
             # Extract patch embeddings for the top-k tokens
             D = self.config.vit_config.hidden_size
             gather_indices = indices.view(B, -1, 1).expand(-1, -1, D)
+
             x_resized = torch.gather(x_resized, dim=1, index=gather_indices)
 
             # Apply stage-specific position encoding
-            pos = pos_enc(tokenized_size).expand(B, -1, -1)
+            pos = pos_enc(tokenized_size).expand(saliency.shape[0], -1, -1).reshape(B, -1, D)
             pos = torch.gather(pos, dim=1, index=gather_indices)
             x_resized = x_resized + pos
 
@@ -167,13 +196,14 @@ class S3(ViT):
         reshape: bool = False,
         mask: Tensor | None = None,
         mask_fill_value: float | Tensor | None = None,
+        saliency: Tensor | None = None,
     ) -> Tuple[Tensor, Tensor, Tensor]:
         if reshape:
             raise NotImplementedError("Reshaping is not supported for S3")
 
         # Compute saliency map
         B = x.shape[0]
-        saliency = self.forward_saliency(x)
+        saliency = self.forward_saliency(x) if saliency is None else saliency
 
         # Select input tokens based on saliency
         x = torch.cat(self.select_tokens(x, saliency), dim=1)

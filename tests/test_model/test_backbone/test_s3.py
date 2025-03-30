@@ -107,13 +107,42 @@ class TestS3Config:
 class TestS3:
 
     @pytest.mark.cuda
-    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    def test_forward_saliency(self, config, dtype):
+    def test_forward_saliency(self, config):
         x = torch.randn(1, 3, 224, 224, device="cuda")
         model = S3(config).cuda()
-        with torch.autocast(device_type="cuda", dtype=dtype, enabled=True):
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
             out = model.forward_saliency(x)
         assert out.shape == (1, 1, 28, 28)
+
+    @pytest.mark.cuda
+    def test_forward_saliency_3d(self, config):
+        x = torch.randn(1, 32, 3, 224, 224, device="cuda")
+        model = S3(config).cuda()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+            out = model.forward_saliency(x)
+        assert out.shape == (32, 1, 28, 28)
+
+    @pytest.mark.cuda
+    def test_select_tokens(self, config):
+        x = torch.randn(1, 3, 224, 224, device="cuda")
+        model = S3(config).cuda()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+            saliency = model.forward_saliency(x)
+            out = model.select_tokens(x, saliency)
+        assert out[2].shape == (1, 7 * 7, 128)
+        assert out[1].shape == (1, int(14 * 14 * 0.2), 128)
+        assert out[0].shape == (1, int(28 * 28 * 0.2), 128)
+
+    @pytest.mark.cuda
+    def test_select_tokens_3d(self, config):
+        x = torch.randn(1, 32, 3, 224, 224, device="cuda")
+        model = S3(config).cuda()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+            saliency = model.forward_saliency(x)
+            out = model.select_tokens(x, saliency)
+        assert out[2].shape == (1, 7 * 7, 128)
+        assert out[1].shape == (1, int(14 * 14 * 0.2), 128)
+        assert out[0].shape == (1, int(28 * 28 * 0.2), 128)
 
     @pytest.mark.cuda
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -126,6 +155,17 @@ class TestS3:
         assert out.shape == (1, expected_out_tokens, 128)
         assert cls_token.shape == (1, 128)
         assert saliency.shape == (1, 1, 28, 28)
+
+    @pytest.mark.cuda
+    def test_forward_3d(self, config):
+        x = torch.randn(1, 32, 3, 224, 224, device="cuda")
+        model = S3(config).cuda()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+            out, cls_token, saliency = model(x)
+        expected_out_tokens = 7 * 7 + int(14 * 14 * 0.2) + int(28 * 28 * 0.2)
+        assert out.shape == (1, expected_out_tokens, 128)
+        assert cls_token.shape == (1, 128)
+        assert saliency.shape == (32, 1, 28, 28)
 
     @pytest.mark.cuda
     def test_backward(self, config):
