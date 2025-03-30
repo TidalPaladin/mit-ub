@@ -8,7 +8,7 @@ import torch.nn as nn
 import torchmetrics as tm
 from deep_helpers.structs import State
 from deep_helpers.tasks import Task
-from lightning_utilities.core.rank_zero import rank_zero_warn
+from lightning_utilities.core.rank_zero import rank_zero_only, rank_zero_warn
 from torch import Tensor
 
 from ..data import bce_mixup, cross_entropy_mixup, invert_, is_mixed, mixup, posterize_
@@ -345,17 +345,8 @@ class ClassificationTask(Task):
 
         return output
 
-    def step(
-        self, batch: Any, batch_idx: int, state: State, metrics: Optional[tm.MetricCollection] = None
-    ) -> Dict[str, Any]:
-        # get inputs
-        x = batch["img"]
-        if not x.device.type == "cuda":
-            raise ValueError("Classification only supports CUDA")
-        y = batch[self.config.label_key].long()
-        y.shape[0]
-
-        # apply noise
+    @torch.no_grad()
+    def apply_noise(self, x: Tensor) -> Tensor:
         if self.training and self.config.use_noise:
             torch.cuda.nvtx.range_push("noise")
             x = apply_noise_batched(
@@ -367,24 +358,22 @@ class ClassificationTask(Task):
                 salt_pepper_pixel_prob=self.config.salt_pepper_pixel_prob,
                 clip=self.config.noise_clip,
             )
+        return x
 
-        # mixup input
-        if self.training and self.config.mixup_prob > 0:
-            mixup_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
-            x = mixup(x, self.config.mixup_prob, self.config.mixup_alpha, mixup_seed)
-        else:
-            mixup_seed = None
-
-        # invert input
+    @torch.no_grad()
+    def apply_invert(self, x: Tensor, seed: int | None = None) -> Tensor:
         if self.training and self.config.invert_prob > 0:
             torch.cuda.nvtx.range_push("invert")
-            invert_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+            invert_seed = int(torch.randint(0, 2**31 - 1, (1,)).item()) if seed is None else seed
             invert_(x, self.config.invert_prob, self.config.solarize_prob, self.config.solarize_threshold, invert_seed)
             torch.cuda.nvtx.range_pop()
+        return x
 
+    @torch.no_grad()
+    def apply_posterize(self, x: Tensor, seed: int | None = None) -> Tensor:
         if self.training and self.config.posterize_prob > 0:
             torch.cuda.nvtx.range_push("posterize")
-            posterize_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+            posterize_seed = int(torch.randint(0, 2**31 - 1, (1,)).item()) if seed is None else seed
             posterize_(
                 x,
                 self.config.posterize_prob,
@@ -392,8 +381,10 @@ class ClassificationTask(Task):
                 posterize_seed,
             )
             torch.cuda.nvtx.range_pop()
+        return x
 
-        # save image of first batch
+    @rank_zero_only
+    def save_first_batch(self, x: Tensor, batch_idx: int) -> None:
         if (
             self.training
             and self.trainer.global_step == 0
@@ -407,6 +398,50 @@ class ClassificationTask(Task):
                 save_first_batch(x, path)
             except Exception as e:
                 rank_zero_warn(f"Error saving first batch: {e}")
+
+    def separate_metrics(
+        self, metrics: tm.MetricCollection
+    ) -> Tuple[Dict[str, tm.Metric], Dict[str, Dict[str, tm.Metric]]]:
+        # separate metrics for primary and auxiliary tasks
+        auxiliary_metrics = cast(Dict[str, Dict[str, tm.Metric]], {name: {} for name in self.other_configs.keys()})
+        for name, config in self.other_configs.items():
+            auxiliary_metrics[name] = {
+                k: cast(tm.Metric, v) for k, v in (metrics or {}).items() if k.startswith(f"{name}_")
+            }
+        primary_metrics = cast(
+            Dict[str, tm.Metric],
+            {
+                k: v
+                for k, v in (metrics or {}).items()
+                if not any(k.startswith(f"{name}_") for name in self.other_configs.keys())
+            },
+        )
+        return primary_metrics, auxiliary_metrics
+
+    def step(
+        self, batch: Any, batch_idx: int, state: State, metrics: Optional[tm.MetricCollection] = None
+    ) -> Dict[str, Any]:
+        # get inputs
+        x = batch["img"]
+        if not x.device.type == "cuda":
+            raise ValueError("Classification only supports CUDA")
+        y = batch[self.config.label_key].long()
+        y.shape[0]
+
+        # apply noise
+        x = self.apply_noise(x)
+
+        # mixup input
+        if self.training and self.config.mixup_prob > 0:
+            mixup_seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+            x = mixup(x, self.config.mixup_prob, self.config.mixup_alpha, mixup_seed)
+        else:
+            mixup_seed = None
+
+        x = self.apply_invert(x)
+        x = self.apply_posterize(x)
+
+        self.save_first_batch(x, batch_idx)
 
         # forward backbone
         # NOTE: We don't use forward() here because step_classification_from_features()
@@ -422,19 +457,10 @@ class ClassificationTask(Task):
                 pred = grid_to_tokens(pred)
 
         # separate metrics for primary and auxiliary tasks
-        auxiliary_metrics = cast(Dict[str, Dict[str, tm.Metric]], {name: {} for name in self.other_configs.keys()})
-        for name, config in self.other_configs.items():
-            auxiliary_metrics[name] = {
-                k: cast(tm.Metric, v) for k, v in (metrics or {}).items() if k.startswith(f"{name}_")
-            }
-        primary_metrics = cast(
-            Dict[str, tm.Metric],
-            {
-                k: v
-                for k, v in (metrics or {}).items()
-                if not any(k.startswith(f"{name}_") for name in self.other_configs.keys())
-            },
-        )
+        if metrics is not None:
+            primary_metrics, auxiliary_metrics = self.separate_metrics(metrics)
+        else:
+            primary_metrics = auxiliary_metrics = None
 
         # step from features for main task
         output = step_classification_from_features(
@@ -443,7 +469,7 @@ class ClassificationTask(Task):
             self.classification_head,
             self.config,
             mixup_seed,
-            cast(tm.MetricCollection, primary_metrics),
+            cast(tm.MetricCollection, primary_metrics) if primary_metrics is not None else None,
         )
 
         # Initialize output dictionary
@@ -469,7 +495,7 @@ class ClassificationTask(Task):
                 self.auxiliary_heads[name],
                 config,
                 mixup_seed,
-                cast(tm.MetricCollection, auxiliary_metrics[name]),
+                cast(tm.MetricCollection, auxiliary_metrics[name]) if auxiliary_metrics is not None else None,
             )
 
             # Add auxiliary outputs to final output
