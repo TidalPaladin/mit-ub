@@ -37,7 +37,7 @@ class PatchEmbed2d(nn.Module):
         ht, wt = tuple(s * p for s, p in zip(size, self.patch_size))
         return ht, wt
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, additional_features: Tensor | None = None) -> Tensor:
         with torch.autocast(device_type=x.device.type, dtype=torch.float32):
             mm_precision = torch.get_float32_matmul_precision()
             torch.set_float32_matmul_precision("high")
@@ -48,4 +48,7 @@ class PatchEmbed2d(nn.Module):
         H, W = x.shape[2:]
         dims = self.tokenized_size((H, W))
         pos = self.pos_enc(dims)
-        return self.norm(y + pos)
+        if additional_features is not None:
+            y = y + additional_features
+        y = y + pos
+        return self.norm(y)

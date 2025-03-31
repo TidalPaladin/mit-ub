@@ -19,6 +19,17 @@ class TestPatchEmbed2d:
         assert y.shape == (B, math.prod((H // 4, W // 4)), D_model)
 
     @pytest.mark.cuda
+    def test_forward_additional_features(self):
+        B, C, H, W = 2, 3, 64, 64
+        D_model = 64
+        layer = PatchEmbed2d(C, D_model, (4, 4)).to("cuda")
+        x = torch.randn(B, C, H, W, device="cuda")
+        additional_features = torch.randn(B, H // 4 * W // 4, D_model, device="cuda")
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            y = layer(x, additional_features)
+        assert y.shape == (B, math.prod((H // 4, W // 4)), D_model)
+
+    @pytest.mark.cuda
     def test_backward(self):
         B, C, H, W = 2, 3, 64, 64
         D_model = 64
