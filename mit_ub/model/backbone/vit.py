@@ -1,16 +1,19 @@
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, ClassVar, Dict, Self, Sequence, Tuple, Type, cast
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformer_engine.pytorch as te
+from einops import rearrange
 from torch import Tensor
 
 from ...tokens import apply_mask, create_mask
 from ..config import ModelConfig, SupportsSafeTensors, convert_sequences
 from ..layers import PatchEmbed2d
 from ..layers.pool import get_global_pooling_layer
-from .convnext import tokens_to_grid
+from .convnext import ConvNextConfig, tokens_to_grid
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,9 @@ class ViTConfig(ModelConfig):
 
     # Other
     checkpoint: bool = False
+
+    # High resolution conv to combine with patch embedding
+    hr_conv_scale: float | None = None
 
     def __post_init__(self) -> None:
         convert_sequences(self, tuple)
@@ -73,6 +79,38 @@ class ViTConfig(ModelConfig):
             attn_input_format="bshd",
         )
 
+    @property
+    def hr_conv_config(self) -> ConvNextConfig | None:
+        if self.hr_conv_scale is None:
+            return None
+
+        # Calculate how many /2 stages we need after the initial /4 patch embedding
+        # to match the ViT's patch size
+        vit_scale = self.patch_size[0]  # Assuming square patches
+        convnext_initial_scale = 4  # ConvNext's fixed patch size
+        remaining_scale = vit_scale / convnext_initial_scale
+        num_stages = int(math.log2(remaining_scale)) + 1
+
+        # Start with hidden_size / (2^num_stages) and double each stage
+        # So final stage matches ViT hidden_size
+        initial_dim = self.hidden_size >> num_stages
+        hidden_sizes = [initial_dim * (2**i) for i in range(num_stages + 1)]
+
+        DEPTH_PER_STAGE = 3
+        depths = [DEPTH_PER_STAGE] * (num_stages + 1)
+        conv_config = ConvNextConfig(
+            in_channels=self.in_channels,
+            patch_size=(4, 4),
+            kernel_size=(7, 7),
+            depths=depths,
+            hidden_sizes=hidden_sizes,
+            ffn_hidden_sizes=[s * 2 for s in hidden_sizes],
+            drop_path_rate=self.drop_path_rate,
+            activation=self.activation,
+            normalization=self.normalization,
+        )
+        return conv_config
+
 
 class ViT(nn.Module, SupportsSafeTensors):
     stem: PatchEmbed2d
@@ -95,6 +133,11 @@ class ViT(nn.Module, SupportsSafeTensors):
 
         # Transformer blocks
         self.blocks = nn.ModuleList([self.create_encoder_layer(i) for i in range(config.depth)])
+
+        # HR conv
+        if self.config.hr_conv_config is not None:
+            conv_config = self.config.hr_conv_config
+            self.hr_conv = conv_config.instantiate()
 
     @property
     def config(self) -> ViTConfig:
@@ -260,11 +303,20 @@ class ViT(nn.Module, SupportsSafeTensors):
         mask: Tensor | None = None,
         mask_fill_value: float | Tensor | None = None,
     ) -> Tuple[Tensor, Tensor]:
+        # Optional high resolution ConvNext pathway
+        if self.config.hr_conv_config is not None:
+            assert self.config.hr_conv_scale is not None
+            hr_features = self.hr_conv(x)
+            hr_features = rearrange(hr_features, "b c h w -> b (h w) c")
+            x = F.interpolate(x, scale_factor=1 / self.config.hr_conv_scale, mode="bilinear", align_corners=False)
+        else:
+            hr_features = None
+
         B, C, *original_size = x.shape
         tokenized_size = self.stem.tokenized_size(cast(Any, tuple(original_size)))
 
         # Tokenize and apply mask
-        x = self.stem(x)
+        x = self.stem(x, additional_features=hr_features)
         if mask is not None:
             x = apply_mask(mask, x, fill_value=mask_fill_value)
 

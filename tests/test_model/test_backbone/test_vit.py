@@ -26,19 +26,6 @@ def config():
     return config
 
 
-@pytest.fixture
-def config_vit():
-    config = ViTConfig(
-        in_channels=3,
-        patch_size=(16, 16),
-        depth=3,
-        hidden_size=128,
-        ffn_hidden_size=256,
-        num_attention_heads=128 // 16,
-    )
-    return config
-
-
 class TestViTConfig:
 
     @pytest.mark.parametrize("ext", [".json", ".yaml", ".yml"])
@@ -192,6 +179,30 @@ class TestViT:
     def test_backward(self, config, checkpoint):
         x = torch.randn(1, 3, 224, 224, device="cuda", requires_grad=True)
         config = replace(config, checkpoint=checkpoint)
+        model = ViT(config).cuda()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            out, cls_token = model(x)
+        (out.sum() + cls_token.sum()).backward()
+        for name, param in model.named_parameters():
+            assert param.grad is not None, f"{name} has no gradient"
+            assert not param.grad.isnan().any(), f"{name} has nan gradient"
+
+    @pytest.mark.cuda
+    def test_forward_hr_conv(self, config):
+        scale = 2
+        x = torch.randn(1, 3, 224 * scale, 224 * scale, device="cuda")
+        config = replace(config, hr_conv_scale=scale)
+        model = ViT(config).cuda()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+            out, cls_token = model(x)
+        assert out.shape[:2] == (1, 128)
+        assert cls_token.shape == (1, 128)
+
+    @pytest.mark.cuda
+    def test_backward_hr_conv(self, config):
+        scale = 2
+        x = torch.randn(1, 3, 224 * scale, 224 * scale, device="cuda", requires_grad=True)
+        config = replace(config, hr_conv_scale=scale)
         model = ViT(config).cuda()
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             out, cls_token = model(x)
