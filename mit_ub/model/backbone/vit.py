@@ -87,10 +87,10 @@ class ViTConfig(ModelConfig):
 
         # Calculate how many /2 stages we need after the initial /4 patch embedding
         # to match the ViT's patch size
-        vit_scale = self.patch_size[0]  # Assuming square patches
+        vit_scale = self.patch_size[0] * self.hr_conv_scale  # Assuming square patches
         convnext_initial_scale = 4  # ConvNext's fixed patch size
         remaining_scale = vit_scale / convnext_initial_scale
-        num_stages = int(math.log2(remaining_scale)) + 1
+        num_stages = int(math.log2(remaining_scale))
 
         # Start with hidden_size / (2^num_stages) and double each stage
         # So final stage matches ViT hidden_size

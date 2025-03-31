@@ -188,8 +188,8 @@ class TestViT:
             assert not param.grad.isnan().any(), f"{name} has nan gradient"
 
     @pytest.mark.cuda
-    def test_forward_hr_conv(self, config):
-        scale = 2
+    @pytest.mark.parametrize("scale", [2, 4])
+    def test_forward_hr_conv(self, config, scale):
         x = torch.randn(1, 3, 224 * scale, 224 * scale, device="cuda")
         config = replace(config, hr_conv_scale=scale)
         model = ViT(config).cuda()
