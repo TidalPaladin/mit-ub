@@ -46,6 +46,7 @@ class ViTConfig(ModelConfig):
 
     # High resolution conv to combine with patch embedding
     hr_conv_scale: float | None = None
+    hr_conv_layer_scale: float = 0.01
 
     def __post_init__(self) -> None:
         convert_sequences(self, tuple)
@@ -138,6 +139,8 @@ class ViT(nn.Module, SupportsSafeTensors):
         if self.config.hr_conv_config is not None:
             conv_config = self.config.hr_conv_config
             self.hr_conv = conv_config.instantiate()
+            self.hr_conv_layer_scale = nn.Parameter(torch.empty(config.hidden_size))
+            nn.init.constant_(self.hr_conv_layer_scale, self.config.hr_conv_layer_scale)
 
     @property
     def config(self) -> ViTConfig:
@@ -308,6 +311,7 @@ class ViT(nn.Module, SupportsSafeTensors):
             assert self.config.hr_conv_scale is not None
             hr_features = self.hr_conv(x)
             hr_features = rearrange(hr_features, "b c h w -> b (h w) c")
+            hr_features = hr_features * self.hr_conv_layer_scale
             x = F.interpolate(x, scale_factor=1 / self.config.hr_conv_scale, mode="bilinear", align_corners=False)
         else:
             hr_features = None
