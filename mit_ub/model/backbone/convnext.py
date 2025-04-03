@@ -129,8 +129,6 @@ class ConvNext2d(nn.Module, SupportsSafeTensors):
             ]
         )
 
-        self.embedding_norm = self.create_norm()
-
     def create_norm(self, dim: int | None = None, **kwargs) -> nn.Module:
         r"""Creates a normalization layer.
 
@@ -254,8 +252,6 @@ class ConvNext2d(nn.Module, SupportsSafeTensors):
             y = levels[-(i + 1)]
             x = x + y
             levels[-(i + 1)] = x
-
-        x = self.embedding_norm(x)
 
         # Convert back to grid
         if reshape:
