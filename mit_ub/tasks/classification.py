@@ -11,7 +11,7 @@ from deep_helpers.tasks import Task
 from lightning_utilities.core.rank_zero import rank_zero_warn
 from torch import Tensor
 
-from ..data import bce_mixup, cross_entropy_mixup, invert_, is_mixed, mixup, posterize_
+from ..data import bce_mixup, bce_mixup_with_smoothing, cross_entropy_mixup, invert_, is_mixed, mixup, posterize_
 from ..data.noise import (
     DEFAULT_NOISE_PROB,
     MULTIPLICATIVE_NOISE_MAX,
@@ -60,6 +60,7 @@ def binary_loss(
     mixup_prob: float = 0.2,
     mixup_alpha: float = 1.0,
     pos_weight: float | None = None,
+    label_smoothing: float = 0.0,
 ) -> Tensor:
     if mixup_seed is None:
         mixup_seed = 0
@@ -67,7 +68,12 @@ def binary_loss(
     if label.dim() == 1:
         label = label.view(-1, 1)
     label = label.type_as(logits)
-    result = bce_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha, pos_weight)
+    if label_smoothing > 0:
+        result = bce_mixup_with_smoothing(
+            logits, label, mixup_seed, label_smoothing, mixup_prob, mixup_alpha, pos_weight
+        )
+    else:
+        result = bce_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha, pos_weight)
     mask = result >= 0.0
     result = result[mask].mean() if mask.any() else logits.new_tensor(0.0)
     return result
@@ -191,6 +197,7 @@ class ClassificationConfig:
         posterize_prob: Probability of posterizing the input.
         posterize_bits: Number of bits to posterize the input to.
         pos_weight: Weight for the positive class in binary classification.
+        label_smoothing: Label smoothing factor (only applied to binary classification)
     """
 
     num_classes: int
@@ -214,6 +221,7 @@ class ClassificationConfig:
     posterize_prob: float = 0.0
     posterize_bits: int = 6
     noise_clip: bool = True
+    label_smoothing: float = 0.0
 
     # Binary classification
     pos_weight: float | None = None
@@ -233,6 +241,8 @@ class ClassificationConfig:
             raise ValueError("posterize_prob must be in the range [0, 1]")
         if self.posterize_bits < 1 or self.posterize_bits > 8:
             raise ValueError("posterize_bits must be in the range [1, 8]")
+        if not 0 <= self.label_smoothing < 1:
+            raise ValueError("label_smoothing must be in the range [0, 1)")
 
     @property
     def is_binary(self) -> bool:

@@ -216,6 +216,66 @@ def bce_mixup(
     return BCEMixup.apply(logits, labels, mixup_prob, mixup_alpha, seed, pos_weight)
 
 
+def bce_mixup_with_smoothing(
+    logits: Tensor,
+    labels: Tensor,
+    seed: int,
+    smoothing_factor: float = 0.05,
+    mixup_prob: float = 0.2,
+    mixup_alpha: float = 1.0,
+    pos_weight: float | None = None,
+) -> Tensor:
+    """BCE loss with MixUp and confidence-based label smoothing.
+
+    Similar to bce_mixup, but adds confidence-based label smoothing where predictions
+    only need to be within smoothing_factor of the target to achieve zero loss.
+    For example, if target=1.0 and smoothing_factor=0.05, predictions >= 0.95 have zero loss.
+    If target=0.0 and smoothing_factor=0.05, predictions <= 0.05 have zero loss.
+    This smoothing is only applied to non-mixed labels.
+
+    Args:
+        logits: The predicted class logits
+        labels: The target class labels
+        seed: Random seed for reproducibility. Should match the seed used when applying MixUp
+            to the input.
+        smoothing_factor: How far predictions can be from targets while still achieving zero loss.
+            Only applied to non-mixed samples.
+        mixup_prob: Probability of applying mixup to each sample
+        mixup_alpha: Alpha parameter for Beta distribution used to sample mixup weight
+        pos_weight: Optional weight for positive examples in range [0, 1]. If provided, positive
+            examples are weighted by pos_weight and negative examples by (1 - pos_weight).
+
+    Returns:
+        The BCE loss for each sample in the batch. Samples with unknown labels (-1) will
+        have a loss value of -1.
+
+    Shapes:
+        - logits: :math:`(N, ...)`
+        - labels: :math:`(N, ...)`
+        - Output: :math:`(N, ...)`
+    """
+    # Get base BCE loss and which samples were mixed
+    loss = bce_mixup(logits, labels, seed, mixup_prob, mixup_alpha, pos_weight)
+    mixed = is_mixed(logits.size(0), mixup_prob, mixup_alpha, seed)
+    mixed = mixed.view(-1, *([1] * (labels.dim() - 1))).expand_as(labels)
+
+    # Only apply smoothing to non-mixed samples
+    with torch.no_grad():
+        # Get predicted probabilities
+        probs = torch.sigmoid(logits)
+        # For positive labels (1.0), zero loss if prob >= (1 - smoothing)
+        # For negative labels (0.0), zero loss if prob <= smoothing
+        confident_pos = (labels > 0.5) & (probs >= (1 - smoothing_factor))
+        confident_neg = (labels < 0.5) & (probs <= smoothing_factor)
+        confident = confident_pos | confident_neg
+        # Don't apply smoothing to mixed samples
+        confident = confident & ~mixed
+
+    # Zero out loss where predictions are confident enough
+    loss = torch.where(confident, torch.zeros_like(loss), loss)
+    return loss
+
+
 def parse_args() -> Namespace:
     parser = ArgumentParser()
     parser.add_argument("image", type=Path, help="Path to the image to apply mixup to")
