@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch.testing import assert_close
 
-from mit_ub.data.mixup import bce_mixup, cross_entropy_mixup, get_weights, is_mixed, mixup
+from mit_ub.data.mixup import bce_mixup, bce_mixup_with_smoothing, cross_entropy_mixup, get_weights, is_mixed, mixup
 
 
 @pytest.mark.cuda
@@ -492,3 +492,120 @@ class TestBCEMixup:
 
         with pytest.raises(ValueError, match="pos_weight must be in range"):
             bce_mixup(logits, labels, seed=seed, pos_weight=1.1)
+
+
+@pytest.mark.cuda
+class TestBCEMixupWithSmoothing:
+    def test_bce_mixup_with_smoothing_basic(self):
+        torch.random.manual_seed(0)
+        B, C = 32, 8
+        logits = torch.randn(B, C, device="cuda")
+        labels = torch.zeros(B, C, device="cuda")
+        labels[::2] = 1.0  # Alternate between 0 and 1
+        seed = 0
+        mixup_prob = 0.0  # Disable mixup to test just smoothing
+        smoothing_factor = 0.05
+
+        # Get predicted probabilities
+        probs = torch.sigmoid(logits)
+
+        # Compute expected loss
+        expected = F.binary_cross_entropy_with_logits(logits, labels, reduction="none")
+        # Zero out loss where predictions are confident enough
+        confident_pos = (labels > 0.5) & (probs >= 0.95)  # 1 - smoothing
+        confident_neg = (labels < 0.5) & (probs <= 0.05)  # smoothing
+        expected = torch.where(confident_pos | confident_neg, torch.zeros_like(expected), expected)
+
+        # Compute actual loss with smoothing
+        actual = bce_mixup_with_smoothing(
+            logits, labels, seed=seed, smoothing_factor=smoothing_factor, mixup_prob=mixup_prob
+        )
+        assert_close(actual, expected, atol=1e-4, rtol=0)
+
+    def test_bce_mixup_with_smoothing_mixed(self):
+        torch.random.manual_seed(0)
+        B, C = 32, 8
+        logits = torch.randn(B, C, device="cuda")
+        labels = torch.zeros(B, C, device="cuda")
+        labels[::2] = 1.0  # Alternate between 0 and 1
+        seed = 0
+        mixup_prob = 1.0  # Always apply mixup
+        smoothing_factor = 0.05
+
+        # Get predicted probabilities and mixup weights
+        torch.sigmoid(logits)
+        weights = get_weights(B, mixup_prob, 1.0, seed).view(B, 1).expand_as(logits)
+        mixed_labels = labels * weights + (1 - weights) * labels.roll(-1, 0)
+
+        # Compute expected loss - no smoothing since all samples are mixed
+        expected = F.binary_cross_entropy_with_logits(logits, mixed_labels, reduction="none")
+
+        # Compute actual loss with smoothing
+        actual = bce_mixup_with_smoothing(
+            logits, labels, seed=seed, smoothing_factor=smoothing_factor, mixup_prob=mixup_prob
+        )
+        assert_close(actual, expected, atol=1e-4, rtol=0)
+
+    def test_bce_mixup_with_smoothing_partial_mix(self):
+        torch.random.manual_seed(0)
+        B, C = 32, 8
+        logits = torch.randn(B, C, device="cuda")
+        labels = torch.zeros(B, C, device="cuda")
+        labels[::2] = 1.0  # Alternate between 0 and 1
+        seed = 0
+        mixup_prob = 0.5  # Mix half the samples
+        smoothing_factor = 0.05
+
+        # Get predicted probabilities and mixup info
+        probs = torch.sigmoid(logits)
+        mixed = is_mixed(B, mixup_prob, 1.0, seed)
+        mixed = mixed.view(-1, 1).expand_as(labels)
+        weights = get_weights(B, mixup_prob, 1.0, seed).view(B, 1).expand_as(logits)
+        mixed_labels = labels * weights + (1 - weights) * labels.roll(-1, 0)
+
+        # Compute expected loss
+        base_loss = F.binary_cross_entropy_with_logits(logits, mixed_labels, reduction="none")
+        # Only apply smoothing to non-mixed samples
+        confident_pos = (labels > 0.5) & (probs >= 0.95) & ~mixed  # 1 - smoothing
+        confident_neg = (labels < 0.5) & (probs <= 0.05) & ~mixed  # smoothing
+        expected = torch.where(confident_pos | confident_neg, torch.zeros_like(base_loss), base_loss)
+
+        # Compute actual loss with smoothing
+        actual = bce_mixup_with_smoothing(
+            logits, labels, seed=seed, smoothing_factor=smoothing_factor, mixup_prob=mixup_prob
+        )
+        assert_close(actual, expected, atol=1e-4, rtol=0)
+
+    def test_bce_mixup_with_smoothing_backward(self):
+        torch.random.manual_seed(0)
+        B, C = 32, 8
+        logits = torch.randn(B, C, device="cuda", requires_grad=True)
+        labels = torch.zeros(B, C, device="cuda")
+        labels[::2] = 1.0  # Alternate between 0 and 1
+        seed = 0
+        mixup_prob = 0.5  # Mix half the samples
+        smoothing_factor = 0.05
+
+        # Get predicted probabilities and mixup info
+        probs = torch.sigmoid(logits.detach())
+        mixed = is_mixed(B, mixup_prob, 1.0, seed)
+        mixed = mixed.view(-1, 1).expand_as(labels)
+        weights = get_weights(B, mixup_prob, 1.0, seed).view(B, 1).expand_as(logits)
+        mixed_labels = labels * weights + (1 - weights) * labels.roll(-1, 0)
+
+        # Compute expected gradient
+        base_loss = F.binary_cross_entropy_with_logits(logits, mixed_labels, reduction="none")
+        # Only apply smoothing to non-mixed samples
+        confident_pos = (labels > 0.5) & (probs >= 0.95) & ~mixed  # 1 - smoothing
+        confident_neg = (labels < 0.5) & (probs <= 0.05) & ~mixed  # smoothing
+        expected = torch.where(confident_pos | confident_neg, torch.zeros_like(base_loss), base_loss)
+        expected.sum().backward()
+        expected_grad = logits.grad
+        logits.grad = None
+
+        # Compute actual gradient with smoothing
+        actual = bce_mixup_with_smoothing(
+            logits, labels, seed=seed, smoothing_factor=smoothing_factor, mixup_prob=mixup_prob
+        )
+        actual.sum().backward()
+        assert_close(logits.grad, expected_grad, atol=1e-4, rtol=0)

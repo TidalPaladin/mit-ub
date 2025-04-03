@@ -33,14 +33,18 @@ def test_categorical_loss_all_unknown():
 
 
 class TestClassificationTask:
+    @pytest.fixture(params=[0.0, 0.5])
+    def label_smoothing(self, request):
+        return request.param
+
     @pytest.fixture
     def task(self, optimizer_init, backbone):
         config = ClassificationConfig(num_classes=10, pool_type=None)
         return ClassificationTask(backbone, classification_config=config, optimizer_init=optimizer_init)
 
     @pytest.fixture
-    def binary_task(self, optimizer_init, backbone):
-        config = ClassificationConfig(num_classes=2, pool_type=None)
+    def binary_task(self, optimizer_init, backbone, label_smoothing):
+        config = ClassificationConfig(num_classes=2, pool_type=None, label_smoothing=label_smoothing)
         return ClassificationTask(backbone, classification_config=config, optimizer_init=optimizer_init)
 
     @pytest.fixture
