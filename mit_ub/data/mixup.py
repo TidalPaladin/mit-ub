@@ -216,6 +216,66 @@ def bce_mixup(
     return BCEMixup.apply(logits, labels, mixup_prob, mixup_alpha, seed, pos_weight)
 
 
+class BCEMixupSmooth(Function):
+    @staticmethod
+    def forward(
+        ctx,
+        logits: Tensor,
+        labels: Tensor,
+        mixup_prob: float,
+        mixup_alpha: float,
+        seed: int,
+        smoothing_factor: float,
+        pos_weight: float | None = None,
+    ) -> Tensor:
+        assert _mixup_cuda is not None
+        ctx.mixup_prob = mixup_prob
+        ctx.mixup_alpha = mixup_alpha
+        ctx.seed = seed
+        ctx.smoothing_factor = smoothing_factor
+        ctx.pos_weight = -1.0 if pos_weight is None else pos_weight
+
+        # Get base BCE loss
+        loss = _mixup_cuda.bce_mixup_fwd(logits, labels, mixup_prob, mixup_alpha, ctx.pos_weight, seed)
+
+        # Get predicted probabilities and mixup mask
+        with torch.no_grad():
+            probs = torch.sigmoid(logits)
+            mixed = is_mixed(logits.size(0), mixup_prob, mixup_alpha, seed)
+            mixed = mixed.view(-1, *([1] * (labels.dim() - 1))).expand_as(labels)
+
+            # For positive labels (1.0), zero loss if prob >= (1 - smoothing)
+            # For negative labels (0.0), zero loss if prob <= smoothing
+            confident_pos = (labels > 0.5) & (probs >= (1 - smoothing_factor))
+            confident_neg = (labels < 0.5) & (probs <= smoothing_factor)
+            confident = (confident_pos | confident_neg) & ~mixed
+
+            # Save tensors needed for backward
+            ctx.save_for_backward(logits, labels, confident.to(logits.dtype))
+
+            # Zero out loss where predictions are confident
+            loss = torch.where(confident, torch.zeros_like(loss), loss)
+
+        return loss
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor) -> Tuple[Tensor, None, None, None, None, None, None]:
+        assert _mixup_cuda is not None
+        logits, labels, confident = ctx.saved_tensors
+        mixup_prob = ctx.mixup_prob
+        mixup_alpha = ctx.mixup_alpha
+        seed = ctx.seed
+        pos_weight = ctx.pos_weight
+
+        # Get base gradients
+        grad = _mixup_cuda.bce_mixup_bwd(logits, labels, grad_output, mixup_prob, mixup_alpha, pos_weight, seed)
+
+        # Zero out gradients for confident predictions
+        grad = grad * (1 - confident)
+
+        return grad, None, None, None, None, None, None
+
+
 def bce_mixup_with_smoothing(
     logits: Tensor,
     labels: Tensor,
@@ -254,26 +314,11 @@ def bce_mixup_with_smoothing(
         - labels: :math:`(N, ...)`
         - Output: :math:`(N, ...)`
     """
-    # Get base BCE loss and which samples were mixed
-    loss = bce_mixup(logits, labels, seed, mixup_prob, mixup_alpha, pos_weight)
-    mixed = is_mixed(logits.size(0), mixup_prob, mixup_alpha, seed)
-    mixed = mixed.view(-1, *([1] * (labels.dim() - 1))).expand_as(labels)
-
-    # Only apply smoothing to non-mixed samples
-    with torch.no_grad():
-        # Get predicted probabilities
-        probs = torch.sigmoid(logits)
-        # For positive labels (1.0), zero loss if prob >= (1 - smoothing)
-        # For negative labels (0.0), zero loss if prob <= smoothing
-        confident_pos = (labels > 0.5) & (probs >= (1 - smoothing_factor))
-        confident_neg = (labels < 0.5) & (probs <= smoothing_factor)
-        confident = confident_pos | confident_neg
-        # Don't apply smoothing to mixed samples
-        confident = confident & ~mixed
-
-    # Zero out loss where predictions are confident enough
-    loss = torch.where(confident, torch.zeros_like(loss), loss)
-    return loss
+    if _mixup_cuda is None:
+        raise RuntimeError("MixUp is not available on this system")
+    if pos_weight is not None and not (0 <= pos_weight <= 1):
+        raise ValueError("pos_weight must be in range [0, 1]")
+    return BCEMixupSmooth.apply(logits, labels, mixup_prob, mixup_alpha, seed, smoothing_factor, pos_weight)
 
 
 def parse_args() -> Namespace:

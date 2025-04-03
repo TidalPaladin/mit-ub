@@ -609,3 +609,52 @@ class TestBCEMixupWithSmoothing:
         )
         actual.sum().backward()
         assert_close(logits.grad, expected_grad, atol=1e-4, rtol=0)
+
+    def test_bce_mixup_with_smoothing_all_confident(self):
+        """Test that backprop works when all predictions are confident enough."""
+        torch.random.manual_seed(0)
+        B, C = 32, 8
+        smoothing_factor = 0.05
+        mixup_prob = 0.0  # Disable mixup to test just smoothing
+
+        # Create logits that will produce confident predictions
+        logits = torch.full((B, C), 10.0, device="cuda", requires_grad=True)  # Very positive logits -> probs near 1
+        labels = torch.ones(B, C, device="cuda")  # All positive labels
+        seed = 0
+
+        # Verify all predictions are above threshold
+        probs = torch.sigmoid(logits.detach())
+        assert (probs >= (1 - smoothing_factor)).all()
+
+        # Compute loss and run backward pass
+        loss = bce_mixup_with_smoothing(
+            logits, labels, seed=seed, smoothing_factor=smoothing_factor, mixup_prob=mixup_prob
+        )
+
+        # Loss should be all zeros since all predictions are confident
+        assert (loss == 0).all()
+
+        # Backward pass should work without error and produce zero gradients
+        loss.sum().backward()
+        assert (logits.grad == 0).all()
+
+        # Test with all negative labels and predictions too
+        logits = torch.full((B, C), -10.0, device="cuda", requires_grad=True)  # Very negative logits -> probs near 0
+        labels = torch.zeros(B, C, device="cuda")  # All negative labels
+        logits.grad = None
+
+        # Verify all predictions are below threshold
+        probs = torch.sigmoid(logits.detach())
+        assert (probs <= smoothing_factor).all()
+
+        # Compute loss and run backward pass
+        loss = bce_mixup_with_smoothing(
+            logits, labels, seed=seed, smoothing_factor=smoothing_factor, mixup_prob=mixup_prob
+        )
+
+        # Loss should be all zeros since all predictions are confident
+        assert (loss == 0).all()
+
+        # Backward pass should work without error and produce zero gradients
+        loss.sum().backward()
+        assert (logits.grad == 0).all()  # type: ignore
