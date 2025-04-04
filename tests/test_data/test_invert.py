@@ -32,6 +32,15 @@ class TestInvert:
         y2 = invert(x, invert_prob=0.5, seed=0)
         assert_close(y1, y2)
 
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    def test_invert_dtypes(self, dtype):
+        torch.random.manual_seed(0)
+        x = torch.randn(4, 3, 32, 32, device="cuda", dtype=dtype)
+        y = invert(x, invert_prob=0.5, seed=0)
+        assert y.dtype == x.dtype
+        assert y.shape == x.shape
+        assert y.device == x.device
+
 
 @pytest.mark.cuda
 class TestInvertInplace:
