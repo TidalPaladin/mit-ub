@@ -11,13 +11,17 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics as tm
-import transformer_engine.pytorch as te
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
 from lightning_utilities.core.rank_zero import rank_zero_info, rank_zero_only, rank_zero_warn
 from torch import Tensor
 from torch.optim.optimizer import Optimizer
 from torchvision.utils import make_grid, save_image
+from vit import ViT, ViTConfig
+from vit.fused import LayerNormLinear
+from vit.pos_enc import RelativeFactorizedPosition
+from vit.tokens import apply_mask, generate_non_overlapping_mask, mask_is_ragged
+from vit.transformer import TransformerLayer
 
 from ..data.invert import invert_
 from ..data.mixup import mixup
@@ -35,9 +39,6 @@ from ..data.noise import (
 from ..data.posterize import posterize_
 from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, TokenSimilarity
 from ..metrics.distance import RMSPairwiseDistance, TokenRMSDistance
-from ..model import ViT, ViTConfig
-from ..model.layers import RelativeFactorizedPosition
-from ..tokens import apply_mask, generate_non_overlapping_mask, mask_is_ragged
 from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
 
 
@@ -333,14 +334,14 @@ class JEPA(Task):
         self.jepa_predictor = nn.ModuleList(
             [self.backbone.create_decoder_layer(i, drop_path_rate=0.0) for i in range(self.jepa_config.predictor_depth)]
         )
-        self.jepa_head = te.LayerNormLinear(
+        self.jepa_head = LayerNormLinear(
             self.backbone.config.hidden_size,
             self.backbone.config.hidden_size,
         )
 
         # SigLIP pooling layer
         rank_zero_info(f"Using SigLIP weight: {self.jepa_config.siglip_weight}")
-        self.siglip_head = te.LayerNormLinear(
+        self.siglip_head = LayerNormLinear(
             self.backbone.config.hidden_size,
             self.backbone.config.hidden_size,
         )
@@ -380,9 +381,7 @@ class JEPA(Task):
     def forward(self, x: Tensor, context_mask: Tensor, target_mask: Tensor) -> Dict[str, Tensor]:
         # Run encoder on context
         torch.cuda.nvtx.range_push("context_backbone")
-        context, cls_token = cast(
-            Tuple[Tensor, Tensor], self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
-        )
+        context, cls_token = cast(Tuple[Tensor, Tensor], self.backbone(x, mask=context_mask))
         torch.cuda.nvtx.range_pop()
 
         # Prepare positional encoding for target queries
@@ -393,7 +392,7 @@ class JEPA(Task):
         # Run query and context through predictor
         torch.cuda.nvtx.range_push("jepa_predictor")
         for block in self.jepa_predictor:
-            block = cast(te.TransformerLayer, block)
+            block = cast(TransformerLayer, block)
             query = block(query, encoder_output=context, checkpoint_core_attention=self.backbone.config.checkpoint)
         torch.cuda.nvtx.range_pop()
 
@@ -483,7 +482,7 @@ class JEPA(Task):
         with torch.inference_mode():
             self.teacher_backbone.eval()
             torch.cuda.nvtx.range_push("teacher_backbone")
-            full_target, target_cls_token = cast(Tuple[Tensor, Tensor], self.teacher_backbone(x, reshape=False))
+            full_target, target_cls_token = cast(Tuple[Tensor, Tensor], self.teacher_backbone(x))
             torch.cuda.nvtx.range_pop()
 
         # inference_mode() removes version tracking so we must clone the outputs
@@ -495,7 +494,7 @@ class JEPA(Task):
     @torch.no_grad()
     def apply_noise(self, x: Tensor) -> Tensor:
         torch.cuda.nvtx.range_push("noise")
-        if self.jepa_config.use_noise and self.training:
+        if self.jepa_config.use_noise and self.training and x.device.type == "cuda":
             x = apply_noise_batched(
                 x,
                 prob=self.jepa_config.noise_prob,
@@ -510,7 +509,7 @@ class JEPA(Task):
 
     @torch.no_grad()
     def apply_mixup(self, *tensors: Tensor, seed: int | None = None) -> Tuple[int | None, Tuple[Tensor, ...]]:
-        if self.training and self.jepa_config.mixup_prob > 0:
+        if self.training and self.jepa_config.mixup_prob > 0 and all(t.device.type == "cuda" for t in tensors):
             torch.cuda.nvtx.range_push("mixup")
             mixup_seed = int(torch.randint(0, 2**31 - 1, (1,)).item()) if seed is None else seed
             tensors = cast(
@@ -527,6 +526,8 @@ class JEPA(Task):
             torch.cuda.nvtx.range_push("invert")
             invert_seed = int(torch.randint(0, 2**31 - 1, (1,)).item()) if seed is None else seed
             for t in tensors:
+                if t.device.type != "cuda":
+                    continue
                 invert_(
                     t,
                     self.jepa_config.invert_prob,
@@ -543,6 +544,8 @@ class JEPA(Task):
             torch.cuda.nvtx.range_push("posterize")
             posterize_seed = int(torch.randint(0, 2**31 - 1, (1,)).item()) if seed is None else seed
             for t in tensors:
+                if t.device.type != "cuda":
+                    continue
                 posterize_(
                     t,
                     self.jepa_config.posterize_prob,
@@ -635,8 +638,6 @@ class JEPA(Task):
     ) -> Dict[str, Any]:
         torch.compiler.cudagraph_mark_step_begin()
         x: Tensor = batch["img"]
-        if not x.device.type == "cuda":
-            raise ValueError("JEPA only supports CUDA")
 
         # ema update from previous step when training
         if state.mode == Mode.TRAIN:

@@ -1,8 +1,8 @@
 import sys
 
 import pytest
+from vit import ViTConfig
 
-from mit_ub.model.backbone import ViTConfig
 from mit_ub.profile import entrypoint
 
 

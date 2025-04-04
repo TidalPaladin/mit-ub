@@ -2,9 +2,9 @@ from argparse import ArgumentParser, Namespace
 from pathlib import Path
 
 import torch
+from convnext import ConvNextConfig
 from torch.profiler import ProfilerActivity, profile, record_function
-
-from mit_ub.model import ConvNextConfig, ViTConfig
+from vit import ViTConfig
 
 
 def parse_args() -> Namespace:

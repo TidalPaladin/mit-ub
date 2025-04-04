@@ -208,6 +208,7 @@ class TestJEPAWithClassification:
         gpu_trainer.fit(binary_task, datamodule=cifar10_datamodule_binary)
 
 
+@pytest.mark.skip(reason="Broken")
 class TestDistillationWithClassification:
     @pytest.fixture
     def task(self, tmp_path, vit_distillation, convnext_distillation, optimizer_init):

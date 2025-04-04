@@ -6,10 +6,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 import torch
 import torch.nn as nn
 import torchmetrics as tm
+from convnext import ConvNextConfig
 from deep_helpers.structs import State
 from deep_helpers.tasks import Task
 from lightning_utilities.core.rank_zero import rank_zero_warn
 from torch import Tensor
+from vit import ViT, ViTConfig
 
 from ..data import bce_mixup, bce_mixup_with_smoothing, cross_entropy_mixup, invert_, is_mixed, mixup, posterize_
 from ..data.noise import (
@@ -23,8 +25,6 @@ from ..data.noise import (
     UNIFORM_NOISE_MIN,
     apply_noise_batched,
 )
-from ..model import AnyModelConfig, ViT, ViTConfig
-from ..model.helpers import grid_to_tokens
 from .distillation import DistillationConfig, DistillationWithProbe
 from .jepa import JEPAConfig, JEPAWithProbe, save_first_batch
 
@@ -97,7 +97,8 @@ def update_metrics(
 
     # Filter valid labels without mixup for metric computation
     mask = is_valid_binary_label(label) if is_binary else is_valid_categorical_label(label)
-    mask = mask & ~is_mixed(pred.shape[0], mixup_prob, mixup_alpha, mixup_seed)
+    if all(t.device.type == "cuda" for t in (pred, label)):
+        mask = mask & ~is_mixed(pred.shape[0], mixup_prob, mixup_alpha, mixup_seed)
     if not mask.any():
         return
 
@@ -271,7 +272,7 @@ class ClassificationTask(Task):
 
     def __init__(
         self,
-        backbone_config: AnyModelConfig,
+        backbone_config: ViTConfig | ConvNextConfig,
         classification_config: ClassificationConfig,
         optimizer_init: Dict[str, Any] = {},
         lr_scheduler_init: Dict[str, Any] = {},
@@ -338,12 +339,11 @@ class ClassificationTask(Task):
         with torch.set_grad_enabled(not self.config.freeze_backbone):
             # ViTs
             if isinstance(self.backbone, ViT):
-                _, cls_token = self.backbone(x, reshape=False)
+                _, cls_token = self.backbone(x)
                 pred = cls_token
             # CNNs
             else:
                 pred = self.backbone(x)
-                pred = grid_to_tokens(pred)
 
         # Main classification head
         cls = self.classification_head(pred)
@@ -360,8 +360,6 @@ class ClassificationTask(Task):
     ) -> Dict[str, Any]:
         # get inputs
         x = batch["img"]
-        if not x.device.type == "cuda":
-            raise ValueError("Classification only supports CUDA")
         y = batch[self.config.label_key].long()
         y.shape[0]
 
@@ -424,12 +422,11 @@ class ClassificationTask(Task):
         with torch.set_grad_enabled(not self.config.freeze_backbone and self.training):
             # ViTs
             if isinstance(self.backbone, ViT):
-                _, cls_token = self.backbone(x, reshape=False)
+                _, cls_token = self.backbone(x)
                 pred = cls_token
             # CNNs
             else:
                 pred = self.backbone(x)
-                pred = grid_to_tokens(pred)
 
         # separate metrics for primary and auxiliary tasks
         auxiliary_metrics = cast(Dict[str, Dict[str, tm.Metric]], {name: {} for name in self.other_configs.keys()})
@@ -533,7 +530,6 @@ class JEPAWithClassification(JEPAWithProbe):
         return self.backbone.create_head(
             out_dim=self.classification_config.num_classes if not self.classification_config.is_binary else 1,
             pool_type=self.classification_config.pool_type,
-            use_mlp=False,
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
@@ -573,8 +569,8 @@ class JEPAWithClassification(JEPAWithProbe):
 class DistillationWithClassification(DistillationWithProbe):
     def __init__(
         self,
-        backbone_config: AnyModelConfig,
-        teacher_config: AnyModelConfig,
+        backbone_config: ViTConfig | ConvNextConfig,
+        teacher_config: ViTConfig | ConvNextConfig,
         teacher_checkpoint: Path,
         classification_config: ClassificationConfig,
         distillation_config: DistillationConfig = DistillationConfig(),
@@ -613,7 +609,6 @@ class DistillationWithClassification(DistillationWithProbe):
         return self.backbone.create_head(
             out_dim=self.classification_config.num_classes if not self.classification_config.is_binary else 1,
             pool_type=self.classification_config.pool_type,
-            use_mlp=False,
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:

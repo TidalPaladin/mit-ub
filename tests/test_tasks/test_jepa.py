@@ -286,7 +286,7 @@ class TestJEPA:
 
     @pytest.fixture
     def task_siglip(self, optimizer_init, backbone):
-        config = JEPAConfig()
+        config = JEPAConfig(use_noise=False, invert_prob=0.0, solarize_prob=0.0, posterize_prob=0.0)
         config.scale = 1
         config.siglip_weight = 0.5
         return JEPA(backbone, optimizer_init=optimizer_init, jepa_config=config)

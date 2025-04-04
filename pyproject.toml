@@ -13,8 +13,9 @@ dependencies = [
     "torch",
     "torchvision",
     "einops",
-    "transformer-engine>=1.13.0",
     "ninja",
+    "convnext @ git+https://github.com/TidalPaladin/convnext.git",
+    "vit @ git+https://github.com/TidalPaladin/vit.git",
 ]
 readme = "README.md"
 license = {text = "Apache"}
