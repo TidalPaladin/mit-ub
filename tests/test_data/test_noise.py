@@ -40,3 +40,12 @@ class TestNoise:
         y3 = apply_noise_batched(x, seed=1)
         assert_close(y1, y2)
         assert not torch.allclose(y1, y3)
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    def test_dtypes(self, dtype):
+        torch.random.manual_seed(0)
+        x = torch.randn(8, 3, 224, 224, dtype=dtype).cuda()
+        y = apply_noise_batched(x, seed=0)
+        assert y.dtype == x.dtype
+        assert y.shape == x.shape
+        assert y.device == x.device
