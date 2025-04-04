@@ -3,10 +3,40 @@ Implements a fused kernel for applying various noise types to a batch of images.
 Each noise type is either applied or not applied to each entry of the batch independently.
 */
 #include <cuda.h>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <curand.h>
 #include <curand_kernel.h>
 #include <torch/extension.h>
+
+// Helper function to convert any floating point type to float
+__device__ __forceinline__ float to_float(float x) { return x; }
+__device__ __forceinline__ float to_float(at::Half x) {
+    __half h;
+    memcpy(&h, &x, sizeof(__half));
+    return __half2float(h);
+}
+__device__ __forceinline__ float to_float(at::BFloat16 x) {
+    __nv_bfloat16 b;
+    memcpy(&b, &x, sizeof(__nv_bfloat16));
+    return __bfloat162float(b);
+}
+
+// Helper function to convert float back to target type
+__device__ __forceinline__ float from_float(float x, float) { return x; }
+__device__ __forceinline__ at::Half from_float(float x, at::Half) {
+    at::Half h;
+    __half tmp = __float2half(x);
+    memcpy(&h, &tmp, sizeof(at::Half));
+    return h;
+}
+__device__ __forceinline__ at::BFloat16 from_float(float x, at::BFloat16) {
+    at::BFloat16 b;
+    __nv_bfloat16 tmp = __float2bfloat16(x);
+    memcpy(&b, &tmp, sizeof(at::BFloat16));
+    return b;
+}
 
 template <typename scalar_t>
 __global__ void fused_noise_kernel(const scalar_t *__restrict__ input, scalar_t *__restrict__ output,
@@ -19,16 +49,16 @@ __global__ void fused_noise_kernel(const scalar_t *__restrict__ input, scalar_t 
     const int seq_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (seq_idx >= seq_len || batch_idx >= batch_size) return;
 
-    // Load input value
+    // Load input value and convert to float for computations
     const int64_t idx = batch_idx * seq_len + seq_idx;
-    scalar_t val = input[idx];
+    float val = to_float(input[idx]);
 
     // Compute masks for each noise type for this batch entry
     curandState batch_state;
     curand_init(seed + batch_idx, 0, 0, &batch_state);
-    const scalar_t uniform_mask = curand_uniform(&batch_state) < uniform_prob;
-    const scalar_t mult_mask = curand_uniform(&batch_state) < multiplicative_prob;
-    const scalar_t sp_mask = curand_uniform(&batch_state) < salt_pepper_prob;
+    const float uniform_mask = curand_uniform(&batch_state) < uniform_prob;
+    const float mult_mask = curand_uniform(&batch_state) < multiplicative_prob;
+    const float sp_mask = curand_uniform(&batch_state) < salt_pepper_prob;
 
     // Initialize pointwise-unique random state
     curandState seq_state;
@@ -66,7 +96,8 @@ __global__ void fused_noise_kernel(const scalar_t *__restrict__ input, scalar_t 
         val = __saturatef(val);
     }
 
-    output[idx] = val;
+    // Convert back to original type
+    output[idx] = from_float(val, scalar_t());
 }
 
 torch::Tensor fused_noise_cuda(const torch::Tensor &input, const float uniform_noise_min, const float uniform_noise_max,
@@ -79,20 +110,49 @@ torch::Tensor fused_noise_cuda(const torch::Tensor &input, const float uniform_n
     const int64_t batch_size = input.size(0);
     const int64_t seq_len = input.numel() / batch_size;
 
-    AT_DISPATCH_FLOATING_TYPES(
-        input.scalar_type(), "fused_noise_cuda", ([&] {
-            // Calculate grid dimensions
-            int min_grid_size;
-            int block_size;
-            cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size, (void *)fused_noise_kernel<scalar_t>, 0, 0);
-            const unsigned int blocks_x = (seq_len + block_size - 1) / block_size;
-            const dim3 blocks(blocks_x, batch_size);
+    if (input.scalar_type() == at::ScalarType::Half) {
+        using scalar_t = at::Half;
+        // Calculate grid dimensions
+        int min_grid_size;
+        int block_size;
+        cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size, (void *)fused_noise_kernel<scalar_t>, 0, 0);
+        const unsigned int blocks_x = (seq_len + block_size - 1) / block_size;
+        const dim3 blocks(blocks_x, batch_size);
 
-            fused_noise_kernel<scalar_t><<<blocks, block_size>>>(
-                input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), uniform_noise_min, uniform_noise_max,
-                multiplicative_min, multiplicative_max, salt_pepper_min, salt_pepper_max, uniform_prob,
-                multiplicative_prob, salt_pepper_prob, clip, batch_size, seq_len, seed);
-        }));
+        fused_noise_kernel<scalar_t><<<blocks, block_size>>>(
+            input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), uniform_noise_min, uniform_noise_max,
+            multiplicative_min, multiplicative_max, salt_pepper_min, salt_pepper_max, uniform_prob, multiplicative_prob,
+            salt_pepper_prob, clip, batch_size, seq_len, seed);
+    } else if (input.scalar_type() == at::ScalarType::BFloat16) {
+        using scalar_t = at::BFloat16;
+        // Calculate grid dimensions
+        int min_grid_size;
+        int block_size;
+        cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size, (void *)fused_noise_kernel<scalar_t>, 0, 0);
+        const unsigned int blocks_x = (seq_len + block_size - 1) / block_size;
+        const dim3 blocks(blocks_x, batch_size);
+
+        fused_noise_kernel<scalar_t><<<blocks, block_size>>>(
+            input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), uniform_noise_min, uniform_noise_max,
+            multiplicative_min, multiplicative_max, salt_pepper_min, salt_pepper_max, uniform_prob, multiplicative_prob,
+            salt_pepper_prob, clip, batch_size, seq_len, seed);
+    } else {
+        AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "fused_noise_cuda", ([&] {
+                                       // Calculate grid dimensions
+                                       int min_grid_size;
+                                       int block_size;
+                                       cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
+                                                                          (void *)fused_noise_kernel<scalar_t>, 0, 0);
+                                       const unsigned int blocks_x = (seq_len + block_size - 1) / block_size;
+                                       const dim3 blocks(blocks_x, batch_size);
+
+                                       fused_noise_kernel<scalar_t><<<blocks, block_size>>>(
+                                           input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), uniform_noise_min,
+                                           uniform_noise_max, multiplicative_min, multiplicative_max, salt_pepper_min,
+                                           salt_pepper_max, uniform_prob, multiplicative_prob, salt_pepper_prob, clip,
+                                           batch_size, seq_len, seed);
+                                   }));
+    }
 
     return output;
 }

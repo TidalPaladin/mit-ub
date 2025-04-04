@@ -20,19 +20,28 @@ SALT_PEPPER_NOISE_MIN: Final = 0.01
 SALT_PEPPER_NOISE_MAX: Final = 0.05
 DEFAULT_NOISE_PROB: Final = 0.1
 
-try:
-    import noise_cuda
-
-    _noise_cuda = noise_cuda
-except ImportError:
-    if torch.cuda.is_available():
-        _noise_cuda = load(
-            name="noise_cuda",
-            sources=[str(Path(__file__).parents[2] / "csrc" / "noise.cu")],
-            extra_cuda_cflags=["-O3"],
-        )
-    else:
-        _noise_cuda = None
+# try:
+#    import noise_cuda
+#
+#    _noise_cuda = noise_cuda
+# except ImportError:
+#    if torch.cuda.is_available():
+#        _noise_cuda = load(
+#            name="noise_cuda",
+#            sources=[str(Path(__file__).parents[2] / "csrc" / "noise.cu")],
+#            extra_cuda_cflags=["-O3"],
+#        )
+#    else:
+#        _noise_cuda = None
+#
+if torch.cuda.is_available():
+    _noise_cuda = load(
+        name="noise_cuda",
+        sources=[str(Path(__file__).parents[2] / "csrc" / "noise.cu")],
+        extra_cuda_cflags=["-O3"],
+    )
+else:
+    _noise_cuda = None
 
 
 @torch.no_grad()
