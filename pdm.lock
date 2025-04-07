@@ -315,10 +315,10 @@ files = [
 
 [[package]]
 name = "convnext"
-version = "0.1.dev2"
+version = "0.1.dev4"
 requires_python = ">=3.10"
 git = "https://github.com/TidalPaladin/convnext.git"
-revision = "d713e6e03f65a5559344b1ed6f6e160b1ead7e22"
+revision = "46bc440be110ccd02aa1303b132dee4c2728e86f"
 summary = ""
 groups = ["default"]
 dependencies = [
