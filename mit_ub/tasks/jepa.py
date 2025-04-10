@@ -321,7 +321,6 @@ class JEPA(Task):
 
         # Backbone and EMA weights
         backbone = backbone_config.instantiate()
-        assert isinstance(backbone, ViT)
         self.backbone = backbone
         self.teacher_backbone = deepcopy(self.backbone)
         self.teacher_backbone.requires_grad_(False)

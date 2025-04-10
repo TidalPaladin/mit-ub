@@ -11,7 +11,7 @@ from deep_helpers.structs import State
 from deep_helpers.tasks import Task
 from lightning_utilities.core.rank_zero import rank_zero_warn
 from torch import Tensor
-from vit import ViT, ViTConfig
+from vit import ViTConfig
 
 from ..data import bce_mixup, bce_mixup_with_smoothing, cross_entropy_mixup, invert_, is_mixed, mixup, posterize_
 from ..data.noise import (
@@ -338,12 +338,14 @@ class ClassificationTask(Task):
     def forward(self, x: Tensor) -> Dict[str, Tensor]:
         with torch.set_grad_enabled(not self.config.freeze_backbone):
             # ViTs
-            if isinstance(self.backbone, ViT):
+            if isinstance(self.backbone.config, ViTConfig):
                 _, cls_token = self.backbone(x)
                 pred = cls_token
             # CNNs
-            else:
+            elif isinstance(self.backbone.config, ConvNextConfig):
                 pred = self.backbone(x)
+            else:
+                raise ValueError(f"Unknown backbone config: {self.backbone.config}")
 
         # Main classification head
         cls = self.classification_head(pred)
@@ -421,12 +423,14 @@ class ClassificationTask(Task):
         # handles pooling and the head projection
         with torch.set_grad_enabled(not self.config.freeze_backbone and self.training):
             # ViTs
-            if isinstance(self.backbone, ViT):
+            if isinstance(self.backbone.config, ViTConfig):
                 _, cls_token = self.backbone(x)
                 pred = cls_token
             # CNNs
-            else:
+            elif isinstance(self.backbone.config, ConvNextConfig):
                 pred = self.backbone(x)
+            else:
+                raise ValueError(f"Unknown backbone config: {self.backbone.config}")
 
         # separate metrics for primary and auxiliary tasks
         auxiliary_metrics = cast(Dict[str, Dict[str, tm.Metric]], {name: {} for name in self.other_configs.keys()})
