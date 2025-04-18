@@ -11,7 +11,7 @@ from deep_helpers.tasks import Task
 from lightning_utilities.core.rank_zero import rank_zero_warn
 from torch import Tensor
 
-from ..data import bce_mixup, bce_mixup_with_smoothing, cross_entropy_mixup, invert_, is_mixed, mixup, posterize_
+from ..data import bce_mixup, cross_entropy_mixup, invert_, is_mixed, mixup, posterize_
 from ..data.noise import (
     DEFAULT_NOISE_PROB,
     MULTIPLICATIVE_NOISE_MAX,
@@ -69,11 +69,12 @@ def binary_loss(
         label = label.view(-1, 1)
     label = label.type_as(logits)
     if label_smoothing > 0:
-        result = bce_mixup_with_smoothing(
-            logits, label, mixup_seed, label_smoothing, mixup_prob, mixup_alpha, pos_weight
+        label = torch.where(
+            is_valid_binary_label(label),
+            label.clip(min=label_smoothing, max=1 - label_smoothing),
+            label,
         )
-    else:
-        result = bce_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha, pos_weight)
+    result = bce_mixup(logits, label, mixup_seed, mixup_prob, mixup_alpha, pos_weight)
     mask = result >= 0.0
     result = result[mask].mean() if mask.any() else logits.new_tensor(0.0)
     return result
