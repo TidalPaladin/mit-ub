@@ -25,8 +25,9 @@ from ..data.noise import (
     UNIFORM_NOISE_MIN,
     apply_noise_batched,
 )
-from ..model import AnyModelConfig, ViT
-from ..model.helpers import grid_to_tokens
+from vit import ViT, ViTConfig
+from convnext import ConvNextConfig
+from convnext.block import grid_to_tokens
 
 
 @dataclass
@@ -84,8 +85,8 @@ class Distillation(Task):
 
     def __init__(
         self,
-        backbone_config: AnyModelConfig,
-        teacher_config: AnyModelConfig,
+        backbone_config: ViTConfig | ConvNextConfig,
+        teacher_config: ViTConfig | ConvNextConfig,
         teacher_checkpoint: Path,
         distillation_config: DistillationConfig = DistillationConfig(),
         optimizer_init: Dict[str, Any] = {},
@@ -176,7 +177,6 @@ class Distillation(Task):
         # CNNs
         else:
             pred = self.backbone(x)
-            pred = grid_to_tokens(pred)
             pred_cls_token = self.student_pool(pred)
 
         pred_proj = self.proj(pred)
@@ -199,7 +199,7 @@ class Distillation(Task):
             self.teacher_backbone.eval()
             target, target_cls_token = cast(
                 Tuple[Tensor, Tensor],
-                self.teacher_backbone(self.teacher_resize(x), reshape=False),
+                self.teacher_backbone(self.teacher_resize(x)),
             )
 
             if self.training and self.config.use_noise:
@@ -282,8 +282,8 @@ class Distillation(Task):
 class DistillationWithProbe(Distillation, ABC):
     def __init__(
         self,
-        backbone_config: AnyModelConfig,
-        teacher_config: AnyModelConfig,
+        backbone_config: ViTConfig | ConvNextConfig,
+        teacher_config: ViTConfig | ConvNextConfig,
         teacher_checkpoint: Path,
         distillation_config: DistillationConfig = DistillationConfig(),
         probe_key: str = "pred_cls_token",

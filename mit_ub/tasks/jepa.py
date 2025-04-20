@@ -11,7 +11,6 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics as tm
-import transformer_engine.pytorch as te
 from deep_helpers.structs import Mode, State
 from deep_helpers.tasks import Task
 from lightning_utilities.core.rank_zero import rank_zero_info, rank_zero_only, rank_zero_warn
@@ -35,9 +34,9 @@ from ..data.noise import (
 from ..data.posterize import posterize_
 from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, TokenSimilarity
 from ..metrics.distance import RMSPairwiseDistance, TokenRMSDistance
-from ..model import ViT, ViTConfig
-from ..model.layers import RelativeFactorizedPosition
-from ..tokens import apply_mask, generate_non_overlapping_mask, mask_is_ragged
+from vit import ViT, ViTConfig
+from vit.pos_enc import RelativeFactorizedPosition
+from vit.tokens import apply_mask, generate_non_overlapping_mask, mask_is_ragged
 from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
 
 
@@ -327,23 +326,17 @@ class JEPA(Task):
         self.teacher_backbone.eval()
 
         # Position encoding / initialization for prediction queries.
-        self.jepa_pos_enc = RelativeFactorizedPosition(2, self.backbone.config.hidden_size)
+        self.jepa_pos_enc = RelativeFactorizedPosition(2, self.backbone.config.hidden_size, backend=self.backbone.config.backend)
 
         # JEPA predictor
         self.jepa_predictor = nn.ModuleList(
             [self.backbone.create_decoder_layer(i, drop_path_rate=0.0) for i in range(self.jepa_config.predictor_depth)]
         )
-        self.jepa_head = te.LayerNormLinear(
-            self.backbone.config.hidden_size,
-            self.backbone.config.hidden_size,
-        )
+        self.jepa_head = self.backbone.create_head(self.backbone.config.hidden_size)
 
         # SigLIP pooling layer
         rank_zero_info(f"Using SigLIP weight: {self.jepa_config.siglip_weight}")
-        self.siglip_head = te.LayerNormLinear(
-            self.backbone.config.hidden_size,
-            self.backbone.config.hidden_size,
-        )
+        self.siglip_head = self.backbone.create_head(self.backbone.config.hidden_size)
         self.siglip_t = nn.Parameter(torch.empty(1))
         self.siglip_b = nn.Parameter(torch.empty(1))
         nn.init.constant_(self.siglip_t, math.log(self.jepa_config.siglip_t))
@@ -381,7 +374,7 @@ class JEPA(Task):
         # Run encoder on context
         torch.cuda.nvtx.range_push("context_backbone")
         context, cls_token = cast(
-            Tuple[Tensor, Tensor], self.backbone(x, mask=context_mask, mask_fill_value=None, reshape=False)
+            Tuple[Tensor, Tensor], self.backbone(x, mask=context_mask)
         )
         torch.cuda.nvtx.range_pop()
 
@@ -393,7 +386,6 @@ class JEPA(Task):
         # Run query and context through predictor
         torch.cuda.nvtx.range_push("jepa_predictor")
         for block in self.jepa_predictor:
-            block = cast(te.TransformerLayer, block)
             query = block(query, encoder_output=context, checkpoint_core_attention=self.backbone.config.checkpoint)
         torch.cuda.nvtx.range_pop()
 
@@ -483,7 +475,7 @@ class JEPA(Task):
         with torch.inference_mode():
             self.teacher_backbone.eval()
             torch.cuda.nvtx.range_push("teacher_backbone")
-            full_target, target_cls_token = cast(Tuple[Tensor, Tensor], self.teacher_backbone(x, reshape=False))
+            full_target, target_cls_token = cast(Tuple[Tensor, Tensor], self.teacher_backbone(x))
             torch.cuda.nvtx.range_pop()
 
         # inference_mode() removes version tracking so we must clone the outputs
