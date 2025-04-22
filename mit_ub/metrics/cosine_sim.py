@@ -6,7 +6,7 @@ import torchmetrics as tm
 from lightning_utilities.core.rank_zero import rank_zero_warn
 from torch import Tensor
 
-from ..model import compile_is_disabled
+from ..helpers import compile_is_disabled
 
 
 EPS: Final = 1e-8

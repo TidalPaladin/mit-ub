@@ -8,7 +8,7 @@ from deep_helpers.optim.rsqrt import get_momentum
 from torch import Tensor
 from torch.distributed import ReduceOp, all_reduce
 
-from ..model.helpers import compile_is_disabled
+from ..helpers import compile_is_disabled
 
 
 BUCKET_SIZE_MB: Final = 25

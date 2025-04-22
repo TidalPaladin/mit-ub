@@ -1,8 +1,8 @@
 import pytest
 import pytorch_lightning as pl
 import torch
-
-from mit_ub.model import ConvNextConfig, ViTConfig
+from convnext import ConvNextConfig
+from vit import ViTConfig
 
 
 @pytest.fixture
@@ -80,11 +80,11 @@ def backbone(request):
 
 
 @pytest.fixture
-def gpu_trainer(logger):
+def trainer(logger):
     if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
+        pytest.skip("CUDA not available")
     return pl.Trainer(
-        accelerator="gpu",
+        accelerator="cuda",
         devices=1,
         fast_dev_run=True,
         logger=logger,
