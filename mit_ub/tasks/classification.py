@@ -6,10 +6,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 import torch
 import torch.nn as nn
 import torchmetrics as tm
+from convnext import ConvNextConfig
+from convnext.block import grid_to_tokens
 from deep_helpers.structs import State
 from deep_helpers.tasks import Task
 from lightning_utilities.core.rank_zero import rank_zero_warn
 from torch import Tensor
+from vit import ViT, ViTConfig
 
 from ..data import bce_mixup, cross_entropy_mixup, invert_, is_mixed, mixup, posterize_
 from ..data.noise import (
@@ -23,9 +26,6 @@ from ..data.noise import (
     UNIFORM_NOISE_MIN,
     apply_noise_batched,
 )
-from vit import ViT, ViTConfig
-from convnext import ConvNextConfig
-from convnext.block import grid_to_tokens
 from .distillation import DistillationConfig, DistillationWithProbe
 from .jepa import JEPAConfig, JEPAWithProbe, save_first_batch
 

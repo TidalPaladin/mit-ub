@@ -1,9 +1,8 @@
 import pytest
 import pytorch_lightning as pl
 import torch
-
-from vit import ViTConfig
 from convnext import ConvNextConfig
+from vit import ViTConfig
 
 
 @pytest.fixture

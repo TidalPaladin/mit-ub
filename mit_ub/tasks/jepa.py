@@ -17,6 +17,9 @@ from lightning_utilities.core.rank_zero import rank_zero_info, rank_zero_only, r
 from torch import Tensor
 from torch.optim.optimizer import Optimizer
 from torchvision.utils import make_grid, save_image
+from vit import ViT, ViTConfig
+from vit.pos_enc import RelativeFactorizedPosition
+from vit.tokens import apply_mask, generate_non_overlapping_mask, mask_is_ragged
 
 from ..data.invert import invert_
 from ..data.mixup import mixup
@@ -34,9 +37,6 @@ from ..data.noise import (
 from ..data.posterize import posterize_
 from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, TokenSimilarity
 from ..metrics.distance import RMSPairwiseDistance, TokenRMSDistance
-from vit import ViT, ViTConfig
-from vit.pos_enc import RelativeFactorizedPosition
-from vit.tokens import apply_mask, generate_non_overlapping_mask, mask_is_ragged
 from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
 
 
@@ -326,7 +326,9 @@ class JEPA(Task):
         self.teacher_backbone.eval()
 
         # Position encoding / initialization for prediction queries.
-        self.jepa_pos_enc = RelativeFactorizedPosition(2, self.backbone.config.hidden_size, backend=self.backbone.config.backend)
+        self.jepa_pos_enc = RelativeFactorizedPosition(
+            2, self.backbone.config.hidden_size, backend=self.backbone.config.backend
+        )
 
         # JEPA predictor
         self.jepa_predictor = nn.ModuleList(
@@ -373,9 +375,7 @@ class JEPA(Task):
     def forward(self, x: Tensor, context_mask: Tensor, target_mask: Tensor) -> Dict[str, Tensor]:
         # Run encoder on context
         torch.cuda.nvtx.range_push("context_backbone")
-        context, cls_token = cast(
-            Tuple[Tensor, Tensor], self.backbone(x, mask=context_mask)
-        )
+        context, cls_token = cast(Tuple[Tensor, Tensor], self.backbone(x, mask=context_mask))
         torch.cuda.nvtx.range_pop()
 
         # Prepare positional encoding for target queries

@@ -207,6 +207,7 @@ class TestJEPAWithClassification:
     def test_fit_binary(self, binary_task, cifar10_datamodule_binary, trainer):
         trainer.fit(binary_task, datamodule=cifar10_datamodule_binary)
 
+
 @pytest.mark.skip(reason="Broken")
 class TestDistillationWithClassification:
     @pytest.fixture

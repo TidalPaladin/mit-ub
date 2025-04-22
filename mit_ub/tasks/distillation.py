@@ -7,10 +7,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics as tm
+from convnext import ConvNextConfig
 from deep_helpers.helpers import load_checkpoint
 from deep_helpers.structs import State
 from deep_helpers.tasks import Task
 from torch import Tensor
+from vit import ViT, ViTConfig
 
 from ..data.invert import invert_
 from ..data.mixup import mixup
@@ -25,9 +27,6 @@ from ..data.noise import (
     UNIFORM_NOISE_MIN,
     apply_noise_batched,
 )
-from vit import ViT, ViTConfig
-from convnext import ConvNextConfig
-from convnext.block import grid_to_tokens
 
 
 @dataclass
