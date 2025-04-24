@@ -15,9 +15,6 @@ fit:
     num_sanity_val_steps: 2
     check_val_every_n_epoch: 1
 
-    #gradient_clip_val: 1.0
-    #gradient_clip_algorithm: norm
-
     default_root_dir: /mnt/flash/mit-ub
 
     callbacks:
@@ -63,7 +60,8 @@ fit:
         hidden_dropout: 0.1
         drop_path_rate: 0.1
         normalization: "RMSNorm"
-        fuse_qkv_params: true
+        backend: te
+        num_register_tokens: 7
         checkpoint: true
 
       # Configure the probe head
@@ -80,18 +78,8 @@ fit:
       #strict_checkpoint: true
 
       jepa_config:
-        # Reciprocal square root EMA momentum schedule, from `initial_momentum` to `momentum` during warmup,
-        # held at `momentum` during the peak steps, and ending at `initial_momentum` after cooldown.
-        # If `stopped_steps` is set, the schedule will run at `initial_momentum` for the final `stopped_steps` steps.
-        # We match these roughly against the LR schedule as a good initial hyperparameter guess.
-        ema_config: 
-          momentum: 0.98
-          initial_momentum: 1.0
-          warmup_steps: 500
-          peak_steps: 5000
-          cooldown_steps: 2500
-          stopped_steps: 5000
-          timescale: 2000
+        # EMA momentum
+        ema_config: 0.98
 
         # Optional final weight decay for the backbone
         # NOTE: Using a weight decay schedule breaks the infinite LR schedule provided by the reciprocal square root scheduler.
@@ -127,8 +115,6 @@ fit:
 
       # Use SOAP optimizer and a reciplrocal square root learning rate schedule.
       # SOAP is empirically much faster than AdamW for this task.
-      # The reciprocal square root scheduler is an "infinite" schedule in that the schedule can be resumed from
-      # an existing checkpoint.
       optimizer_init:
         class_path: pytorch_optimizer.SOAP
         init_args:
@@ -138,15 +124,17 @@ fit:
           precondition_frequency: 10
       lr_interval: "step"
       lr_scheduler_init:
-        class_path: deep_helpers.optim.ReciprocalSquareRootLR
+        class_path: torch.optim.lr_scheduler.OneCycleLR
         init_args:
-          warmup_steps: 1000
-          cooldown_steps: 7500
+          max_lr: ${fit.model.init_args.optimizer_init.init_args.lr}
           total_steps: ${fit.trainer.max_steps}
-          timescale: 1000
-          initial_lr: 0.0002
-          initial_momentum: 0.95
-          peak_steps: 5000
+          pct_start: 0.1
+          anneal_strategy: cos
+          base_momentum: 0.85
+          max_momentum: 0.95
+          div_factor: 25
+          final_div_factor: 1e4
+          three_phase: true
 
       # Override optimizer parameters for special parameter groups
       # NOTE: For parameters that match multiple groups, they are assigned to the first group that matches.

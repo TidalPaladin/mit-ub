@@ -2018,10 +2018,10 @@ files = [
 
 [[package]]
 name = "vit"
-version = "0.1.dev12"
+version = "0.1.dev14"
 requires_python = ">=3.10"
 git = "https://github.com/TidalPaladin/vit.git"
-revision = "bccb696d6131839cf868119f5f09e8ce507f5bba"
+revision = "a47c1ec89459b31b72a1d2cf2f7468404becc898"
 summary = ""
 groups = ["default"]
 dependencies = [
