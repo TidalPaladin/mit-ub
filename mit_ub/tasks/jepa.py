@@ -183,7 +183,7 @@ class JEPAConfig:
         target_ratio: Ratio of the input to sample as a prediction target.
         scale: Integer scale at which to sample contiguous blocks of context tokens.
             Increasing this ensures more adjacent tokens appear together in the context.
-        ema_config: Configuration for EMA updates.
+        ema_config: Configuration for EMA updates, or a fixed floating point momentum value.
         predictor_depth: Depth of the predictor network.
         mixup_alpha: Alpha parameter for the Beta distribution used to sample the mixup weight.
         mixup_prob: Probability of applying mixup to the input and target.
@@ -211,7 +211,7 @@ class JEPAConfig:
     context_ratio: float = 0.5
     target_ratio: float = 0.25
     scale: int = 4
-    ema_config: EMAConfig = field(default_factory=lambda: EMAConfig())
+    ema_config: float | EMAConfig = field(default_factory=lambda: EMAConfig())
     predictor_depth: int = 4
     mixup_alpha: float = 1.0
     mixup_prob: float = 0.2
@@ -407,6 +407,9 @@ class JEPA(Task):
 
     def get_ema_momentum(self) -> float:
         r"""Get the momentum for the EMA update based on the current step or epoch."""
+        if isinstance(self.jepa_config.ema_config, float):
+            return self.jepa_config.ema_config
+
         if not (max_steps := self.trainer.max_steps):
             raise RuntimeError("Cannot determine EMA momentum without trainer.max_steps")
         if (global_step := self.trainer.global_step) == 0 and not getattr(self.trainer, "fast_dev_run", False):
@@ -429,7 +432,7 @@ class JEPA(Task):
             self.trainer.global_step,
             self.trainer.accumulate_grad_batches,
             self.trainer.world_size,
-            self.jepa_config.ema_config.sync_interval,
+            self.jepa_config.ema_config.sync_interval if isinstance(self.jepa_config.ema_config, EMAConfig) else None,
         )
         torch.cuda.nvtx.range_pop()
 

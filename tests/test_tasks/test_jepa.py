@@ -280,8 +280,10 @@ class TestJEPA:
         assert opt.param_groups[0]["weight_decay"] == 1.0
         assert opt.param_groups[1]["weight_decay"] == 0.5
 
-    def test_fit(self, task, cifar10_datamodule, trainer):
+    @pytest.mark.parametrize("ema_config", [0.98, EMAConfig()])
+    def test_fit(self, task, cifar10_datamodule, trainer, ema_config):
         task.weight_decay_final = 4.0
+        task.jepa_config.ema_config = ema_config
         trainer.fit(task, datamodule=cifar10_datamodule)
 
     @pytest.fixture
