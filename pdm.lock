@@ -315,10 +315,10 @@ files = [
 
 [[package]]
 name = "convnext"
-version = "0.1.dev11"
+version = "0.1.dev12"
 requires_python = ">=3.10"
 git = "https://github.com/TidalPaladin/convnext.git"
-revision = "259cd51f938eb54bb9c361bd9cd2efca34ae13f2"
+revision = "40159fce7005400a0636aec19a8db6db7850a43a"
 summary = ""
 groups = ["default"]
 dependencies = [
@@ -2018,10 +2018,10 @@ files = [
 
 [[package]]
 name = "vit"
-version = "0.1.dev12"
+version = "0.1.dev20"
 requires_python = ">=3.10"
 git = "https://github.com/TidalPaladin/vit.git"
-revision = "bccb696d6131839cf868119f5f09e8ce507f5bba"
+revision = "7cf7e8c0b96bc185280bf2a67cc3bcd8fdf57e4c"
 summary = ""
 groups = ["default"]
 dependencies = [

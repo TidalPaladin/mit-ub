@@ -186,6 +186,7 @@ class ClassificationConfig:
         freeze_backbone: If True, the backbone is frozen during training.
         pool_type: Type of pooling to use.
         label_key: Key in the batch dictionary that contains the label.
+        mlp: If True, use a MLP head instead of a linear head.
         use_noise: If True, apply noise to the input.
         uniform_noise_scale: Scale of the uniform noise to apply to the input.
         multiplicative_noise_scale: Scale of the multiplicative noise to apply to the input.
@@ -209,6 +210,7 @@ class ClassificationConfig:
     # TODO: jsonargparse can't handle the strenum it seems
     pool_type: str | None = None
     label_key: str = "label"
+    mlp: bool = False
 
     # Noise
     use_noise: bool = True
@@ -308,9 +310,14 @@ class ClassificationTask(Task):
                 param.requires_grad = False
 
         # Create main classification head
+        kwargs = {}
+        if self.config.mlp:
+            kwargs["activation"] = "gelu"
         self.classification_head = self.backbone.create_head(
             out_dim=self.config.num_classes if not self.config.is_binary else 1,
             pool_type=self.config.pool_type,
+            mlp=self.config.mlp,
+            **kwargs,
         )
 
         # Create auxiliary classification heads
@@ -319,6 +326,8 @@ class ClassificationTask(Task):
             self.auxiliary_heads[name] = self.backbone.create_head(
                 out_dim=config.num_classes if not config.is_binary else 1,
                 pool_type=config.pool_type,
+                mlp=config.mlp,
+                **kwargs,
             )
 
         self.save_hyperparameters()
@@ -531,9 +540,15 @@ class JEPAWithClassification(JEPAWithProbe):
         )
 
     def create_probe_head(self) -> nn.Module:
+        kwargs = {}
+        if self.classification_config.mlp:
+            kwargs["activation"] = "gelu"
+
         return self.backbone.create_head(
             out_dim=self.classification_config.num_classes if not self.classification_config.is_binary else 1,
             pool_type=self.classification_config.pool_type,
+            mlp=self.classification_config.mlp,
+            **kwargs,
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:
@@ -610,9 +625,15 @@ class DistillationWithClassification(DistillationWithProbe):
         )
 
     def create_probe_head(self) -> nn.Module:
+        kwargs = {}
+        if self.classification_config.mlp:
+            kwargs["activation"] = "gelu"
+
         return self.backbone.create_head(
             out_dim=self.classification_config.num_classes if not self.classification_config.is_binary else 1,
             pool_type=self.classification_config.pool_type,
+            mlp=self.classification_config.mlp,
+            **kwargs,
         )
 
     def create_metrics(self, *args, **kwargs) -> tm.MetricCollection:

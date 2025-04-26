@@ -2,7 +2,7 @@ import math
 import warnings
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Final, Iterator, List, Optional, Tuple, cast
 
@@ -37,7 +37,7 @@ from ..data.noise import (
 from ..data.posterize import posterize_
 from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, TokenSimilarity
 from ..metrics.distance import RMSPairwiseDistance, TokenRMSDistance
-from .student_teacher import EMAConfig, get_ema_momentum, synchronize_teacher, update_teacher
+from .student_teacher import get_ema_momentum, synchronize_teacher, update_teacher
 
 
 MAX_SAVE_IMAGES: Final = 32
@@ -183,7 +183,8 @@ class JEPAConfig:
         target_ratio: Ratio of the input to sample as a prediction target.
         scale: Integer scale at which to sample contiguous blocks of context tokens.
             Increasing this ensures more adjacent tokens appear together in the context.
-        ema_config: Configuration for EMA updates.
+        momentum: The base momentum for the EMA update. Momentum will be linearly annealed
+            from this value to 1.0 over the course of training.
         predictor_depth: Depth of the predictor network.
         mixup_alpha: Alpha parameter for the Beta distribution used to sample the mixup weight.
         mixup_prob: Probability of applying mixup to the input and target.
@@ -211,7 +212,7 @@ class JEPAConfig:
     context_ratio: float = 0.5
     target_ratio: float = 0.25
     scale: int = 4
-    ema_config: EMAConfig = field(default_factory=lambda: EMAConfig())
+    momentum: float = 0.99
     predictor_depth: int = 4
     mixup_alpha: float = 1.0
     mixup_prob: float = 0.2
@@ -332,13 +333,13 @@ class JEPA(Task):
 
         # JEPA predictor
         self.jepa_predictor = nn.ModuleList(
-            [self.backbone.create_decoder_layer(i, drop_path_rate=0.0) for i in range(self.jepa_config.predictor_depth)]
+            [self.backbone.create_decoder_layer(i) for i in range(self.jepa_config.predictor_depth)]
         )
-        self.jepa_head = self.backbone.create_head(self.backbone.config.hidden_size)
+        self.jepa_head = self.backbone.create_head(bias=True)
 
         # SigLIP pooling layer
         rank_zero_info(f"Using SigLIP weight: {self.jepa_config.siglip_weight}")
-        self.siglip_head = self.backbone.create_head(self.backbone.config.hidden_size)
+        self.siglip_head = self.backbone.create_head(bias=True)
         self.siglip_t = nn.Parameter(torch.empty(1))
         self.siglip_b = nn.Parameter(torch.empty(1))
         nn.init.constant_(self.siglip_t, math.log(self.jepa_config.siglip_t))
@@ -409,10 +410,7 @@ class JEPA(Task):
         r"""Get the momentum for the EMA update based on the current step or epoch."""
         if not (max_steps := self.trainer.max_steps):
             raise RuntimeError("Cannot determine EMA momentum without trainer.max_steps")
-        if (global_step := self.trainer.global_step) == 0 and not getattr(self.trainer, "fast_dev_run", False):
-            self.jepa_config.ema_config.validate_schedule(max_steps)
-
-        return get_ema_momentum(max_steps, global_step, self.jepa_config.ema_config)
+        return get_ema_momentum(max_steps, self.trainer.global_step, self.jepa_config.momentum)
 
     @torch.no_grad()
     def update_ema(self, batch_idx: int) -> None:
@@ -429,7 +427,7 @@ class JEPA(Task):
             self.trainer.global_step,
             self.trainer.accumulate_grad_batches,
             self.trainer.world_size,
-            self.jepa_config.ema_config.sync_interval,
+            sync_interval=None,
         )
         torch.cuda.nvtx.range_pop()
 
@@ -563,7 +561,7 @@ class JEPA(Task):
     def compute_jepa_loss(self, pred: Tensor, target: Tensor) -> Tensor:
         assert pred.shape == target.shape, f"Prediction shape {pred.shape} does not match target shape {target.shape}"
         if self.jepa_config.loss_fn == "smooth_l1":
-            loss_jepa = F.smooth_l1_loss(pred, F.layer_norm(target, target.shape[-1:]))
+            loss_jepa = F.smooth_l1_loss(pred, F.rms_norm(target, target.shape[-1:]))
         elif self.jepa_config.loss_fn == "cosine":
             loss_jepa = (1 - F.cosine_similarity(pred, target, dim=-1, eps=1e-5)).mean()
         else:

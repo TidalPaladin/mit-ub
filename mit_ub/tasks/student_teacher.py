@@ -4,7 +4,6 @@ from typing import Any, Final, Iterator, List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from deep_helpers.optim.rsqrt import get_momentum
 from torch import Tensor
 from torch.distributed import ReduceOp, all_reduce
 
@@ -12,66 +11,6 @@ from ..helpers import compile_is_disabled
 
 
 BUCKET_SIZE_MB: Final = 25
-
-
-@dataclass
-class EMAConfig:
-    """
-    Configuration for student-teacher EMA updates.
-
-    Momentum scheduling uses the following strategy:
-        * Begin at `initial_momentum`
-        * Linear warmup over `warmup_steps` to `momentum`
-        * Reciprocal square root increase over `timescale` steps to `momentum`
-        * Linear cooldown over `cooldown_steps` back to `initial_momentum`
-
-    Args:
-        momentum: Momentum value after warmup.
-        warmup_steps: Number of steps over which to warm up the momentum.
-        peak_steps: Number of steps at the peak.
-        cooldown_steps: Number of steps over which to cooldown the momentum.
-        stopped_steps: Number of steps after cooldown at which to hold the momentum at `initial_momentum`.
-        timescale: Time scale for the EMA update.
-        initial_momentum: Initial momentum value.
-        sync_interval: Interval (in steps) at which to synchronize the EMA weights across all processes.
-            This should not be needed since consistent student weights are ensured by the DDP wrapper.
-            However, if for some reason this isn't happening, manual synchronization can be performed
-            at a preset interval by setting this value.
-    """
-
-    momentum: float = 0.98
-    warmup_steps: int = 1000
-    peak_steps: int = 0
-    cooldown_steps: int = 25000
-    stopped_steps: int = 0
-    timescale: int = 10000
-    initial_momentum: float = 1.0
-    sync_interval: int | None = None
-
-    def __post_init__(self) -> None:
-        if not 0.0 < self.momentum < 1.0:
-            raise ValueError("momentum must be in the range [0, 1]")
-        if self.sync_interval is not None and not 0 < self.sync_interval:
-            raise ValueError("sync_interval must be positive")
-        if not 0 <= self.warmup_steps:
-            raise ValueError("warmup_steps must be non-negative")
-        if not 0 <= self.peak_steps:
-            raise ValueError("peak_steps must be non-negative")
-        if not 0 <= self.cooldown_steps:
-            raise ValueError("cooldown_steps must be non-negative")
-        if not 0 <= self.timescale:
-            raise ValueError("timescale must be non-negative")
-        if not 0.0 <= self.initial_momentum <= 1.0:
-            raise ValueError("initial_momentum must be in the range [0, 1]")
-        if not self.initial_momentum >= self.momentum:
-            raise ValueError("initial_momentum must be >= momentum")
-        if not 0 <= self.stopped_steps:
-            raise ValueError("stopped_steps must be non-negative")
-
-    def validate_schedule(self, max_steps: int) -> None:
-        linear_steps = self.warmup_steps + self.cooldown_steps + self.stopped_steps + self.peak_steps
-        if linear_steps > max_steps:
-            raise ValueError(f"Cannot satisfy EMA momentum schedule for {max_steps} steps: {self}")
 
 
 @dataclass(repr=False)
@@ -145,38 +84,19 @@ class ParameterBucket:
 def get_ema_momentum(
     max_steps: int,
     global_step: int,
-    ema_config: EMAConfig,
+    base_momentum: float,
 ) -> float:
     r"""Get the momentum for the EMA update based on the current step.
 
     Args:
         max_steps: Maximum number of steps in the training loop.
         global_step: Current step in the training loop.
-        ema_config: Configuration for the EMA update.
+        base_momentum: The base momentum for the EMA update.
 
     Returns:
         The momentum for the EMA update.
     """
-    # Shortcut in the stopped stage
-    if max_steps - global_step < (stopped_steps := ema_config.stopped_steps):
-        return ema_config.initial_momentum
-
-    # Effective total schedule length accounting for stopped stage duration
-    effective_max_steps = max_steps - stopped_steps
-    assert effective_max_steps > 0, "Effective max steps must be positive"
-
-    momentum = get_momentum(
-        global_step,
-        ema_config.momentum,
-        ema_config.warmup_steps,
-        ema_config.cooldown_steps,
-        effective_max_steps,
-        ema_config.timescale,
-        ema_config.initial_momentum,
-        ema_config.peak_steps,
-    )
-    assert 0 <= momentum <= 1.0
-    return momentum
+    return base_momentum + (1.0 - base_momentum) * global_step / max_steps
 
 
 def _update(
