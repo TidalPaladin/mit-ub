@@ -35,6 +35,7 @@ from ..data.noise import (
     apply_noise_batched,
 )
 from ..data.posterize import posterize_
+from ..helpers import compile_is_disabled
 from ..metrics.cosine_sim import AveragePairwiseCosineSimilarity, TokenSimilarity
 from ..metrics.distance import RMSPairwiseDistance, TokenRMSDistance
 from .student_teacher import get_ema_momentum, synchronize_teacher, update_teacher
@@ -99,6 +100,7 @@ def ring_exchange_all(tensor: Tensor, rank: int, world_size: int) -> Iterator[Te
         yield tensor
 
 
+@torch.compile(fullgraph=True, mode="reduce-overhead", disable=compile_is_disabled())
 def compute_siglip_logits(x1: Tensor, x2: Tensor, t: Tensor, b: Tensor) -> Tensor:
     r"""Compute the logits for the SigLIP loss.
 
@@ -119,6 +121,7 @@ def compute_siglip_logits(x1: Tensor, x2: Tensor, t: Tensor, b: Tensor) -> Tenso
     return torch.matmul(x1, x2) * t.exp() + b
 
 
+@torch.compile(disable=compile_is_disabled())
 def compute_siglip_loss(
     x1: Tensor,
     x2: Tensor,

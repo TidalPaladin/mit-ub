@@ -13,7 +13,7 @@ from torch.multiprocessing import spawn  # type: ignore
 from torch.testing import assert_close
 from torchvision.ops import sigmoid_focal_loss
 
-from mit_ub.tasks.jepa import JEPA, EMAConfig, JEPAConfig, compute_siglip_loss, ring_exchange_all
+from mit_ub.tasks.jepa import JEPA, JEPAConfig, compute_siglip_loss, ring_exchange_all
 
 
 def _run_exchange(rank: int, world_size: int):
@@ -209,16 +209,6 @@ class TestJEPA:
     def test_ema_momentum_step(
         self, mocker, vit_dummy, optimizer_init, max_steps, current_step, stopped_steps, expected
     ):
-        momentum = 0.98
-        initial_momentum = 1.0
-        ema_config = EMAConfig(
-            momentum=momentum,
-            initial_momentum=initial_momentum,
-            warmup_steps=100,
-            stopped_steps=stopped_steps,
-            cooldown_steps=200,
-            timescale=200,
-        )
         config = JEPAConfig(ema_config=ema_config)
         task = JEPA(vit_dummy, optimizer_init=optimizer_init, jepa_config=config)
         trainer = mocker.MagicMock(spec_set=pl.Trainer)
