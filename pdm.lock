@@ -2056,10 +2056,10 @@ files = [
 
 [[package]]
 name = "vit"
-version = "0.1.dev20"
+version = "0.1.dev21"
 requires_python = ">=3.10"
 git = "https://github.com/TidalPaladin/vit.git"
-revision = "7cf7e8c0b96bc185280bf2a67cc3bcd8fdf57e4c"
+revision = "bddb7a8b32ba9df8f2e361ed91d769c5f50abcd8"
 summary = ""
 groups = ["default"]
 dependencies = [
