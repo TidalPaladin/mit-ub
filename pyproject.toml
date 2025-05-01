@@ -27,9 +27,7 @@ train = [
   "pandas",
   "pytorch-lightning>=2.4",
   "torchmetrics",
-  "jsonargparse[signatures]",
   "deep-helpers @ git+https://github.com/TidalPaladin/deep-helpers.git",
-  "pytorch-optimizer",
 ]
 [tool.autoflake]
 remove-all-unused-imports = true

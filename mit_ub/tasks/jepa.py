@@ -333,6 +333,7 @@ class JEPA(Task):
         self.jepa_pos_enc = RelativeFactorizedPosition(
             2, self.backbone.config.hidden_size, backend=self.backbone.config.backend
         )
+        self.jepa_pos_enc_proj = self.backbone.create_mlp(bias=True)
 
         # JEPA predictor
         self.jepa_predictor = nn.ModuleList(
@@ -384,7 +385,7 @@ class JEPA(Task):
 
         # Prepare positional encoding for target queries
         tokenized_size = self.backbone.stem.tokenized_size(cast(Any, x.shape[2:]))
-        query = self.jepa_pos_enc(tokenized_size).expand(target_mask.shape[0], -1, -1)
+        query = self.jepa_pos_enc_proj(self.jepa_pos_enc(tokenized_size)).expand(target_mask.shape[0], -1, -1)
         query = apply_mask(target_mask, query, fill_value=None)
 
         # Run query and context through predictor

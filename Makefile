@@ -26,7 +26,7 @@ clean: ## remove cache files
 	find $(CLEAN_DIRS) -name '*.orig' -type f -delete
 
 clean-env: ## remove the virtual environment directory
-	pdm venv remove $(PROJECT)
+	pdm venv remove in-project
 
 
 deploy: ## installs from lockfile
